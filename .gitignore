@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Local Petrel/RESQML data can be tens of GB.
+RESQML/
+*.epc
+*.h5
+
+# Extraction outputs and local logs.
+outputs/
+*.csv
+*.xlsx
+*.parquet
+extraction_log.txt

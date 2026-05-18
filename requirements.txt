@@ -1,0 +1,9 @@
+PySide6
+resqpy
+h5py
+numpy
+pandas
+openpyxl
+pyarrow
+shapely
+pytest
