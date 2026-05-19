@@ -7,7 +7,7 @@ from typing import Callable
 
 import pandas as pd
 
-from core.exporter import StreamingCsvExporter, StreamingXlsxExporter
+from core.exporter import INT_NODATA_VALUES, StreamingCsvExporter, StreamingXlsxExporter
 from core.grid_indexer import FastGridIndexer
 from core.resqml_reader import PropertyInfo, ResqmlReader
 
@@ -15,6 +15,7 @@ from core.resqml_reader import PropertyInfo, ResqmlReader
 ProgressCallback = Callable[[int, int], None]
 LogCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
+PERM_TO_MD_MULTIPLIER = 1_013_250_000_000_000
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,12 @@ class PropertyExtractor:
             raise NotImplementedError("Only fast sampling mode is implemented in MVP.")
 
         self._log(log_callback, f"Selected properties: {', '.join(prop.title for prop in selected_properties)}")
+        perm_properties = [prop.title for prop in selected_properties if is_perm_property(prop)]
+        if perm_properties:
+            self._log(
+                log_callback,
+                f"Perm conversion to mD: {', '.join(perm_properties)} x {PERM_TO_MD_MULTIPLIER}",
+            )
         self._log(log_callback, f"Writing {output_label}: {output_path}")
 
         with exporter_cls(output_path, columns) as exporter:
@@ -160,7 +167,8 @@ class PropertyExtractor:
                     }
                     for prop in selected_properties:
                         value = property_columns[prop.title][k]
-                        row[prop.title] = value.item() if hasattr(value, "item") else value
+                        value = value.item() if hasattr(value, "item") else value
+                        row[prop.title] = transform_property_value(prop, value)
                     rows.append(row)
 
                 exporter.write_rows(rows)
@@ -252,3 +260,17 @@ def write_extraction_log(
     ]
     lines.extend(f"- {warning}" for warning in stats.warnings)
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def transform_property_value(prop: PropertyInfo, value: object) -> object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in INT_NODATA_VALUES:
+        return ""
+    if is_perm_property(prop) and isinstance(value, (int, float)):
+        return value * PERM_TO_MD_MULTIPLIER
+    return value
+
+
+def is_perm_property(prop: PropertyInfo) -> bool:
+    return "perm" in prop.title.lower()

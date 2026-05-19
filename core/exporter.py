@@ -13,6 +13,7 @@ import pandas as pd
 
 
 EXCEL_ROW_LIMIT = 1_048_576
+INT_NODATA_VALUES = {2_147_483_647, -2_147_483_648}
 
 
 def export_csv(df: pd.DataFrame, path: str | Path) -> None:
@@ -42,11 +43,11 @@ class StreamingCsvExporter:
 
     def write_rows(self, rows: Iterable[dict]) -> None:
         for row in rows:
-            self._writer.writerow(row)
+            self._writer.writerow({key: _export_value(value) for key, value in row.items()})
             self.rows_written += 1
 
     def write_row(self, row: dict) -> None:
-        self._writer.writerow(row)
+        self._writer.writerow({key: _export_value(value) for key, value in row.items()})
         self.rows_written += 1
 
     def close(self) -> None:
@@ -151,6 +152,7 @@ def default_extraction_output_path(sleeves_path: str | Path) -> Path:
 
 def _cell_xml(row: int, col: int, value: object, shared_string_index=None) -> str:
     ref = f"{_excel_column_name(col)}{row}"
+    value = _export_value(value)
     if value is None or value == "":
         return f'<c r="{ref}"/>'
     if isinstance(value, bool):
@@ -166,6 +168,14 @@ def _cell_xml(row: int, col: int, value: object, shared_string_index=None) -> st
         return f'<c r="{ref}" t="s"><v>{index}</v></c>'
     text = escape(str(value), quote=False)
     return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+
+
+def _export_value(value: object) -> object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in INT_NODATA_VALUES:
+        return ""
+    return value
 
 
 def _excel_column_name(index: int) -> str:

@@ -57,3 +57,25 @@ def test_streaming_xlsx_exporter_writes_nan_as_blank_cell(tmp_path) -> None:
         sheet = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
     assert ">nan<" not in sheet
     assert '<c r="A2"/>' in sheet
+
+
+def test_streaming_xlsx_exporter_writes_int_nodata_as_blank_cell(tmp_path) -> None:
+    path = tmp_path / "nodata.xlsx"
+    with StreamingXlsxExporter(path, ["A", "B"]) as exporter:
+        exporter.write_row({"A": 2147483647, "B": -2147483648})
+    with ZipFile(path) as package:
+        sheet = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert "2147483647" not in sheet
+    assert "-2147483648" not in sheet
+    assert '<c r="A2"/>' in sheet
+    assert '<c r="B2"/>' in sheet
+
+
+def test_streaming_csv_exporter_writes_int_nodata_as_blank(tmp_path) -> None:
+    path = tmp_path / "nodata.csv"
+    with StreamingCsvExporter(path, ["A", "B", "C"]) as exporter:
+        exporter.write_row({"A": 2147483647, "B": -2147483648, "C": 7})
+    text = path.read_text(encoding="utf-8-sig")
+    assert "2147483647" not in text
+    assert "-2147483648" not in text
+    assert ",,7" in text

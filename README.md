@@ -53,6 +53,10 @@ The extractor reads vertical property slices as `dataset[:, j, i]` for the
 current `NK x NJ x NI` HDF5 layout, then streams rows to an XLSX file generated
 next to the sleeves file.
 
+Properties with `Perm` in the title are multiplied by `1013250000000000` during
+export to convert them to mD. Integer NoData markers (`2147483647`,
+`-2147483648`) are exported as blank cells.
+
 ## Run GUI
 
 ```powershell
@@ -63,8 +67,11 @@ GUI MVP workflow:
 
 1. Open `Model`, select `.epc`, click `Load model`.
 2. Open `Sleeves`, select CSV/XLSX coordinates.
-3. Open `Properties`, check 1-3 properties.
+3. Open `Properties`, check 1-3 properties. The GUI auto-checks common properties
+   (`NTG`, `Layers`, `PORO`, `PERM`) on first use and restores the last selection after that.
 4. Open `Run` and click `Run extraction`; the output XLSX path is generated next to the sleeves file.
+
+The GUI also remembers the last EPC path and sleeves table path between launches.
 
 ## Notes
 

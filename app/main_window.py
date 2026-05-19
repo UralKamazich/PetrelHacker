@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QSettings, QThread
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -28,14 +28,19 @@ from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
 from core.exporter import default_extraction_output_path
+from core.property_presets import normalize_property_title, should_select_property
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
 from core.xlsx_preview import read_xlsx_preview
 
 
 class MainWindow(QMainWindow):
+    SETTINGS_ORG = "PetrelHacker"
+    SETTINGS_APP = "SleeveExtractor"
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PetrelHacker - RESQML Sleeve Property Extractor")
+        self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self._load_thread: QThread | None = None
         self._load_worker: LoadModelWorker | None = None
         self._extraction_thread: QThread | None = None
@@ -81,6 +86,7 @@ class MainWindow(QMainWindow):
         self.output_path_edit.textChanged.connect(self._update_run_enabled)
         self.run_button.clicked.connect(self._run_extraction)
         self.cancel_button.clicked.connect(self._cancel_extraction)
+        self._restore_last_paths()
 
     def _model_tab(self) -> QWidget:
         tab = QWidget()
@@ -164,6 +170,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Select RESQML EPC", "", "RESQML EPC (*.epc);;All files (*)")
         if path:
             self.epc_path_edit.setText(path)
+            self._save_last_paths()
 
     def _browse_sleeves(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -175,6 +182,7 @@ class MainWindow(QMainWindow):
         if path:
             self.sleeves_path_edit.setText(path)
             self._load_sleeves_preview(path)
+            self._save_last_paths()
 
     def _load_model(self) -> None:
         epc_path = self.epc_path_edit.text().strip()
@@ -182,6 +190,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing EPC", "Select an EPC file first.")
             return
 
+        self._save_last_paths()
         self.load_button.setEnabled(False)
         self.progress_bar.setRange(0, 0)
         self.log_panel.append_message("Starting model load...")
@@ -240,10 +249,15 @@ class MainWindow(QMainWindow):
         self.grids_table.resizeColumnsToContents()
 
     def _fill_properties(self, result: ModelLoadResult) -> None:
+        saved_uuids = self._saved_property_uuids()
+        saved_titles = self._saved_property_titles()
+        use_defaults = not saved_uuids and not saved_titles
         self.properties_table.setRowCount(len(result.properties))
         for row, prop in enumerate(result.properties):
             check = QCheckBox()
+            check.setChecked(should_select_property(prop, saved_uuids, saved_titles, use_defaults))
             check.stateChanged.connect(self._update_run_enabled)
+            check.stateChanged.connect(self._save_selected_properties)
             self.properties_table.setCellWidget(row, 0, check)
             values = [
                 prop.title,
@@ -256,6 +270,7 @@ class MainWindow(QMainWindow):
             for offset, value in enumerate(values, start=1):
                 self.properties_table.setItem(row, offset, QTableWidgetItem(value))
         self.properties_table.resizeColumnsToContents()
+        self._update_run_enabled()
 
     def _load_sleeves_preview(self, path: str) -> None:
         try:
@@ -282,6 +297,7 @@ class MainWindow(QMainWindow):
         self.log_panel.append_message(status)
         self.output_path_edit.setText(str(default_extraction_output_path(path)))
         self._sleeves_loaded = True
+        self._save_last_paths()
         self._update_run_enabled()
 
     def _set_property_checks(self, checked: bool) -> None:
@@ -289,6 +305,7 @@ class MainWindow(QMainWindow):
             widget = self.properties_table.cellWidget(row, 0)
             if isinstance(widget, QCheckBox):
                 widget.setChecked(checked)
+        self._save_selected_properties()
         self._update_run_enabled()
 
     def _selected_property_uuids(self) -> list[str]:
@@ -299,6 +316,47 @@ class MainWindow(QMainWindow):
             if isinstance(widget, QCheckBox) and widget.isChecked() and uuid_item is not None:
                 uuids.append(uuid_item.text())
         return uuids
+
+    def _selected_property_titles(self) -> list[str]:
+        titles: list[str] = []
+        for row in range(self.properties_table.rowCount()):
+            widget = self.properties_table.cellWidget(row, 0)
+            title_item = self.properties_table.item(row, 1)
+            if isinstance(widget, QCheckBox) and widget.isChecked() and title_item is not None:
+                titles.append(title_item.text())
+        return titles
+
+    def _saved_property_uuids(self) -> set[str]:
+        return set(self._settings_list("properties/selected_uuids"))
+
+    def _saved_property_titles(self) -> set[str]:
+        return {normalize_property_title(value) for value in self._settings_list("properties/selected_titles")}
+
+    def _settings_list(self, key: str) -> list[str]:
+        value = self.settings.value(key, [], type=list)
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value if str(item)]
+
+    def _save_selected_properties(self, *args) -> None:
+        self.settings.setValue("properties/selected_uuids", self._selected_property_uuids())
+        self.settings.setValue("properties/selected_titles", self._selected_property_titles())
+
+    def _restore_last_paths(self) -> None:
+        epc_path = self.settings.value("paths/epc", "", type=str)
+        sleeves_path = self.settings.value("paths/sleeves", "", type=str)
+        if epc_path:
+            self.epc_path_edit.setText(epc_path)
+        if sleeves_path:
+            self.sleeves_path_edit.setText(sleeves_path)
+            if Path(sleeves_path).exists():
+                self._load_sleeves_preview(sleeves_path)
+
+    def _save_last_paths(self) -> None:
+        self.settings.setValue("paths/epc", self.epc_path_edit.text().strip())
+        self.settings.setValue("paths/sleeves", self.sleeves_path_edit.text().strip())
 
     def _update_run_enabled(self, *args) -> None:
         can_run = (
@@ -337,6 +395,8 @@ class MainWindow(QMainWindow):
             selected_property_uuids=selected_uuids,
             skip_inactive=self.skip_inactive_checkbox.isChecked(),
         )
+        self._save_last_paths()
+        self._save_selected_properties()
 
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)

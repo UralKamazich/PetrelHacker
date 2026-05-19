@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
@@ -129,11 +130,14 @@ def _read_simple_xlsx(path: Path) -> pd.DataFrame:
     for row in sheet.findall(".//x:sheetData/x:row", ns):
         values: list[object] = []
         for cell in row.findall("x:c", ns):
-            value_node = cell.find("x:v", ns)
-            value = "" if value_node is None else value_node.text or ""
-            if cell.attrib.get("t") == "s" and value != "":
-                value = shared_strings[int(value)]
-            values.append(_coerce_cell_value(value))
+            cell_index = _cell_column_index(cell.attrib.get("r", ""))
+            value = _cell_value(cell, shared_strings, ns)
+            if cell_index is None:
+                values.append(_coerce_cell_value(value))
+                continue
+            while len(values) <= cell_index:
+                values.append("")
+            values[cell_index] = _coerce_cell_value(value)
         if any(value != "" for value in values):
             rows.append(values)
 
@@ -141,8 +145,28 @@ def _read_simple_xlsx(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
     header = [str(value) for value in rows[0]]
     width = len(header)
-    data = [row + [""] * (width - len(row)) for row in rows[1:]]
+    data = [(row + [""] * width)[:width] for row in rows[1:]]
     return pd.DataFrame(data, columns=header)
+
+
+def _cell_value(cell: ET.Element, shared_strings: list[str], ns: dict[str, str]) -> str:
+    if cell.attrib.get("t") == "inlineStr":
+        return "".join(node.text or "" for node in cell.findall(".//x:t", ns))
+    value_node = cell.find("x:v", ns)
+    value = "" if value_node is None else value_node.text or ""
+    if cell.attrib.get("t") == "s" and value != "":
+        value = shared_strings[int(value)]
+    return value
+
+
+def _cell_column_index(cell_ref: str) -> int | None:
+    match = re.match(r"([A-Z]+)", cell_ref.upper())
+    if not match:
+        return None
+    index = 0
+    for char in match.group(1):
+        index = index * 26 + ord(char) - ord("A") + 1
+    return index - 1
 
 
 def _read_shared_strings(workbook: ZipFile, ns: dict[str, str]) -> list[str]:
