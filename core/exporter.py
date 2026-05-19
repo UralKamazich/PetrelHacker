@@ -173,7 +173,7 @@ def _cell_xml(row: int, col: int, value: object, shared_string_index=None) -> st
 def _export_value(value: object) -> object:
     if isinstance(value, bool):
         return value
-    if isinstance(value, int) and value in INT_NODATA_VALUES:
+    if isinstance(value, (int, float)) and value in INT_NODATA_VALUES:
         return ""
     return value
 

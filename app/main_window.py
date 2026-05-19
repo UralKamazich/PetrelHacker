@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
+from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
 from core.property_presets import normalize_property_title, should_select_property
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
@@ -432,7 +433,11 @@ class MainWindow(QMainWindow):
             f"Extraction finished. Rows: {result.stats.extracted_rows}. Output: {result.output_path}"
         )
         self.log_panel.append_message(f"Log: {result.log_path}")
+        self.output_path_edit.setText(result.output_path)
         self._load_result_preview(result)
+        csv_warnings = [warning for warning in result.stats.warnings if "Saved CSV instead" in warning]
+        if csv_warnings:
+            QMessageBox.information(self, "Saved CSV", csv_warnings[-1])
         self._update_run_enabled()
 
     def _on_extraction_failed(self, message: str, details: str) -> None:
@@ -464,7 +469,10 @@ class MainWindow(QMainWindow):
             )
         )
         try:
-            preview = read_xlsx_preview(result.output_path, max_rows=1000)
+            if Path(result.output_path).suffix.lower() == ".csv":
+                preview = read_csv_preview(result.output_path, max_rows=1000)
+            else:
+                preview = read_xlsx_preview(result.output_path, max_rows=1000)
         except Exception as exc:  # noqa: BLE001
             self.log_panel.append_message(f"Preview load failed: {exc}")
             return

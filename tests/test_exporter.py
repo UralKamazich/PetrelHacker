@@ -62,7 +62,7 @@ def test_streaming_xlsx_exporter_writes_nan_as_blank_cell(tmp_path) -> None:
 def test_streaming_xlsx_exporter_writes_int_nodata_as_blank_cell(tmp_path) -> None:
     path = tmp_path / "nodata.xlsx"
     with StreamingXlsxExporter(path, ["A", "B"]) as exporter:
-        exporter.write_row({"A": 2147483647, "B": -2147483648})
+        exporter.write_row({"A": 2147483647.0, "B": -2147483648})
     with ZipFile(path) as package:
         sheet = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
     assert "2147483647" not in sheet

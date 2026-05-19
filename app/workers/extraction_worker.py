@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import importlib.util
+import errno
 import sys
 import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from core.grid_indexer import FastGridIndexer
+from core.output_planner import choose_output_plan
 from core.property_extractor import ExtractionSettings, ExtractionStats, PropertyExtractor, write_extraction_log
 from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
@@ -70,24 +72,34 @@ class ExtractionWorker(QObject):
                 selected_property_uuids=self.request.selected_property_uuids,
             )
             extractor = PropertyExtractor(reader, indexer, settings)
+            output_plan = choose_output_plan(
+                self.request.output_path,
+                sleeve_count=len(sleeves),
+                nk=reader.get_grid_shape()[2],
+            )
+            if output_plan.warning:
+                self.log.emit(f"Warning: {output_plan.warning}")
 
             def progress_callback(current: int, total: int) -> None:
                 value = int((current / total) * 100) if total else 0
                 self.progress.emit(value)
 
-            stats = extractor.extract_to_xlsx(
+            extract = extractor.extract_to_csv if output_plan.format == "CSV" else extractor.extract_to_xlsx
+            stats = extract(
                 sleeves,
-                output_path=self.request.output_path,
+                output_path=output_plan.path,
                 progress_callback=progress_callback,
                 log_callback=self.log.emit,
                 cancel_callback=lambda: self._cancel_requested,
             )
+            if output_plan.warning:
+                stats.warnings.append(output_plan.warning)
             selected_titles = [
                 prop.title
                 for prop in reader.list_properties()
                 if prop.uuid in set(self.request.selected_property_uuids)
             ]
-            log_path = Path(self.request.output_path).with_name("extraction_log.txt")
+            log_path = output_plan.path.with_name("extraction_log.txt")
             write_extraction_log(
                 log_path,
                 epc_path=self.request.epc_path,
@@ -97,11 +109,18 @@ class ExtractionWorker(QObject):
                 grid_shape=reader.get_grid_shape(),
                 selected_properties=selected_titles,
                 sleeves_path=self.request.sleeves_path,
-                output_path=self.request.output_path,
+                output_path=output_plan.path,
                 settings=settings,
                 stats=stats,
             )
-            self.finished.emit(ExtractionResult(str(self.request.output_path), str(log_path), stats))
+            self.finished.emit(ExtractionResult(str(output_plan.path), str(log_path), stats))
+        except PermissionError as exc:
+            self.failed.emit(_permission_error_message(exc), traceback.format_exc())
+        except OSError as exc:
+            if exc.errno == errno.EACCES:
+                self.failed.emit(_permission_error_message(exc), traceback.format_exc())
+                return
+            self.failed.emit(str(exc), traceback.format_exc())
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc), traceback.format_exc())
 
@@ -119,3 +138,10 @@ class ExtractionWorker(QObject):
                 + ". Install them for this interpreter with: "
                 + f'"{sys.executable}" -m pip install -r requirements.txt'
             )
+
+
+def _permission_error_message(exc: OSError) -> str:
+    path = getattr(exc, "filename", None)
+    if path:
+        return f"Cannot write output file. Close it in Excel or choose another path: {path}"
+    return "Cannot write output file. Close it in Excel or choose another output path."

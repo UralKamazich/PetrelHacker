@@ -57,6 +57,9 @@ Properties with `Perm` in the title are multiplied by `1013250000000000` during
 export to convert them to mD. Integer NoData markers (`2147483647`,
 `-2147483648`) are exported as blank cells.
 
+If the estimated extraction size exceeds the Excel row limit, the GUI writes a
+CSV file instead and notifies the user.
+
 ## Run GUI
 
 ```powershell
