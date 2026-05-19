@@ -7,13 +7,19 @@ from xml.etree import ElementTree as ET
 import pandas as pd
 
 
-REQUIRED_COLUMNS = ("Sleeve_ID", "X", "Y")
+REQUIRED_COLUMNS = ("Well", "Port", "X", "Y")
 COLUMN_ALIASES = {
     "sleeve_id": "Sleeve_ID",
     "sleeves_id": "Sleeve_ID",
     "sleeveid": "Sleeve_ID",
     "sleevesid": "Sleeve_ID",
     "id": "Sleeve_ID",
+    "well": "Well",
+    "well_name": "Well",
+    "skv": "Well",
+    "port": "Port",
+    "stage": "Port",
+    "port_id": "Port",
     "x": "X",
     "coord_x": "X",
     "coordinate_x": "X",
@@ -56,20 +62,28 @@ def normalize_sleeves_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_sleeves_table(
     df: pd.DataFrame,
-    sleeve_col: str = "Sleeve_ID",
+    well_col: str = "Well",
+    port_col: str = "Port",
     x_col: str = "X",
     y_col: str = "Y",
 ) -> list[str]:
     warnings: list[str] = []
-    missing = [column for column in (sleeve_col, x_col, y_col) if column not in df.columns]
+    has_well_port = well_col in df.columns and port_col in df.columns
+    has_legacy_id = "Sleeve_ID" in df.columns
+    identity_columns = (well_col, port_col) if has_well_port else ("Sleeve_ID",)
+    missing_identity = [] if has_well_port or has_legacy_id else [
+        column for column in (well_col, port_col) if column not in df.columns
+    ]
+    missing = missing_identity + [column for column in (x_col, y_col) if column not in df.columns]
     if missing:
         return [f"Missing required column: {column}" for column in missing]
 
-    if df[sleeve_col].isna().any():
-        warnings.append(f"Column {sleeve_col} contains empty identifiers.")
-    duplicated = df[sleeve_col].dropna().duplicated()
+    for column in identity_columns:
+        if df[column].isna().any():
+            warnings.append(f"Column {column} contains empty identifiers.")
+    duplicated = df[list(identity_columns)].dropna().duplicated()
     if duplicated.any():
-        warnings.append(f"Column {sleeve_col} contains {int(duplicated.sum())} duplicate identifiers.")
+        warnings.append(f"Identity columns {', '.join(identity_columns)} contain {int(duplicated.sum())} duplicates.")
 
     for column in (x_col, y_col):
         numeric = pd.to_numeric(df[column], errors="coerce")

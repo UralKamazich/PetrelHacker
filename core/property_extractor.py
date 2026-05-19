@@ -23,7 +23,8 @@ class ExtractionSettings:
     skip_inactive: bool = True
     batch_size: int = 500
     selected_property_uuids: list[str] = field(default_factory=list)
-    sleeve_id_col: str = "Sleeve_ID"
+    well_col: str = "Well"
+    port_col: str = "Port"
     x_col: str = "X"
     y_col: str = "Y"
 
@@ -113,14 +114,17 @@ class PropertyExtractor:
                     stats.warnings.append("Extraction cancelled by user.")
                     break
 
-                sleeve_id = getattr(sleeve, self.settings.sleeve_id_col)
+                well = self._row_value(sleeve, self.settings.well_col)
+                port = self._row_value(sleeve, self.settings.port_col)
+                legacy_id = self._row_value(sleeve, "Sleeve_ID")
+                display_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
                 x = float(getattr(sleeve, self.settings.x_col))
                 y = float(getattr(sleeve, self.settings.y_col))
                 match = self.indexer.find_column(x, y)
                 if match is None:
                     stats.sleeves_outside_grid += 1
-                    stats.warnings.append(f"Sleeve {sleeve_id} is outside grid footprint.")
-                    self._log(log_callback, f"Sleeve outside grid: {sleeve_id}")
+                    stats.warnings.append(f"Sleeve {display_id} is outside grid footprint.")
+                    self._log(log_callback, f"Sleeve outside grid: {display_id}")
                     self._progress(progress_callback, sleeve_index, stats.sleeves_total)
                     continue
 
@@ -130,6 +134,7 @@ class PropertyExtractor:
                     for prop in selected_properties
                 }
                 active_column = self.reader.get_cell_active_column(match.i, match.j)
+                geometry_column = self.reader.get_cell_geometry_column(match.i, match.j)
                 rows = []
                 for i, j, k in self.indexer.vertical_cells(x, y):
                     is_active = True if active_column is None else bool(active_column[k])
@@ -138,13 +143,20 @@ class PropertyExtractor:
                         continue
 
                     row = {
-                        "Sleeve_ID": sleeve_id,
+                        "Well": well,
+                        "Port": port,
                         "X": x,
                         "Y": y,
                         "I": i + 1,
                         "J": j + 1,
                         "K": k + 1,
                         "IsActive": is_active,
+                        "TVD_top": geometry_column["TVD_top"][k],
+                        "TVD_base": geometry_column["TVD_base"][k],
+                        "CellHeight": geometry_column["CellHeight"][k],
+                        "CellSizeI": geometry_column["CellSizeI"][k],
+                        "CellSizeJ": geometry_column["CellSizeJ"][k],
+                        "CellAreaXY": geometry_column["CellAreaXY"][k],
                     }
                     for prop in selected_properties:
                         value = property_columns[prop.title][k]
@@ -153,7 +165,7 @@ class PropertyExtractor:
 
                 exporter.write_rows(rows)
                 stats.extracted_rows += len(rows)
-                self._log(log_callback, f"{sleeve_id}: wrote {len(rows)} rows")
+                self._log(log_callback, f"{display_id}: wrote {len(rows)} rows")
                 self._progress(progress_callback, sleeve_index, stats.sleeves_total)
 
         stats.finished = datetime.now()
@@ -168,7 +180,26 @@ class PropertyExtractor:
 
     @staticmethod
     def _output_columns(properties: list[PropertyInfo]) -> list[str]:
-        return ["Sleeve_ID", "X", "Y", "I", "J", "K", "IsActive"] + [prop.title for prop in properties]
+        return [
+            "Well",
+            "Port",
+            "X",
+            "Y",
+            "I",
+            "J",
+            "K",
+            "IsActive",
+            "TVD_top",
+            "TVD_base",
+            "CellHeight",
+            "CellSizeI",
+            "CellSizeJ",
+            "CellAreaXY",
+        ] + [prop.title for prop in properties]
+
+    @staticmethod
+    def _row_value(row, field: str):
+        return getattr(row, field, "")
 
     @staticmethod
     def _log(callback: LogCallback | None, message: str) -> None:
@@ -203,7 +234,8 @@ def write_extraction_log(
         f"Grid shape NI/NJ/NK: {grid_shape[0]}/{grid_shape[1]}/{grid_shape[2]}",
         f"Selected properties: {', '.join(selected_properties)}",
         f"Input sleeves file: {sleeves_path}",
-        f"Sleeve ID column: {settings.sleeve_id_col}",
+        f"Well column: {settings.well_col}",
+        f"Port column: {settings.port_col}",
         f"X column: {settings.x_col}",
         f"Y column: {settings.y_col}",
         f"Sampling mode: {settings.sampling_mode}",

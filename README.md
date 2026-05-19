@@ -71,5 +71,5 @@ GUI MVP workflow:
 The next implementation step is the fast extraction path:
 
 1. Load sleeves CSV/XLSX.
-2. Map `Sleeve_ID`, `X`, `Y`.
+2. Map `Well`, `Port`, `X`, `Y`.
 3. Stream selected property values to XLSX and write `extraction_log.txt`.

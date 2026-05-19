@@ -293,6 +293,79 @@ class ResqmlReader:
                 return None
             return h5[path][:, j, i].astype(bool)
 
+    def get_cell_geometry_column(self, i: int, j: int) -> dict[str, list[float]]:
+        if self._selected_grid_uuid is None:
+            raise ValueError("No grid selected")
+        if self.h5_path is None:
+            raise ValueError("H5 file was not found next to EPC.")
+
+        try:
+            import h5py  # type: ignore[import-not-found]
+            import numpy as np
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("h5py and numpy are required for geometry reads.") from exc
+
+        ni, nj, nk = self.get_grid_shape()
+        if ni is None or nj is None or nk is None:
+            raise ValueError("Selected grid has incomplete NI/NJ/NK metadata.")
+        if not (0 <= i < ni and 0 <= j < nj):
+            raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
+
+        points_path = self._points_hdf_path()
+        base_pillar_count = (ni + 1) * (nj + 1)
+        pillar_indices = [
+            j * (ni + 1) + i,
+            j * (ni + 1) + i + 1,
+            (j + 1) * (ni + 1) + i,
+            (j + 1) * (ni + 1) + i + 1,
+        ]
+
+        with h5py.File(self.h5_path, "r") as h5:
+            if points_path not in h5:
+                raise ValueError(f"Points dataset path not found in H5: {points_path}")
+            dataset = h5[points_path]
+            if len(dataset.shape) != 3 or dataset.shape[0] < nk + 1 or dataset.shape[1] < base_pillar_count:
+                raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
+            points = np.asarray(dataset[:, pillar_indices, :], dtype=float)
+
+        interface_z = points[:, :, 2].mean(axis=1)
+        interface_depth = _z_to_depth(interface_z)
+        top_depth = np.minimum(interface_depth[:-1], interface_depth[1:])
+        base_depth = np.maximum(interface_depth[:-1], interface_depth[1:])
+        height = np.abs(interface_depth[1:] - interface_depth[:-1])
+
+        size_i: list[float] = []
+        size_j: list[float] = []
+        area_xy: list[float] = []
+        for k in range(nk):
+            corners = points[k : k + 2, :, :2]
+            top = corners[0]
+            base = corners[1]
+            i_edges = [
+                _xy_distance(top[0], top[1]),
+                _xy_distance(top[2], top[3]),
+                _xy_distance(base[0], base[1]),
+                _xy_distance(base[2], base[3]),
+            ]
+            j_edges = [
+                _xy_distance(top[0], top[2]),
+                _xy_distance(top[1], top[3]),
+                _xy_distance(base[0], base[2]),
+                _xy_distance(base[1], base[3]),
+            ]
+            size_i.append(float(np.mean(i_edges)))
+            size_j.append(float(np.mean(j_edges)))
+            area_xy.append(float(_polygon_area_xy(top[[0, 1, 3, 2]])))
+
+        return {
+            "TVD_top": [float(value) for value in top_depth],
+            "TVD_base": [float(value) for value in base_depth],
+            "CellHeight": [float(value) for value in height],
+            "CellSizeI": size_i,
+            "CellSizeJ": size_j,
+            "CellAreaXY": area_xy,
+        }
+
     def _property_by_uuid(self, property_uuid: str) -> PropertyInfo:
         normalized = property_uuid.lower()
         for prop in self._properties:
@@ -309,6 +382,16 @@ class ResqmlReader:
                     if path.endswith("/CellGeometryIsDefined"):
                         return path
         return None
+
+    def _points_hdf_path(self) -> str:
+        if self._selected_grid_uuid is None:
+            raise ValueError("No grid selected")
+        for grid in self._grids:
+            if grid.uuid == self._selected_grid_uuid:
+                for path in grid.hdf_paths:
+                    if path.endswith("/Points"):
+                        return path
+        raise ValueError("Selected grid has no Points HDF path.")
 
     def _try_open_with_resqpy(self) -> None:
         try:
@@ -404,3 +487,29 @@ def _read_first_hdf_info(
     except Exception:
         return None, None
     return None, None
+
+
+def _z_to_depth(values):
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size and float(np.nanmean(finite)) < 0.0:
+        return -arr
+    return arr
+
+
+def _xy_distance(a, b) -> float:
+    import numpy as np
+
+    delta = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    return float(np.sqrt(np.dot(delta, delta)))
+
+
+def _polygon_area_xy(points) -> float:
+    import numpy as np
+
+    pts = np.asarray(points, dtype=float)
+    x = pts[:, 0]
+    y = pts[:, 1]
+    return float(abs(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))))

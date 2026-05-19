@@ -38,7 +38,10 @@ def inspect_sleeves_index(epc_path: str, sleeves_path: str) -> int:
     print()
 
     for row in sleeves.itertuples(index=False):
-        sleeve_id = getattr(row, "Sleeve_ID")
+        well = getattr(row, "Well", "")
+        port = getattr(row, "Port", "")
+        legacy_id = getattr(row, "Sleeve_ID", "")
+        sleeve_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
         x = float(getattr(row, "X"))
         y = float(getattr(row, "Y"))
         match = indexer.find_column(x, y)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import pandas as pd
 
 from zipfile import ZipFile
@@ -33,10 +34,11 @@ def test_streaming_xlsx_exporter_writes_xml_package(tmp_path) -> None:
     with ZipFile(path) as package:
         names = set(package.namelist())
         sheet = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        shared = package.read("xl/sharedStrings.xml").decode("utf-8")
     assert "[Content_Types].xml" in names
     assert "xl/workbook.xml" in names
     assert "xl/worksheets/sheet1.xml" in names
-    assert "<t>x</t>" in sheet
+    assert "<t>x</t>" in shared
     assert "<v>2</v>" in sheet
     preview = read_xlsx_preview(path)
     assert preview.headers == ["A", "B"]
@@ -45,3 +47,13 @@ def test_streaming_xlsx_exporter_writes_xml_package(tmp_path) -> None:
 
 def test_default_extraction_output_path_next_to_sleeves() -> None:
     assert str(default_extraction_output_path("C:/data/Sleeves_coord.xlsx")).endswith("Sleeves_coord_extracted.xlsx")
+
+
+def test_streaming_xlsx_exporter_writes_nan_as_blank_cell(tmp_path) -> None:
+    path = tmp_path / "nan.xlsx"
+    with StreamingXlsxExporter(path, ["A"]) as exporter:
+        exporter.write_row({"A": math.nan})
+    with ZipFile(path) as package:
+        sheet = package.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert ">nan<" not in sheet
+    assert '<c r="A2"/>' in sheet

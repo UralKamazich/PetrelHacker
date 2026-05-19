@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
         self.sleeves_path_edit = QLineEdit()
         self.sleeves_path_edit.setPlaceholderText("Select CSV/XLSX sleeves table")
         self.sleeves_status_label = QLabel("-")
-        self.sleeves_preview_table = self._table(["Sleeve_ID", "X", "Y"])
+        self.sleeves_preview_table = self._table(["Well", "Port", "X", "Y"])
         self.output_path_edit = QLineEdit()
         self.output_path_edit.setPlaceholderText("Output XLSX is generated next to sleeves file")
         self.skip_inactive_checkbox = QCheckBox("Skip inactive cells")
@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.log_panel = LogPanel()
         self.qc_status_label = QLabel("No extraction results yet.")
-        self.qc_preview_table = self._table(["Sleeve_ID", "X", "Y", "I", "J", "K"])
+        self.qc_preview_table = self._table(["Well", "Port", "X", "Y", "I", "J", "K"])
 
         tabs = QTabWidget()
         tabs.addTab(self._model_tab(), "Model")
