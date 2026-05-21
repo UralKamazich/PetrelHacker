@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -27,11 +28,12 @@ from PySide6.QtWidgets import (
 from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
+from app.workers.metrics_worker import MetricsRequest, MetricsResult, MetricsWorker
 from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
 from core.property_presets import normalize_property_title, should_select_property
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
-from core.xlsx_preview import read_xlsx_preview
+from core.xlsx_preview import read_xlsx_headers, read_xlsx_preview
 
 
 class MainWindow(QMainWindow):
@@ -46,8 +48,11 @@ class MainWindow(QMainWindow):
         self._load_worker: LoadModelWorker | None = None
         self._extraction_thread: QThread | None = None
         self._extraction_worker: ExtractionWorker | None = None
+        self._metrics_thread: QThread | None = None
+        self._metrics_worker: MetricsWorker | None = None
         self._model_result: ModelLoadResult | None = None
         self._sleeves_loaded = False
+        self._last_extracted_headers: list[str] = []
 
         self.epc_path_edit = QLineEdit()
         self.epc_path_edit.setPlaceholderText("Select .epc file")
@@ -73,6 +78,27 @@ class MainWindow(QMainWindow):
         self.log_panel = LogPanel()
         self.qc_status_label = QLabel("No extraction results yet.")
         self.qc_preview_table = self._table(["Well", "Port", "X", "Y", "I", "J", "K"])
+        self.metrics_extracted_path_edit = QLineEdit()
+        self.metrics_extracted_path_edit.setPlaceholderText("Select extracted XLSX/CSV")
+        self.metrics_intervals_path_edit = QLineEdit()
+        self.metrics_intervals_path_edit.setPlaceholderText("Select intervals XLSX/CSV")
+        self.metrics_output_path_edit = QLineEdit()
+        self.metrics_output_path_edit.setPlaceholderText("Output metrics XLSX")
+        self.metrics_ntg_combo = self._combo()
+        self.metrics_poro_combo = self._combo()
+        self.metrics_perm_combo = self._combo()
+        self.metrics_lithology_combo = self._combo()
+        self.metrics_reservoir_values_edit = QLineEdit()
+        self.metrics_reservoir_values_edit.setPlaceholderText("Example: 1,2")
+        self.metrics_property_combo = self._combo()
+        self.metrics_add_property_button = QPushButton("Add")
+        self.metrics_properties_edit = QLineEdit()
+        self.metrics_properties_edit.setPlaceholderText("Example: NTG,PORO,Perm_1A")
+        self.metrics_run_button = QPushButton("Calculate metrics")
+        self.metrics_run_button.setEnabled(False)
+        self.metrics_progress_bar = QProgressBar()
+        self.metrics_status_label = QLabel("No metrics calculated yet.")
+        self.metrics_preview_table = self._table(["Well", "Port"])
 
         tabs = QTabWidget()
         tabs.addTab(self._model_tab(), "Model")
@@ -80,6 +106,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._properties_tab(), "Properties")
         tabs.addTab(self._run_tab(), "Run")
         tabs.addTab(self._preview_tab(), "Preview / QC")
+        tabs.addTab(self._metrics_tab(), "Metrics")
         self.setCentralWidget(tabs)
 
         self.browse_epc_button.clicked.connect(self._browse_epc)
@@ -87,6 +114,10 @@ class MainWindow(QMainWindow):
         self.output_path_edit.textChanged.connect(self._update_run_enabled)
         self.run_button.clicked.connect(self._run_extraction)
         self.cancel_button.clicked.connect(self._cancel_extraction)
+        self.metrics_extracted_path_edit.textChanged.connect(self._on_metrics_extracted_path_changed)
+        self.metrics_intervals_path_edit.textChanged.connect(self._update_metrics_enabled)
+        self.metrics_output_path_edit.textChanged.connect(self._update_metrics_enabled)
+        self.metrics_run_button.clicked.connect(self._run_metrics)
         self._restore_last_paths()
 
     def _model_tab(self) -> QWidget:
@@ -167,6 +198,59 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.qc_preview_table, 1)
         return tab
 
+    def _metrics_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        extracted_row = QHBoxLayout()
+        browse_extracted = QPushButton("Browse")
+        extracted_row.addWidget(QLabel("Extracted"))
+        extracted_row.addWidget(self.metrics_extracted_path_edit, 1)
+        extracted_row.addWidget(browse_extracted)
+        layout.addLayout(extracted_row)
+
+        intervals_row = QHBoxLayout()
+        browse_intervals = QPushButton("Browse")
+        intervals_row.addWidget(QLabel("Frac list"))
+        intervals_row.addWidget(self.metrics_intervals_path_edit, 1)
+        intervals_row.addWidget(browse_intervals)
+        layout.addLayout(intervals_row)
+
+        output_row = QHBoxLayout()
+        browse_output = QPushButton("Browse")
+        output_row.addWidget(QLabel("Output"))
+        output_row.addWidget(self.metrics_output_path_edit, 1)
+        output_row.addWidget(browse_output)
+        layout.addLayout(output_row)
+
+        settings_box = QGroupBox("Settings")
+        form = QFormLayout(settings_box)
+        form.addRow("NTG column", self.metrics_ntg_combo)
+        form.addRow("PORO column", self.metrics_poro_combo)
+        form.addRow("PERM column", self.metrics_perm_combo)
+        form.addRow("Lithology column", self.metrics_lithology_combo)
+        form.addRow("Reservoir values", self.metrics_reservoir_values_edit)
+        property_row = QHBoxLayout()
+        property_row.addWidget(self.metrics_property_combo, 1)
+        property_row.addWidget(self.metrics_add_property_button)
+        form.addRow("Add property", property_row)
+        form.addRow("Properties", self.metrics_properties_edit)
+        layout.addWidget(settings_box)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.metrics_run_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        layout.addWidget(self.metrics_progress_bar)
+        layout.addWidget(self.metrics_status_label)
+        layout.addWidget(self.metrics_preview_table, 1)
+
+        browse_extracted.clicked.connect(self._browse_metrics_extracted)
+        browse_intervals.clicked.connect(self._browse_metrics_intervals)
+        browse_output.clicked.connect(self._browse_metrics_output)
+        self.metrics_add_property_button.clicked.connect(self._add_metrics_property)
+        return tab
+
     def _browse_epc(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select RESQML EPC", "", "RESQML EPC (*.epc);;All files (*)")
         if path:
@@ -183,6 +267,26 @@ class MainWindow(QMainWindow):
         if path:
             self.sleeves_path_edit.setText(path)
             self._load_sleeves_preview(path)
+            self._save_last_paths()
+
+    def _browse_metrics_extracted(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select extracted table", "", "Tables (*.xlsx *.csv);;All files (*)")
+        if path:
+            self.metrics_extracted_path_edit.setText(path)
+            self._set_default_metrics_output(path)
+            self._load_metrics_channel_options(path)
+            self._save_last_paths()
+
+    def _browse_metrics_intervals(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select intervals table", "", "Tables (*.xlsx *.csv);;All files (*)")
+        if path:
+            self.metrics_intervals_path_edit.setText(path)
+            self._save_last_paths()
+
+    def _browse_metrics_output(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Save metrics XLSX", "", "Excel workbook (*.xlsx);;All files (*)")
+        if path:
+            self.metrics_output_path_edit.setText(str(Path(path).with_suffix(".xlsx")))
             self._save_last_paths()
 
     def _load_model(self) -> None:
@@ -344,20 +448,35 @@ class MainWindow(QMainWindow):
     def _save_selected_properties(self, *args) -> None:
         self.settings.setValue("properties/selected_uuids", self._selected_property_uuids())
         self.settings.setValue("properties/selected_titles", self._selected_property_titles())
+        self._refresh_metrics_channel_options()
 
     def _restore_last_paths(self) -> None:
         epc_path = self.settings.value("paths/epc", "", type=str)
         sleeves_path = self.settings.value("paths/sleeves", "", type=str)
+        extracted_path = self.settings.value("paths/metrics_extracted", "", type=str)
+        intervals_path = self.settings.value("paths/metrics_intervals", "", type=str)
+        metrics_output_path = self.settings.value("paths/metrics_output", "", type=str)
         if epc_path:
             self.epc_path_edit.setText(epc_path)
         if sleeves_path:
             self.sleeves_path_edit.setText(sleeves_path)
             if Path(sleeves_path).exists():
                 self._load_sleeves_preview(sleeves_path)
+        if extracted_path:
+            self.metrics_extracted_path_edit.setText(extracted_path)
+            if Path(extracted_path).exists():
+                self._load_metrics_channel_options(extracted_path)
+        if intervals_path:
+            self.metrics_intervals_path_edit.setText(intervals_path)
+        if metrics_output_path:
+            self.metrics_output_path_edit.setText(metrics_output_path)
 
     def _save_last_paths(self) -> None:
         self.settings.setValue("paths/epc", self.epc_path_edit.text().strip())
         self.settings.setValue("paths/sleeves", self.sleeves_path_edit.text().strip())
+        self.settings.setValue("paths/metrics_extracted", self.metrics_extracted_path_edit.text().strip())
+        self.settings.setValue("paths/metrics_intervals", self.metrics_intervals_path_edit.text().strip())
+        self.settings.setValue("paths/metrics_output", self.metrics_output_path_edit.text().strip())
 
     def _update_run_enabled(self, *args) -> None:
         can_run = (
@@ -434,11 +553,15 @@ class MainWindow(QMainWindow):
         )
         self.log_panel.append_message(f"Log: {result.log_path}")
         self.output_path_edit.setText(result.output_path)
+        self.metrics_extracted_path_edit.setText(result.output_path)
+        self._set_default_metrics_output(result.output_path)
+        self._load_metrics_channel_options(result.output_path)
         self._load_result_preview(result)
         csv_warnings = [warning for warning in result.stats.warnings if "Saved CSV instead" in warning]
         if csv_warnings:
             QMessageBox.information(self, "Saved CSV", csv_warnings[-1])
         self._update_run_enabled()
+        self._update_metrics_enabled()
 
     def _on_extraction_failed(self, message: str, details: str) -> None:
         self.cancel_button.setEnabled(False)
@@ -485,6 +608,205 @@ class MainWindow(QMainWindow):
                 self.qc_preview_table.setItem(row_index, col_index, QTableWidgetItem(value))
         self.qc_preview_table.resizeColumnsToContents()
 
+    def _update_metrics_enabled(self, *args) -> None:
+        can_run = (
+            bool(self.metrics_extracted_path_edit.text().strip())
+            and bool(self.metrics_intervals_path_edit.text().strip())
+            and bool(self.metrics_output_path_edit.text().strip())
+            and self._metrics_thread is None
+        )
+        self.metrics_run_button.setEnabled(can_run)
+
+    def _run_metrics(self) -> None:
+        extracted_path = self.metrics_extracted_path_edit.text().strip()
+        intervals_path = self.metrics_intervals_path_edit.text().strip()
+        output_path = self.metrics_output_path_edit.text().strip()
+        if not extracted_path:
+            QMessageBox.warning(self, "Missing extracted table", "Select an extracted XLSX/CSV file first.")
+            return
+        if not intervals_path:
+            QMessageBox.warning(self, "Missing intervals", "Select an intervals XLSX/CSV file first.")
+            return
+        if not output_path:
+            QMessageBox.warning(self, "Missing output", "Select metrics output path first.")
+            return
+        output_path = str(Path(output_path).with_suffix(".xlsx"))
+        self.metrics_output_path_edit.setText(output_path)
+
+        request = MetricsRequest(
+            extracted_path=extracted_path,
+            intervals_path=intervals_path,
+            output_path=output_path,
+            ntg_column=self._combo_text_or_none(self.metrics_ntg_combo),
+            poro_column=self._combo_text_or_none(self.metrics_poro_combo),
+            perm_column=self._combo_text_or_none(self.metrics_perm_combo),
+            lithology_column=self._combo_text_or_none(self.metrics_lithology_combo),
+            reservoir_values=self._split_csv_text(self.metrics_reservoir_values_edit.text()),
+            property_columns=self._split_csv_text(self.metrics_properties_edit.text()),
+        )
+        self._save_last_paths()
+        self.metrics_run_button.setEnabled(False)
+        self.metrics_progress_bar.setValue(0)
+        self.metrics_status_label.setText("Calculating metrics...")
+        self.log_panel.append_message("Starting metrics calculation...")
+
+        self._metrics_thread = QThread(self)
+        self._metrics_worker = MetricsWorker(request)
+        self._metrics_worker.moveToThread(self._metrics_thread)
+        self._metrics_thread.started.connect(self._metrics_worker.run)
+        self._metrics_worker.log.connect(self.log_panel.append_message)
+        self._metrics_worker.progress.connect(self.metrics_progress_bar.setValue)
+        self._metrics_worker.finished.connect(self._on_metrics_finished)
+        self._metrics_worker.failed.connect(self._on_metrics_failed)
+        self._metrics_worker.finished.connect(self._metrics_thread.quit)
+        self._metrics_worker.failed.connect(self._metrics_thread.quit)
+        self._metrics_thread.finished.connect(self._metrics_worker.deleteLater)
+        self._metrics_thread.finished.connect(self._metrics_thread.deleteLater)
+        self._metrics_thread.finished.connect(self._reset_metrics_worker_refs)
+        self._metrics_thread.start()
+
+    def _on_metrics_finished(self, result: MetricsResult) -> None:
+        self.metrics_progress_bar.setValue(100)
+        self.metrics_status_label.setText(
+            f"Metrics finished. Rows: {result.rows_written}. Warnings: {len(result.warnings)}. Output: {result.output_path}"
+        )
+        self.log_panel.append_message(
+            f"Metrics finished. Rows: {result.rows_written}. Output: {result.output_path}"
+        )
+        self._load_metrics_preview(result.output_path)
+        self._update_metrics_enabled()
+
+    def _on_metrics_failed(self, message: str, details: str) -> None:
+        self.metrics_progress_bar.setValue(0)
+        self.metrics_status_label.setText(f"Metrics failed: {message}")
+        self.log_panel.append_message(f"Metrics failed: {message}")
+        self.log_panel.append_message(details)
+        QMessageBox.critical(self, "Metrics failed", message)
+        self._update_metrics_enabled()
+
+    def _reset_metrics_worker_refs(self) -> None:
+        self._metrics_thread = None
+        self._metrics_worker = None
+        self._update_metrics_enabled()
+
+    def _load_metrics_preview(self, output_path: str) -> None:
+        try:
+            preview = read_xlsx_preview(output_path, max_rows=1000)
+        except Exception as exc:  # noqa: BLE001
+            self.log_panel.append_message(f"Metrics preview load failed: {exc}")
+            return
+        self.metrics_preview_table.setColumnCount(len(preview.headers))
+        self.metrics_preview_table.setHorizontalHeaderLabels(preview.headers)
+        self.metrics_preview_table.setRowCount(len(preview.rows))
+        for row_index, row in enumerate(preview.rows):
+            for col_index, value in enumerate(row):
+                self.metrics_preview_table.setItem(row_index, col_index, QTableWidgetItem(value))
+        self.metrics_preview_table.resizeColumnsToContents()
+
+    def _set_default_metrics_output(self, extracted_path: str) -> None:
+        if self.metrics_output_path_edit.text().strip():
+            return
+        source = Path(extracted_path)
+        self.metrics_output_path_edit.setText(str(source.with_name(f"{source.stem}_metrics.xlsx")))
+
+    def _on_metrics_extracted_path_changed(self, path: str) -> None:
+        self._update_metrics_enabled()
+        if Path(path).exists():
+            self._load_metrics_channel_options(path)
+
+    def _load_metrics_channel_options(self, path: str) -> None:
+        try:
+            self._last_extracted_headers = self._table_headers(path)
+        except Exception as exc:  # noqa: BLE001
+            self.log_panel.append_message(f"Metrics channel list load failed: {exc}")
+            return
+        self._refresh_metrics_channel_options()
+
+    def _refresh_metrics_channel_options(self) -> None:
+        selected_properties = self._metrics_allowed_property_titles()
+        if selected_properties:
+            headers = [header for header in self._last_extracted_headers if header in selected_properties]
+        else:
+            headers = []
+        for combo in (
+            self.metrics_ntg_combo,
+            self.metrics_poro_combo,
+            self.metrics_perm_combo,
+            self.metrics_lithology_combo,
+            self.metrics_property_combo,
+        ):
+            current = combo.currentText().strip()
+            combo.clear()
+            combo.addItem("")
+            combo.addItems(headers)
+            if current:
+                self._select_combo_text(combo, current)
+        self._select_combo_text(self.metrics_ntg_combo, "NTG")
+        self._select_combo_text(self.metrics_poro_combo, "PORO")
+        self._select_first_contains(self.metrics_perm_combo, ("perm",))
+        self._select_first_contains(self.metrics_lithology_combo, ("lito", "lith", "layer"))
+
+    def _property_titles_from_model(self) -> list[str]:
+        if self._model_result is None:
+            return []
+        return [prop.title for prop in self._model_result.properties]
+
+    def _metrics_allowed_property_titles(self) -> list[str]:
+        selected = self._selected_property_titles()
+        if selected:
+            return selected
+        saved = self._settings_list("properties/selected_titles")
+        if saved:
+            return saved
+        return self._property_titles_from_model()
+
+    def _add_metrics_property(self) -> None:
+        value = self.metrics_property_combo.currentText().strip()
+        if not value:
+            return
+        values = self._split_csv_text(self.metrics_properties_edit.text())
+        if value not in values:
+            values.append(value)
+            self.metrics_properties_edit.setText(",".join(values))
+
+    @staticmethod
+    def _table_headers(path: str) -> list[str]:
+        suffix = Path(path).suffix.lower()
+        if suffix == ".csv":
+            return read_csv_preview(path, max_rows=0).headers
+        return read_xlsx_headers(path)
+
+    @staticmethod
+    def _select_combo_text(combo: QComboBox, text: str) -> None:
+        index = combo.findText(text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _select_first_contains(combo: QComboBox, needles: tuple[str, ...]) -> None:
+        if combo.currentText().strip():
+            return
+        for index in range(combo.count()):
+            value = combo.itemText(index)
+            lower = value.lower()
+            if any(needle in lower for needle in needles):
+                combo.setCurrentIndex(index)
+                return
+
+    @staticmethod
+    def _empty_to_none(value: str) -> str | None:
+        text = value.strip()
+        return text or None
+
+    @staticmethod
+    def _combo_text_or_none(combo: QComboBox) -> str | None:
+        text = combo.currentText().strip()
+        return text or None
+
+    @staticmethod
+    def _split_csv_text(value: str) -> list[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
+
     @staticmethod
     def _table(headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
@@ -493,6 +815,13 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         return table
+
+    @staticmethod
+    def _combo() -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem("")
+        return combo
 
 
 def _main_for_manual_debug() -> None:

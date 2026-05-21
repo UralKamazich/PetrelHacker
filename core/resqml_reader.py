@@ -324,9 +324,24 @@ class ResqmlReader:
             if points_path not in h5:
                 raise ValueError(f"Points dataset path not found in H5: {points_path}")
             dataset = h5[points_path]
-            if len(dataset.shape) != 3 or dataset.shape[0] < nk + 1 or dataset.shape[1] < base_pillar_count:
+            if len(dataset.shape) == 4:
+                if dataset.shape[0] < nk + 1 or dataset.shape[1] < nj + 1 or dataset.shape[2] < ni + 1:
+                    raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
+                points = np.asarray(
+                    [
+                        dataset[:, j, i, :],
+                        dataset[:, j, i + 1, :],
+                        dataset[:, j + 1, i, :],
+                        dataset[:, j + 1, i + 1, :],
+                    ],
+                    dtype=float,
+                ).transpose(1, 0, 2)
+            elif len(dataset.shape) == 3:
+                if dataset.shape[0] < nk + 1 or dataset.shape[1] < base_pillar_count:
+                    raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
+                points = np.asarray(dataset[:, pillar_indices, :], dtype=float)
+            else:
                 raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
-            points = np.asarray(dataset[:, pillar_indices, :], dtype=float)
 
         interface_z = points[:, :, 2].mean(axis=1)
         interface_depth = _z_to_depth(interface_z)

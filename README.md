@@ -60,6 +60,17 @@ export to convert them to mD. Integer NoData markers (`2147483647`,
 If the estimated extraction size exceeds the Excel row limit, the GUI writes a
 CSV file instead and notifies the user.
 
+## Calculate Interval Metrics
+
+```powershell
+python scripts/calculate_interval_metrics.py Sleeves_coord_extracted.xlsx intervals.xlsx interval_metrics.xlsx --ntg-column NTG --poro-column PORO --perm-column Perm_1A --lithology-column Layers --reservoir-values 1 2 --properties NTG PORO Perm_1A
+```
+
+The interval file must contain `Well`, `Port`, `TVDSS_TOP_TOTAL`,
+`TVDSS_BOT_TOTAL`, `TVDSS_TOP_LOCAL`, and `TVDSS_BOT_LOCAL`. Cells are assigned
+to Global and Local intervals by cell-center TVD. The script writes Global,
+Local, Global_Net, and Local_Net metrics.
+
 ## Run GUI
 
 ```powershell
@@ -73,6 +84,8 @@ GUI MVP workflow:
 3. Open `Properties`, check 1-3 properties. The GUI auto-checks common properties
    (`NTG`, `Layers`, `PORO`, `PERM`) on first use and restores the last selection after that.
 4. Open `Run` and click `Run extraction`; the output XLSX path is generated next to the sleeves file.
+5. Open `Metrics`, select an interval table, configure column names and reservoir indicators,
+   then calculate interval metrics from the extracted file.
 
 The GUI also remembers the last EPC path and sleeves table path between launches.
 

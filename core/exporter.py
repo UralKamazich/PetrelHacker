@@ -14,6 +14,8 @@ import pandas as pd
 
 EXCEL_ROW_LIMIT = 1_048_576
 INT_NODATA_VALUES = {2_147_483_647, -2_147_483_648}
+DEFAULT_COLUMN_WIDTH = 14
+HEADER_ROW_HEIGHT = 45
 
 
 def export_csv(df: pd.DataFrame, path: str | Path) -> None:
@@ -108,6 +110,7 @@ class StreamingXlsxExporter:
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f"{_cols_xml(len(self.columns))}"
             "<sheetData>"
         )
 
@@ -115,10 +118,21 @@ class StreamingXlsxExporter:
         self._row_index += 1
         if self._row_index > EXCEL_ROW_LIMIT:
             raise ValueError(f"XLSX row limit exceeded: {EXCEL_ROW_LIMIT}")
-        self._sheet.write(f'<row r="{self._row_index}">')
+        row_attrs = f' r="{self._row_index}"'
+        if is_header:
+            row_attrs += f' ht="{HEADER_ROW_HEIGHT}" customHeight="1"'
+        self._sheet.write(f"<row{row_attrs}>")
         for col_index, column in enumerate(self.columns, start=1):
             value = column if is_header else row.get(column, "")
-            self._sheet.write(_cell_xml(self._row_index, col_index, value, self._shared_string_index))
+            self._sheet.write(
+                _cell_xml(
+                    self._row_index,
+                    col_index,
+                    value,
+                    self._shared_string_index,
+                    style_index=1 if is_header else None,
+                )
+            )
         self._sheet.write("</row>")
 
     def _write_package(self) -> None:
@@ -150,24 +164,25 @@ def default_extraction_output_path(sleeves_path: str | Path) -> Path:
     return source.with_name(f"{source.stem}_extracted.xlsx")
 
 
-def _cell_xml(row: int, col: int, value: object, shared_string_index=None) -> str:
+def _cell_xml(row: int, col: int, value: object, shared_string_index=None, style_index: int | None = None) -> str:
     ref = f"{_excel_column_name(col)}{row}"
+    style = f' s="{style_index}"' if style_index is not None else ""
     value = _export_value(value)
     if value is None or value == "":
-        return f'<c r="{ref}"/>'
+        return f'<c r="{ref}"{style}/>'
     if isinstance(value, bool):
-        return f'<c r="{ref}" t="b"><v>{1 if value else 0}</v></c>'
+        return f'<c r="{ref}"{style} t="b"><v>{1 if value else 0}</v></c>'
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if isinstance(value, float) and not math.isfinite(value):
-            return f'<c r="{ref}"/>'
-        return f'<c r="{ref}"><v>{value}</v></c>'
+            return f'<c r="{ref}"{style}/>'
+        return f'<c r="{ref}"{style}><v>{value}</v></c>'
     if isinstance(value, (datetime, date)):
         value = value.isoformat()
     if shared_string_index is not None:
         index = shared_string_index(value)
-        return f'<c r="{ref}" t="s"><v>{index}</v></c>'
+        return f'<c r="{ref}"{style} t="s"><v>{index}</v></c>'
     text = escape(str(value), quote=False)
-    return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+    return f'<c r="{ref}"{style} t="inlineStr"><is><t>{text}</t></is></c>'
 
 
 def _export_value(value: object) -> object:
@@ -184,6 +199,12 @@ def _excel_column_name(index: int) -> str:
         index, remainder = divmod(index - 1, 26)
         name = chr(65 + remainder) + name
     return name
+
+
+def _cols_xml(count: int) -> str:
+    if count <= 0:
+        return ""
+    return f'<cols><col min="1" max="{count}" width="{DEFAULT_COLUMN_WIDTH}" customWidth="1"/></cols>'
 
 
 def _content_types_xml() -> str:
@@ -262,11 +283,17 @@ def _styles_xml() -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
         '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
         '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellXfs count="2">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+        '<alignment horizontal="center" vertical="center" wrapText="1"/>'
+        '</xf>'
+        '</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '<dxfs count="0"/>'
         '<tableStyles count="0" defaultTableStyle="TableStyleMedium9" defaultPivotStyle="PivotStyleLight16"/>'

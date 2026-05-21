@@ -40,9 +40,22 @@ def test_streaming_xlsx_exporter_writes_xml_package(tmp_path) -> None:
     assert "xl/worksheets/sheet1.xml" in names
     assert "<t>x</t>" in shared
     assert "<v>2</v>" in sheet
+    assert '<col min="1" max="2" width="14" customWidth="1"/>' in sheet
+    assert '<row r="1" ht="45" customHeight="1">' in sheet
+    assert '<c r="A1" s="1" t="s">' in sheet
     preview = read_xlsx_preview(path)
     assert preview.headers == ["A", "B"]
     assert preview.rows == [["x", "2"]]
+
+
+def test_streaming_xlsx_exporter_header_style_wraps_and_centers(tmp_path) -> None:
+    path = tmp_path / "styled.xlsx"
+    with StreamingXlsxExporter(path, ["Long Header"]) as exporter:
+        exporter.write_row({"Long Header": 1})
+    with ZipFile(path) as package:
+        styles = package.read("xl/styles.xml").decode("utf-8")
+    assert '<cellXfs count="2">' in styles
+    assert '<alignment horizontal="center" vertical="center" wrapText="1"/>' in styles
 
 
 def test_default_extraction_output_path_next_to_sleeves() -> None:

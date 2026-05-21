@@ -30,6 +30,17 @@ def read_xlsx_preview(path: str | Path, max_rows: int = 1000) -> XlsxPreview:
     return XlsxPreview(headers=parsed_rows[0], rows=parsed_rows[1:])
 
 
+def read_xlsx_headers(path: str | Path) -> list[str]:
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with ZipFile(path) as package:
+        shared_strings = _read_shared_strings(package, ns)
+        with package.open("xl/worksheets/sheet1.xml") as sheet:
+            for event, element in ET.iterparse(sheet, events=("end",)):
+                if _local_name(element.tag) == "row":
+                    return [_cell_text(cell, ns, shared_strings) for cell in element.findall("x:c", ns)]
+    return []
+
+
 def _read_shared_strings(package: ZipFile, ns: dict[str, str]) -> list[str]:
     if "xl/sharedStrings.xml" not in package.namelist():
         return []
@@ -50,3 +61,7 @@ def _cell_text(cell: ET.Element, ns: dict[str, str], shared_strings: list[str]) 
     if cell_type == "b":
         return "TRUE" if value.text == "1" else "FALSE"
     return value.text
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag

@@ -122,13 +122,18 @@ class FastGridIndexer:
             if points_path not in h5:
                 raise ValueError(f"Points dataset path not found in H5: {points_path}")
             dataset = h5[points_path]
-            if len(dataset.shape) != 3 or dataset.shape[2] < 2:
-                raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
-            if dataset.shape[1] < base_pillar_count:
-                raise ValueError(
-                    f"Points dataset has fewer pillars than expected: {dataset.shape[1]} < {base_pillar_count}"
+            if len(dataset.shape) == 4 and dataset.shape[1] >= self.nj + 1 and dataset.shape[2] >= self.ni + 1:
+                return np.asarray(dataset[0, : self.nj + 1, : self.ni + 1, :2], dtype=float).reshape(
+                    base_pillar_count,
+                    2,
                 )
-            return np.asarray(dataset[0, :base_pillar_count, :2], dtype=float)
+            if len(dataset.shape) == 3 and dataset.shape[2] >= 2:
+                if dataset.shape[1] < base_pillar_count:
+                    raise ValueError(
+                        f"Points dataset has fewer pillars than expected: {dataset.shape[1]} < {base_pillar_count}"
+                    )
+                return np.asarray(dataset[0, :base_pillar_count, :2], dtype=float)
+            raise ValueError(f"Unsupported Points dataset shape: {dataset.shape}")
 
     @staticmethod
     def _require_int(value: int | None, name: str) -> int:
