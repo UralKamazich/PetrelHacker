@@ -5,7 +5,8 @@ import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from core.resqml_reader import GridInfo, PropertyInfo, ResqmlReader
+from core.model_reader import open_model_reader
+from core.resqml_reader import GridInfo, PropertyInfo
 
 
 @dataclass(frozen=True)
@@ -29,9 +30,8 @@ class LoadModelWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self.log.emit(f"Opening EPC: {self.epc_path}")
-            reader = ResqmlReader(self.epc_path)
-            reader.open()
+            self.log.emit(f"Opening model: {self.epc_path}")
+            reader = open_model_reader(self.epc_path)
             grids = reader.list_grids()
             self.log.emit(f"Found grids: {len(grids)}")
             if grids:

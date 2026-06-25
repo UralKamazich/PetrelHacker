@@ -43,6 +43,22 @@ class FastGridIndexer:
         self._bbox: tuple[float, float, float, float] | None = None
 
     def build_column_index(self) -> None:
+        if hasattr(self.reader, "get_column_centers_xy"):
+            centers = np.asarray(self.reader.get_column_centers_xy(), dtype=float)
+            if centers.shape != (self.nj, self.ni, 2):
+                raise ValueError(f"Unsupported column center shape: {centers.shape}; expected {(self.nj, self.ni, 2)}")
+            self.column_centers = centers
+            self._flat_centers = centers.reshape(self.nj * self.ni, 2)
+            x_values = centers[:, :, 0]
+            y_values = centers[:, :, 1]
+            self._bbox = (
+                float(np.nanmin(x_values)),
+                float(np.nanmax(x_values)),
+                float(np.nanmin(y_values)),
+                float(np.nanmax(y_values)),
+            )
+            return
+
         points_path = self._points_hdf_path()
         h5_path = self.reader.h5_path
         if h5_path is None:

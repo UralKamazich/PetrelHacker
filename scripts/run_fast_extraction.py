@@ -11,8 +11,8 @@ if str(ROOT) not in sys.path:
 
 from core.grid_indexer import FastGridIndexer  # noqa: E402
 from core.exporter import default_extraction_output_path  # noqa: E402
+from core.model_reader import open_model_reader  # noqa: E402
 from core.property_extractor import ExtractionSettings, PropertyExtractor, write_extraction_log  # noqa: E402
-from core.resqml_reader import ResqmlReader  # noqa: E402
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table  # noqa: E402
 
 
@@ -24,8 +24,7 @@ def run_extraction(
     include_inactive: bool,
 ) -> int:
     output = str(default_extraction_output_path(sleeves_path) if output_path is None else Path(output_path).with_suffix(".xlsx"))
-    reader = ResqmlReader(epc_path)
-    reader.open()
+    reader = open_model_reader(epc_path)
     grids = reader.list_grids()
     if not grids:
         raise ValueError("No grids found in EPC.")

@@ -144,7 +144,16 @@ class PropertyExtractor:
                 geometry_column = self.reader.get_cell_geometry_column(match.i, match.j)
                 rows = []
                 for i, j, k in self.indexer.vertical_cells(x, y):
-                    is_active = True if active_column is None else bool(active_column[k])
+                    property_values = {}
+                    for prop in selected_properties:
+                        value = property_columns[prop.title][k]
+                        value = value.item() if hasattr(value, "item") else value
+                        property_values[prop.title] = transform_property_value(prop, value)
+
+                    if active_column is None:
+                        is_active = any(not _is_blank_property_value(value) for value in property_values.values())
+                    else:
+                        is_active = bool(active_column[k])
                     if self.settings.skip_inactive and not is_active:
                         stats.skipped_inactive_cells += 1
                         continue
@@ -165,10 +174,7 @@ class PropertyExtractor:
                         "CellSizeJ": geometry_column["CellSizeJ"][k],
                         "CellAreaXY": geometry_column["CellAreaXY"][k],
                     }
-                    for prop in selected_properties:
-                        value = property_columns[prop.title][k]
-                        value = value.item() if hasattr(value, "item") else value
-                        row[prop.title] = transform_property_value(prop, value)
+                    row.update(property_values)
                     rows.append(row)
 
                 exporter.write_rows(rows)
@@ -235,7 +241,7 @@ def write_extraction_log(
     stats: ExtractionStats,
 ) -> None:
     lines = [
-        f"EPC path: {epc_path}",
+        f"Model path: {epc_path}",
         f"H5 path: {h5_path or ''}",
         f"Grid title: {grid_title}",
         f"Grid UUID: {grid_uuid}",
@@ -274,3 +280,12 @@ def transform_property_value(prop: PropertyInfo, value: object) -> object:
 
 def is_perm_property(prop: PropertyInfo) -> bool:
     return "perm" in prop.title.lower()
+
+
+def _is_blank_property_value(value: object) -> bool:
+    if value == "":
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False

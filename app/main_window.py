@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("PetrelHacker - RESQML Sleeve Property Extractor")
+        self.setWindowTitle("PetrelHacker - Model Sleeve Property Extractor")
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         self._load_thread: QThread | None = None
         self._load_worker: LoadModelWorker | None = None
@@ -55,7 +55,7 @@ class MainWindow(QMainWindow):
         self._last_extracted_headers: list[str] = []
 
         self.epc_path_edit = QLineEdit()
-        self.epc_path_edit.setPlaceholderText("Select .epc file")
+        self.epc_path_edit.setPlaceholderText("Select .epc file or Rescue folder")
         self.h5_path_label = QLabel("-")
         self.backend_label = QLabel("-")
         self.load_button = QPushButton("Load model")
@@ -252,10 +252,16 @@ class MainWindow(QMainWindow):
         return tab
 
     def _browse_epc(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select RESQML EPC", "", "RESQML EPC (*.epc);;All files (*)")
-        if path:
-            self.epc_path_edit.setText(path)
-            self._save_last_paths()
+        dialog = QFileDialog(self, "Select model file or Rescue folder")
+        dialog.setFileMode(QFileDialog.AnyFile)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.ShowDirsOnly, False)
+        dialog.setNameFilters(["Model files (*.epc *.bin)", "All files (*)"])
+        if dialog.exec():
+            selected = dialog.selectedFiles()
+            if selected:
+                self.epc_path_edit.setText(selected[0])
+                self._save_last_paths()
 
     def _browse_sleeves(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -292,7 +298,7 @@ class MainWindow(QMainWindow):
     def _load_model(self) -> None:
         epc_path = self.epc_path_edit.text().strip()
         if not epc_path:
-            QMessageBox.warning(self, "Missing EPC", "Select an EPC file first.")
+            QMessageBox.warning(self, "Missing model", "Select an EPC file or Rescue folder first.")
             return
 
         self._save_last_paths()
@@ -490,7 +496,7 @@ class MainWindow(QMainWindow):
 
     def _run_extraction(self) -> None:
         if self._model_result is None:
-            QMessageBox.warning(self, "Missing model", "Load a RESQML model first.")
+            QMessageBox.warning(self, "Missing model", "Load a model first.")
             return
         if not self._sleeves_loaded:
             QMessageBox.warning(self, "Missing sleeves", "Load a sleeves table first.")

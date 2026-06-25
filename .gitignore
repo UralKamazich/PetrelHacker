@@ -11,6 +11,7 @@ dist/
 
 # Local Petrel/RESQML data can be tens of GB.
 RESQML/
+GeolModel/
 *.epc
 *.h5
 

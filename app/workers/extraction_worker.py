@@ -10,9 +10,9 @@ import traceback
 from PySide6.QtCore import QObject, Signal, Slot
 
 from core.grid_indexer import FastGridIndexer
+from core.model_reader import open_model_reader
 from core.output_planner import choose_output_plan
 from core.property_extractor import ExtractionSettings, ExtractionStats, PropertyExtractor, write_extraction_log
-from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
 
 
@@ -47,14 +47,18 @@ class ExtractionWorker(QObject):
     def run(self) -> None:
         try:
             self._check_runtime_dependencies()
-            reader = ResqmlReader(self.request.epc_path)
-            self.log.emit("Opening RESQML model...")
-            reader.open()
+            self.log.emit("Opening model...")
+            reader = open_model_reader(self.request.epc_path)
             grids = reader.list_grids()
             if not grids:
-                raise ValueError("No grids found in EPC.")
+                raise ValueError("No grids found in model.")
             grid = grids[0]
             reader.select_grid(grid.uuid)
+            if getattr(reader, "backend", "") == "rescue":
+                self.log.emit(
+                    "Warning: Rescue support decodes compact property streams and uses regular XY indexing; "
+                    "TVD cell geometry is not decoded yet."
+                )
 
             self.log.emit("Loading sleeves table...")
             sleeves = load_sleeves_table(self.request.sleeves_path)
