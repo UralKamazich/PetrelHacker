@@ -51,6 +51,10 @@ def test_rescue_reader_loads_grid_properties_and_values(tmp_path: Path) -> None:
     assert reader.get_property_value(prop.uuid, 1, 0, 0) == 0.20000000298023224
     assert reader.get_property_value(prop.uuid, 0, 1, 0) == ""
     assert reader.get_property_value(prop.uuid, 1, 1, 0) == 0.4000000059604645
+    geometry = reader.get_cell_geometry_column(0, 0)
+    assert geometry["TVD_top"] == [-95.0, -85.0, -75.0, -65.0]
+    assert geometry["TVD_base"] == [-105.0, -95.0, -85.0, -75.0]
+    assert geometry["CellHeight"] == [10.0, 10.0, 10.0, 10.0]
     centers = reader.get_column_centers_xy()
     assert centers.shape == (3, 2, 2)
     assert centers[0, 0].tolist() == [10.0, 20.0]
@@ -66,6 +70,12 @@ def _write_geometry(path: Path, *, ni: int, nj: int, nk: int) -> None:
     data[29:33] = ni.to_bytes(4, "big")
     data[33:37] = nj.to_bytes(4, "big")
     data[37:41] = nk.to_bytes(4, "big")
+    for column in range(ni * nj):
+        data.extend(nk.to_bytes(4, "big"))
+        data.extend((1).to_bytes(4, "big"))
+        data.extend(bytes([nk]))
+        z0 = -100.0 + column
+        data.extend(struct.pack(">ffff", z0, z0 + 10.0, z0 + 20.0, z0 + 30.0))
     data.extend(b"\x00\x16abracadabra jump jump\x00")
     path.write_bytes(data)
 

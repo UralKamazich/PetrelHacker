@@ -86,6 +86,14 @@ def inspect(
         print(f"... {len(properties) - property_limit} more properties not shown")
         print()
 
+    geometry = reader.get_cell_geometry_column(sample_i - 1, sample_j - 1)
+    if geometry["TVD_top"]:
+        print(f"Geometry column I/J={sample_i}/{sample_j}, first {sample_k_limit} K:")
+        for key in ("TVD_top", "TVD_base", "CellHeight"):
+            sample = ", ".join(_format_number(value) for value in geometry[key][:sample_k_limit])
+            print(f"  {key}: {sample}")
+        print()
+
     decode_properties = _find_properties(reader, property_names)[:decode_limit]
     if decode_properties:
         print("Decoded property stats:")

@@ -57,7 +57,7 @@ class ExtractionWorker(QObject):
             if getattr(reader, "backend", "") == "rescue":
                 self.log.emit(
                     "Warning: Rescue support decodes compact property streams and uses regular XY indexing; "
-                    "TVD cell geometry is not decoded yet."
+                    "TVD cell geometry is approximated from decoded per-column Rescue Z centers."
                 )
 
             self.log.emit("Loading sleeves table...")

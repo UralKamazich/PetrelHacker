@@ -31,6 +31,12 @@ class _PropertyFile:
     first_run_length: int
 
 
+@dataclass(frozen=True)
+class _GeometryFile:
+    path: Path
+    block_starts: tuple[int, ...]
+
+
 def is_rescue_path(path: str | Path) -> bool:
     candidate = Path(path)
     if candidate.is_dir():
@@ -64,8 +70,11 @@ class RescueReader:
         self._property_files: dict[str, _PropertyFile] = {}
         self._decoded_properties: OrderedDict[str, np.ndarray] = OrderedDict()
         self._decoded_property_cache_limit = 3
+        self._decoded_geometry_columns: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._decoded_geometry_cache_limit = 256
         self._selected_grid_uuid: str | None = None
         self._xy_bounds: tuple[float, float, float, float] | None = None
+        self._geometry_file: _GeometryFile | None = None
 
     @property
     def epc_path(self) -> Path:
@@ -80,6 +89,7 @@ class RescueReader:
         self.root_path = self.main_path.parent
         geom_path = self._find_geometry_file()
         ni, nj, nk = _read_rescue_geometry_shape(geom_path)
+        self._geometry_file = _read_rescue_geometry_file_info(geom_path, ni, nj, nk)
         self._xy_bounds = _read_xy_bounds_from_crsmeta(self.root_path)
 
         grid_uuid = f"rescue-grid:{self.main_path.stem}"
@@ -163,10 +173,17 @@ class RescueReader:
         if not (0 <= i < ni and 0 <= j < nj):
             raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
         size_i, size_j = self._cell_xy_size()
+        z_values = self._decoded_geometry_column(i, j)
+        if z_values is None:
+            tvd_top = [math.nan] * nk
+            tvd_base = [math.nan] * nk
+            cell_height = [math.nan] * nk
+        else:
+            tvd_top, tvd_base, cell_height = _geometry_from_z_centers(z_values)
         return {
-            "TVD_top": [math.nan] * nk,
-            "TVD_base": [math.nan] * nk,
-            "CellHeight": [math.nan] * nk,
+            "TVD_top": tvd_top,
+            "TVD_base": tvd_base,
+            "CellHeight": cell_height,
             "CellSizeI": [size_i] * nk,
             "CellSizeJ": [size_j] * nk,
             "CellAreaXY": [size_i * size_j] * nk,
@@ -302,6 +319,32 @@ class RescueReader:
             self._decoded_properties.popitem(last=False)
         return values
 
+    def _decoded_geometry_column(self, i: int, j: int) -> np.ndarray | None:
+        geometry_file = self._geometry_file
+        if geometry_file is None:
+            return None
+        ni, _nj, nk = self._require_shape()
+        column_index = j * ni + i
+        cached = self._decoded_geometry_columns.get(column_index)
+        if cached is not None:
+            self._decoded_geometry_columns.move_to_end(column_index)
+            return cached
+        if column_index >= len(geometry_file.block_starts):
+            return None
+        start = geometry_file.block_starts[column_index]
+        next_start = (
+            geometry_file.block_starts[column_index + 1]
+            if column_index + 1 < len(geometry_file.block_starts)
+            else geometry_file.path.stat().st_size
+        )
+        values = _decode_geometry_column_block(geometry_file.path, start, next_start, nk)
+        if values is None:
+            return None
+        self._decoded_geometry_columns[column_index] = values
+        while len(self._decoded_geometry_columns) > self._decoded_geometry_cache_limit:
+            self._decoded_geometry_columns.popitem(last=False)
+        return values
+
     def _property_info(self, property_uuid: str) -> PropertyInfo:
         for prop in self._properties:
             if prop.uuid == property_uuid:
@@ -329,6 +372,24 @@ def _read_rescue_geometry_shape(path: Path) -> tuple[int, int, int]:
         int.from_bytes(data[33:37], "big", signed=True),
         int.from_bytes(data[37:41], "big", signed=True),
     )
+
+
+def _read_rescue_geometry_file_info(path: Path, ni: int, nj: int, nk: int) -> _GeometryFile | None:
+    data = path.read_bytes()
+    pattern = nk.to_bytes(4, "big", signed=True) + (1).to_bytes(4, "big", signed=True)
+    starts: list[int] = []
+    position = 0
+    while True:
+        index = data.find(pattern, position)
+        if index < 0:
+            break
+        command_pos = index + len(pattern)
+        if command_pos < len(data) and _read_compact_run_length(data, command_pos, len(data)) is not None:
+            starts.append(index)
+        position = index + 1
+    if len(starts) != ni * nj:
+        return None
+    return _GeometryFile(path=path, block_starts=tuple(starts))
 
 
 def _read_property_file_info(file_id: int, path: Path) -> _PropertyFile:
@@ -392,6 +453,118 @@ def _decode_compact_property_file(
         min_value, max_value = valid_range
         values[(values < min_value) | (values > max_value)] = np.nan
     return values
+
+
+def _decode_geometry_column_block(path: Path, start: int, end: int, nk: int) -> np.ndarray | None:
+    with path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read(end - start)
+    if len(data) < 9 or int.from_bytes(data[:4], "big", signed=True) != nk:
+        return None
+
+    values: list[float] = []
+    pos = 8
+    decoded = _read_plausible_geometry_run(data, pos)
+    if decoded is None:
+        return None
+    run_length, pos = decoded
+    while pos < len(data) and len(values) < nk:
+        take = min(run_length, nk - len(values), max(0, (len(data) - pos) // 4))
+        for _ in range(take):
+            value = struct.unpack_from(">f", data, pos)[0]
+            values.append(value)
+            pos += 4
+        if len(values) >= nk:
+            break
+        while len(values) < nk:
+            if not _geometry_token_looks_like_fill(data, pos):
+                return None
+            fill_count = data[pos]
+            fill_value = struct.unpack_from(">f", data, pos + 1)[0]
+            values.extend([fill_value] * min(fill_count, nk - len(values)))
+            pos += 5
+            if len(values) >= nk:
+                break
+
+            # Rescue geometry can encode a chain of short fill commands such as
+            # "02 + float, 02 + float..." where the leading byte is ambiguous
+            # with a short run length. Prefer the fill interpretation when two
+            # plausible fill tokens are adjacent; otherwise resume raw floats.
+            if _geometry_token_looks_like_fill_chain(data, pos):
+                continue
+            decoded = _read_plausible_geometry_run(data, pos)
+            if decoded is not None:
+                run_length, pos = decoded
+                break
+
+    if len(values) != nk:
+        return None
+    array = np.asarray(values, dtype=np.float32)
+    array[~np.isfinite(array)] = np.nan
+    array[np.abs(array) > np.float32(1e20)] = np.nan
+    if np.count_nonzero(np.isfinite(array)) != nk:
+        return None
+    return array
+
+
+def _read_plausible_geometry_run(data: bytes, pos: int) -> tuple[int, int] | None:
+    decoded = _read_compact_run_length(data, pos, len(data))
+    if decoded is None:
+        return None
+    run_length, next_pos = decoded
+    if not _geometry_run_looks_plausible(data, next_pos, run_length):
+        return None
+    return run_length, next_pos
+
+
+def _geometry_run_looks_plausible(data: bytes, pos: int, run_length: int) -> bool:
+    if run_length <= 0 or pos + run_length * 4 > len(data):
+        return False
+    for index in range(run_length):
+        value = struct.unpack_from(">f", data, pos + index * 4)[0]
+        if not _is_plausible_geometry_z(value):
+            return False
+    return True
+
+
+def _geometry_token_looks_like_fill_chain(data: bytes, pos: int) -> bool:
+    return _geometry_token_looks_like_fill(data, pos) and _geometry_token_looks_like_fill(data, pos + 5)
+
+
+def _geometry_token_looks_like_fill(data: bytes, pos: int) -> bool:
+    if pos + 5 > len(data):
+        return False
+    if data[pos] > 64:
+        return False
+    value = struct.unpack_from(">f", data, pos + 1)[0]
+    return _is_plausible_geometry_z(value)
+
+
+def _is_plausible_geometry_z(value: float) -> bool:
+    return math.isfinite(value) and -10000.0 <= value <= 1000.0
+
+
+def _geometry_from_z_centers(z_values: np.ndarray) -> tuple[list[float], list[float], list[float]]:
+    z = np.asarray(z_values, dtype=float)
+    if z.size == 0:
+        return [], [], []
+    if z.size == 1:
+        value = float(z[0])
+        return [value], [value], [0.0]
+
+    boundaries = np.empty(z.size + 1, dtype=float)
+    boundaries[1:-1] = (z[:-1] + z[1:]) / 2.0
+    boundaries[0] = z[0] - (z[1] - z[0]) / 2.0
+    boundaries[-1] = z[-1] + (z[-1] - z[-2]) / 2.0
+
+    if z[-1] >= z[0]:
+        top = boundaries[1:]
+        base = boundaries[:-1]
+    else:
+        top = boundaries[:-1]
+        base = boundaries[1:]
+    height = np.abs(top - base)
+    return top.tolist(), base.tolist(), height.tolist()
 
 
 def _invalid_abs_value_limit(prop: PropertyInfo) -> np.float32:
