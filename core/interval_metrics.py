@@ -38,9 +38,13 @@ BASE_EXTRACTION_COLUMNS = {
     "XKey",
     "YKey",
 }
+INTERVAL_BUFFER_METERS = 15.0
 INTERVAL_DEFINITIONS = (
-    ("Global", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL"),
-    ("Local", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL"),
+    ("Global", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", 0.0, 0.0),
+    ("Local", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL", 0.0, 0.0),
+    ("Total_pm15m", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", -INTERVAL_BUFFER_METERS, INTERVAL_BUFFER_METERS),
+    ("TopTotal_m15m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -INTERVAL_BUFFER_METERS, 0.0),
+    ("BotTotal_p15m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, INTERVAL_BUFFER_METERS),
 )
 
 
@@ -106,21 +110,27 @@ def calculate_interval_metrics(
             continue
 
         interval_sets: dict[str, pd.DataFrame] = {}
-        for name, top_col, bot_col in INTERVAL_DEFINITIONS:
+        for name, top_col, bot_col, top_delta, bot_delta in INTERVAL_DEFINITIONS:
             top = _to_float(interval.get(top_col))
             bot = _to_float(interval.get(bot_col))
             if top is None or bot is None:
                 warnings.append(f"{well}_{port}: missing interval bounds for {name}.")
                 interval_sets[name] = cells.iloc[0:0]
                 interval_sets[f"{name}_Net"] = cells.iloc[0:0]
+                interval_sets[f"{name}_NonNet"] = cells.iloc[0:0]
                 continue
+            top += top_delta
+            bot += bot_delta
             interval_cells = _cells_in_interval(cells, top, bot)
+            net_cells = _net_cells(interval_cells, settings)
             interval_sets[name] = interval_cells
-            interval_sets[f"{name}_Net"] = _net_cells(interval_cells, settings)
+            interval_sets[f"{name}_Net"] = net_cells
+            interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
 
-        for suffix in ("Global", "Local", "Global_Net", "Local_Net"):
+        metric_suffixes = _metric_suffixes()
+        for suffix in metric_suffixes:
             _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings)
-        for suffix in ("Global", "Local", "Global_Net", "Local_Net"):
+        for suffix in metric_suffixes:
             _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns)
 
         rows.append(row)
@@ -158,7 +168,18 @@ def _is_computed_metric_column(column: str) -> bool:
         return True
     if re.match(r"^(CellCount|CollectorCellCount)_(Global|Local)(?:_Net)?$", column):
         return True
-    return bool(re.match(r"^.+_(avg|geom|median|min|max|integral)_(Global|Local)(?:_Net)?$", column))
+    interval_names = "|".join(re.escape(name) for name, *_rest in INTERVAL_DEFINITIONS)
+    suffix = rf"(?:{interval_names})(?:_(?:Net|NonNet))?"
+    if re.match(rf"^(Thickness|NetThickness|NTG|PORO|PERM|KH|PHIH)_{suffix}$", column):
+        return True
+    if re.match(rf"^(NTG|PORO|PERM)_(avg|median|avg_arith|avg_geom)_{suffix}$", column):
+        return True
+    return bool(
+        re.match(
+            rf"^.+_(avg|mean_arith|geom|median|min|max|integral|min_star|max_star|std|delta)_{suffix}$",
+            column,
+        )
+    )
 
 
 def _settings_warnings(
@@ -180,6 +201,10 @@ def _settings_warnings(
         warnings.append(f"Selected property columns are missing: {', '.join(missing_properties)}.")
     if settings.lithology_column and not settings.reservoir_values:
         warnings.append("Lithology column is configured, but no reservoir values were provided.")
+    has_lithology_net = bool(settings.lithology_column and settings.lithology_column in extracted.columns and settings.reservoir_values)
+    has_ntg_net = bool(settings.ntg_column and settings.ntg_column in extracted.columns)
+    if not has_lithology_net and not has_ntg_net:
+        warnings.append("Net metrics use all interval cells because no NTG or lithology net filter is available.")
     return warnings
 
 
@@ -249,7 +274,14 @@ def _cells_by_xy(interval: pd.Series, xy_grouped: dict[tuple[float, float], pd.D
 def _cells_in_interval(cells: pd.DataFrame, top: float, bot: float) -> pd.DataFrame:
     low = min(top, bot)
     high = max(top, bot)
-    return cells[(cells["CellCenterTVD"] >= low) & (cells["CellCenterTVD"] <= high)]
+    tops = _numeric(cells["TVD_top"])
+    bases = _numeric(cells["TVD_base"])
+    cell_low = pd.concat([tops, bases], axis=1).min(axis=1)
+    cell_high = pd.concat([tops, bases], axis=1).max(axis=1)
+    overlap = (cell_high.clip(upper=high) - cell_low.clip(lower=low)).clip(lower=0.0)
+    selected = cells[overlap > 0.0].copy()
+    selected["MetricCellHeight"] = overlap[overlap > 0.0]
+    return selected
 
 
 def _add_base_metrics(
@@ -258,7 +290,7 @@ def _add_base_metrics(
     suffix: str,
     settings: IntervalMetricSettings,
 ) -> None:
-    heights = _numeric(cells["CellHeight"]) if "CellHeight" in cells else pd.Series(dtype=float)
+    heights = _metric_heights(cells)
     ntg = _optional_numeric(cells, settings.ntg_column)
     poro = _optional_numeric(cells, settings.poro_column)
     perm = _optional_numeric(cells, settings.perm_column) if settings.perm_column else _auto_perm(cells)
@@ -266,29 +298,34 @@ def _add_base_metrics(
     row[f"Thickness_{suffix}"] = _sum(heights)
     if not suffix.endswith("_Net"):
         row[f"NetThickness_{suffix}"] = _sum(heights * ntg) if ntg is not None else ""
-    row[f"NTG_avg_{suffix}"] = _mean(ntg) if ntg is not None else ""
+    row[f"NTG_avg_{suffix}"] = _mean(ntg, heights) if ntg is not None else ""
     row[f"NTG_median_{suffix}"] = _median(ntg) if ntg is not None else ""
-    row[f"PORO_avg_{suffix}"] = _mean(poro) if poro is not None else ""
+    row[f"PORO_avg_{suffix}"] = _mean(poro, heights) if poro is not None else ""
     row[f"PORO_median_{suffix}"] = _median(poro) if poro is not None else ""
-    row[f"PERM_avg_arith_{suffix}"] = _mean(perm) if perm is not None else ""
-    row[f"PERM_avg_geom_{suffix}"] = _geom_mean(perm) if perm is not None else ""
+    row[f"PERM_avg_arith_{suffix}"] = _mean(perm, heights) if perm is not None else ""
+    row[f"PERM_avg_geom_{suffix}"] = _geom_mean(perm, heights) if perm is not None else ""
     row[f"PERM_median_{suffix}"] = _median(perm) if perm is not None else ""
     row[f"KH_{suffix}"] = _sum(perm * heights * (ntg if ntg is not None else 1.0)) if perm is not None else ""
     row[f"PHIH_{suffix}"] = _sum(poro * heights * (ntg if ntg is not None else 1.0)) if poro is not None else ""
 
 
 def _add_property_metrics(row: dict, cells: pd.DataFrame, suffix: str, property_columns: list[str]) -> None:
-    heights = _numeric(cells["CellHeight"]) if "CellHeight" in cells else pd.Series(dtype=float)
+    heights = _metric_heights(cells)
     for column in property_columns:
         values = _optional_numeric(cells, column)
         if values is None:
             continue
-        row[f"{column}_avg_{suffix}"] = _mean(values)
-        row[f"{column}_geom_{suffix}"] = _geom_mean(values)
+        row[f"{column}_avg_{suffix}"] = _mean(values, heights)
+        row[f"{column}_mean_arith_{suffix}"] = _mean(values, heights)
+        row[f"{column}_geom_{suffix}"] = _geom_mean(values, heights)
         row[f"{column}_median_{suffix}"] = _median(values)
         row[f"{column}_min_{suffix}"] = _min(values)
         row[f"{column}_max_{suffix}"] = _max(values)
         row[f"{column}_integral_{suffix}"] = _sum(values * heights)
+        row[f"{column}_min_star_{suffix}"] = _robust_tail_mean(values, lower=True)
+        row[f"{column}_max_star_{suffix}"] = _robust_tail_mean(values, lower=False)
+        row[f"{column}_std_{suffix}"] = _std(values, heights)
+        row[f"{column}_delta_{suffix}"] = _delta_star(values)
 
 
 def _net_cells(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.DataFrame:
@@ -297,7 +334,22 @@ def _net_cells(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.Data
         return cells[values.isin(settings.reservoir_values)]
     if settings.ntg_column and settings.ntg_column in cells.columns:
         return cells[_numeric(cells[settings.ntg_column]) > 0]
-    return cells.iloc[0:0]
+    return cells
+
+
+def _non_net_cells(cells: pd.DataFrame, net_cells: pd.DataFrame) -> pd.DataFrame:
+    if cells.empty:
+        return cells
+    if net_cells.empty:
+        return cells
+    return cells.loc[~cells.index.isin(net_cells.index)]
+
+
+def _metric_suffixes() -> tuple[str, ...]:
+    values: list[str] = []
+    for name, _top_col, _bot_col, _top_delta, _bot_delta in INTERVAL_DEFINITIONS:
+        values.extend([name, f"{name}_Net", f"{name}_NonNet"])
+    return tuple(values)
 
 
 def _default_property_columns(columns) -> list[str]:
@@ -326,6 +378,14 @@ def _numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _metric_heights(cells: pd.DataFrame) -> pd.Series:
+    if "MetricCellHeight" in cells:
+        return _numeric(cells["MetricCellHeight"])
+    if "CellHeight" in cells:
+        return _numeric(cells["CellHeight"])
+    return pd.Series(dtype=float)
+
+
 def _to_float(value: object) -> float | None:
     numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     if pd.isna(numeric):
@@ -342,8 +402,14 @@ def _sum(series: pd.Series) -> float:
     return float(values.sum()) if len(values) else 0.0
 
 
-def _mean(series: pd.Series) -> float | str:
+def _mean(series: pd.Series, weights: pd.Series | None = None) -> float | str:
     values = _valid(series)
+    if weights is not None and len(values):
+        aligned_weights = _numeric(weights).reindex(values.index).dropna()
+        aligned_values = values.reindex(aligned_weights.index)
+        total_weight = aligned_weights.sum()
+        if len(aligned_values) and total_weight > 0.0:
+            return float((aligned_values * aligned_weights).sum() / total_weight)
     return float(values.mean()) if len(values) else ""
 
 
@@ -362,12 +428,65 @@ def _max(series: pd.Series) -> float | str:
     return float(values.max()) if len(values) else ""
 
 
-def _geom_mean(series: pd.Series) -> float | str:
+def _geom_mean(series: pd.Series, weights: pd.Series | None = None) -> float | str:
     values = _valid(series)
     values = values[values > 0]
     if not len(values):
         return ""
-    return float(math.exp(values.map(math.log).mean()))
+    logs = values.map(math.log)
+    if weights is not None:
+        aligned_weights = _numeric(weights).reindex(logs.index).dropna()
+        aligned_logs = logs.reindex(aligned_weights.index)
+        total_weight = aligned_weights.sum()
+        if len(aligned_logs) and total_weight > 0.0:
+            return float(math.exp((aligned_logs * aligned_weights).sum() / total_weight))
+    return float(math.exp(logs.mean()))
+
+
+def _std(series: pd.Series, weights: pd.Series | None = None) -> float | str:
+    values = _valid(series)
+    if weights is not None and len(values):
+        aligned_weights = _numeric(weights).reindex(values.index).dropna()
+        aligned_values = values.reindex(aligned_weights.index)
+        total_weight = aligned_weights.sum()
+        if len(aligned_values) and total_weight > 0.0:
+            mean = (aligned_values * aligned_weights).sum() / total_weight
+            variance = (((aligned_values - mean) ** 2) * aligned_weights).sum() / total_weight
+            return float(math.sqrt(variance))
+    return float(values.std(ddof=0)) if len(values) else ""
+
+
+def _delta_star(series: pd.Series) -> float | str:
+    min_star = _robust_tail_mean(series, lower=True)
+    max_star = _robust_tail_mean(series, lower=False)
+    if min_star == "" or max_star == "":
+        return ""
+    return float(max_star) - float(min_star)
+
+
+def _robust_tail_mean(series: pd.Series, *, lower: bool) -> float | str:
+    values = _valid(series).astype(float).sort_values()
+    if not len(values):
+        return ""
+    filtered = _drop_iqr_outliers(values)
+    if not len(filtered):
+        filtered = values
+    tail_count = max(1, math.ceil(len(filtered) * 0.1))
+    tail = filtered.head(tail_count) if lower else filtered.tail(tail_count)
+    return float(tail.mean())
+
+
+def _drop_iqr_outliers(values: pd.Series) -> pd.Series:
+    if len(values) < 4:
+        return values
+    q1 = values.quantile(0.25)
+    q3 = values.quantile(0.75)
+    iqr = q3 - q1
+    if iqr == 0:
+        return values
+    low = q1 - 1.5 * iqr
+    high = q3 + 1.5 * iqr
+    return values[(values >= low) & (values <= high)]
 
 
 def _normalize_value(value: object) -> str:

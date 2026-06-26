@@ -52,8 +52,8 @@ def test_rescue_reader_loads_grid_properties_and_values(tmp_path: Path) -> None:
     assert reader.get_property_value(prop.uuid, 0, 1, 0) == ""
     assert reader.get_property_value(prop.uuid, 1, 1, 0) == 0.4000000059604645
     geometry = reader.get_cell_geometry_column(0, 0)
-    assert geometry["TVD_top"] == [-95.0, -85.0, -75.0, -65.0]
-    assert geometry["TVD_base"] == [-105.0, -95.0, -85.0, -75.0]
+    assert geometry["TVD_top"] == [95.0, 85.0, 75.0, 65.0]
+    assert geometry["TVD_base"] == [105.0, 95.0, 85.0, 75.0]
     assert geometry["CellHeight"] == [10.0, 10.0, 10.0, 10.0]
     centers = reader.get_column_centers_xy()
     assert centers.shape == (3, 2, 2)

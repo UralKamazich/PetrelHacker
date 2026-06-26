@@ -564,6 +564,8 @@ def _geometry_from_z_centers(z_values: np.ndarray) -> tuple[list[float], list[fl
         top = boundaries[:-1]
         base = boundaries[1:]
     height = np.abs(top - base)
+    top = np.abs(top)
+    base = np.abs(base)
     return top.tolist(), base.tolist(), height.tolist()
 
 

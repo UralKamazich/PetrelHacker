@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -29,6 +31,7 @@ from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
 from app.workers.metrics_worker import MetricsRequest, MetricsResult, MetricsWorker
+from core.multi_model_extractor import ExtractionModelSpec
 from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
 from core.property_presets import normalize_property_title, should_select_property
@@ -51,17 +54,26 @@ class MainWindow(QMainWindow):
         self._metrics_thread: QThread | None = None
         self._metrics_worker: MetricsWorker | None = None
         self._model_result: ModelLoadResult | None = None
+        self._model_results: list[ModelLoadResult] = []
         self._sleeves_loaded = False
         self._last_extracted_headers: list[str] = []
 
         self.epc_path_edit = QLineEdit()
         self.epc_path_edit.setPlaceholderText("Select .epc file or Rescue folder")
+        self.model_path_edits = [self.epc_path_edit, QLineEdit(), QLineEdit()]
+        for edit in self.model_path_edits[1:]:
+            edit.setPlaceholderText("Optional .epc file or Rescue folder")
+        self.model_offset_edits = [QLineEdit(), QLineEdit(), QLineEdit()]
+        for edit in self.model_offset_edits:
+            edit.setPlaceholderText("0")
+            edit.setText("0")
+        self.model_browse_buttons = [QPushButton("Browse") for _ in range(3)]
         self.h5_path_label = QLabel("-")
         self.backend_label = QLabel("-")
-        self.load_button = QPushButton("Load model")
-        self.browse_epc_button = QPushButton("Browse")
-        self.grids_table = self._table(["Title", "UUID", "NI", "NJ", "NK", "Type"])
-        self.properties_table = self._table(["Use", "Title", "UUID", "Indexable", "UOM", "Kind", "Type"])
+        self.load_button = QPushButton("Load models")
+        self.browse_epc_button = self.model_browse_buttons[0]
+        self.grids_table = self._table(["Model", "Title", "UUID", "NI", "NJ", "NK", "Type"])
+        self.properties_table = self._table(["Use", "Model", "Title", "UUID", "Indexable", "UOM", "Kind", "Type"])
         self.sleeves_path_edit = QLineEdit()
         self.sleeves_path_edit.setPlaceholderText("Select CSV/XLSX sleeves table")
         self.sleeves_status_label = QLabel("-")
@@ -90,8 +102,8 @@ class MainWindow(QMainWindow):
         self.metrics_lithology_combo = self._combo()
         self.metrics_reservoir_values_edit = QLineEdit()
         self.metrics_reservoir_values_edit.setPlaceholderText("Example: 1,2")
-        self.metrics_property_combo = self._combo()
-        self.metrics_add_property_button = QPushButton("Add")
+        self.metrics_property_list = QListWidget()
+        self.metrics_property_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self.metrics_properties_edit = QLineEdit()
         self.metrics_properties_edit.setPlaceholderText("Example: NTG,PORO,Perm_1A")
         self.metrics_run_button = QPushButton("Calculate metrics")
@@ -109,7 +121,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._metrics_tab(), "Metrics")
         self.setCentralWidget(tabs)
 
-        self.browse_epc_button.clicked.connect(self._browse_epc)
+        for index, button in enumerate(self.model_browse_buttons):
+            button.clicked.connect(lambda _checked=False, model_index=index: self._browse_epc(model_index))
         self.load_button.clicked.connect(self._load_model)
         self.output_path_edit.textChanged.connect(self._update_run_enabled)
         self.run_button.clicked.connect(self._run_extraction)
@@ -117,6 +130,7 @@ class MainWindow(QMainWindow):
         self.metrics_extracted_path_edit.textChanged.connect(self._on_metrics_extracted_path_changed)
         self.metrics_intervals_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_output_path_edit.textChanged.connect(self._update_metrics_enabled)
+        self.metrics_property_list.itemSelectionChanged.connect(self._sync_metrics_properties_from_list)
         self.metrics_run_button.clicked.connect(self._run_metrics)
         self._restore_last_paths()
 
@@ -124,11 +138,22 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        file_row = QHBoxLayout()
-        file_row.addWidget(self.epc_path_edit, 1)
-        file_row.addWidget(self.browse_epc_button)
-        file_row.addWidget(self.load_button)
-        layout.addLayout(file_row)
+        for index, (path_edit, offset_edit, browse_button) in enumerate(
+            zip(self.model_path_edits, self.model_offset_edits, self.model_browse_buttons, strict=False),
+            start=1,
+        ):
+            file_row = QHBoxLayout()
+            file_row.addWidget(QLabel(f"M{index}"))
+            file_row.addWidget(path_edit, 1)
+            file_row.addWidget(QLabel("Depth +/- m"))
+            file_row.addWidget(offset_edit)
+            file_row.addWidget(browse_button)
+            layout.addLayout(file_row)
+
+        load_row = QHBoxLayout()
+        load_row.addWidget(self.load_button)
+        load_row.addStretch(1)
+        layout.addLayout(load_row)
 
         info = QGroupBox("Model info")
         form = QFormLayout(info)
@@ -230,10 +255,7 @@ class MainWindow(QMainWindow):
         form.addRow("PERM column", self.metrics_perm_combo)
         form.addRow("Lithology column", self.metrics_lithology_combo)
         form.addRow("Reservoir values", self.metrics_reservoir_values_edit)
-        property_row = QHBoxLayout()
-        property_row.addWidget(self.metrics_property_combo, 1)
-        property_row.addWidget(self.metrics_add_property_button)
-        form.addRow("Add property", property_row)
+        form.addRow("Additional channels", self.metrics_property_list)
         form.addRow("Properties", self.metrics_properties_edit)
         layout.addWidget(settings_box)
 
@@ -248,10 +270,9 @@ class MainWindow(QMainWindow):
         browse_extracted.clicked.connect(self._browse_metrics_extracted)
         browse_intervals.clicked.connect(self._browse_metrics_intervals)
         browse_output.clicked.connect(self._browse_metrics_output)
-        self.metrics_add_property_button.clicked.connect(self._add_metrics_property)
         return tab
 
-    def _browse_epc(self) -> None:
+    def _browse_epc(self, model_index: int = 0) -> None:
         dialog = QFileDialog(self, "Select model file or Rescue folder")
         dialog.setFileMode(QFileDialog.AnyFile)
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
@@ -260,7 +281,7 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             selected = dialog.selectedFiles()
             if selected:
-                self.epc_path_edit.setText(selected[0])
+                self.model_path_edits[model_index].setText(selected[0])
                 self._save_last_paths()
 
     def _browse_sleeves(self) -> None:
@@ -296,10 +317,20 @@ class MainWindow(QMainWindow):
             self._save_last_paths()
 
     def _load_model(self) -> None:
-        epc_path = self.epc_path_edit.text().strip()
-        if not epc_path:
-            QMessageBox.warning(self, "Missing model", "Select an EPC file or Rescue folder first.")
+        if not self.model_path_edits[0].text().strip():
+            QMessageBox.warning(self, "Missing primary model", "Select M1 first; it defines output geometry and rows.")
             return
+        offsets = self._model_depth_offsets()
+        model_pairs = [
+            (edit.text().strip(), offsets[index])
+            for index, edit in enumerate(self.model_path_edits)
+            if edit.text().strip()
+        ]
+        model_paths = [path for path, _offset in model_pairs]
+        if not model_paths:
+            QMessageBox.warning(self, "Missing model", "Select at least one EPC file or Rescue folder first.")
+            return
+        depth_offsets = [offset for _path, offset in model_pairs]
 
         self._save_last_paths()
         self.load_button.setEnabled(False)
@@ -307,7 +338,7 @@ class MainWindow(QMainWindow):
         self.log_panel.append_message("Starting model load...")
 
         self._load_thread = QThread(self)
-        self._load_worker = LoadModelWorker(epc_path)
+        self._load_worker = LoadModelWorker(model_paths, depth_offsets)
         self._load_worker.moveToThread(self._load_thread)
         self._load_thread.started.connect(self._load_worker.run)
         self._load_worker.log.connect(self.log_panel.append_message)
@@ -320,12 +351,14 @@ class MainWindow(QMainWindow):
         self._load_thread.finished.connect(self._reset_load_worker_refs)
         self._load_thread.start()
 
-    def _on_model_loaded(self, result: ModelLoadResult) -> None:
-        self._model_result = result
-        self.backend_label.setText(result.backend)
-        self.h5_path_label.setText(result.h5_path or "-")
-        self._fill_grids(result)
-        self._fill_properties(result)
+    def _on_model_loaded(self, result: ModelLoadResult | list[ModelLoadResult]) -> None:
+        results = result if isinstance(result, list) else [result]
+        self._model_results = results
+        self._model_result = results[0] if results else None
+        self.backend_label.setText("; ".join(f"{item.label}:{item.backend}" for item in results) or "-")
+        self.h5_path_label.setText("; ".join(f"{item.label}:{item.h5_path or '-'}" for item in results) or "-")
+        self._fill_grids(results)
+        self._fill_properties(results)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.load_button.setEnabled(True)
@@ -344,42 +377,52 @@ class MainWindow(QMainWindow):
         self._load_thread = None
         self._load_worker = None
 
-    def _fill_grids(self, result: ModelLoadResult) -> None:
-        self.grids_table.setRowCount(len(result.grids))
-        for row, grid in enumerate(result.grids):
-            values = [
-                grid.title,
-                grid.uuid,
-                "" if grid.ni is None else str(grid.ni),
-                "" if grid.nj is None else str(grid.nj),
-                "" if grid.nk is None else str(grid.nk),
-                grid.grid_type or "",
-            ]
-            for col, value in enumerate(values):
-                self.grids_table.setItem(row, col, QTableWidgetItem(value))
+    def _fill_grids(self, results: list[ModelLoadResult]) -> None:
+        row_count = sum(len(result.grids) for result in results)
+        self.grids_table.setRowCount(row_count)
+        row = 0
+        for result in results:
+            for grid in result.grids:
+                values = [
+                    result.label,
+                    grid.title,
+                    grid.uuid,
+                    "" if grid.ni is None else str(grid.ni),
+                    "" if grid.nj is None else str(grid.nj),
+                    "" if grid.nk is None else str(grid.nk),
+                    grid.grid_type or "",
+                ]
+                for col, value in enumerate(values):
+                    self.grids_table.setItem(row, col, QTableWidgetItem(value))
+                row += 1
         self.grids_table.resizeColumnsToContents()
 
-    def _fill_properties(self, result: ModelLoadResult) -> None:
+    def _fill_properties(self, results: list[ModelLoadResult]) -> None:
         saved_uuids = self._saved_property_uuids()
         saved_titles = self._saved_property_titles()
         use_defaults = not saved_uuids and not saved_titles
-        self.properties_table.setRowCount(len(result.properties))
-        for row, prop in enumerate(result.properties):
-            check = QCheckBox()
-            check.setChecked(should_select_property(prop, saved_uuids, saved_titles, use_defaults))
-            check.stateChanged.connect(self._update_run_enabled)
-            check.stateChanged.connect(self._save_selected_properties)
-            self.properties_table.setCellWidget(row, 0, check)
-            values = [
-                prop.title,
-                prop.uuid,
-                prop.indexable_element or "",
-                prop.uom or "",
-                prop.property_kind or "",
-                prop.property_type or "",
-            ]
-            for offset, value in enumerate(values, start=1):
-                self.properties_table.setItem(row, offset, QTableWidgetItem(value))
+        row_count = sum(len(result.properties) for result in results)
+        self.properties_table.setRowCount(row_count)
+        row = 0
+        for result in results:
+            for prop in result.properties:
+                check = QCheckBox()
+                check.setChecked(should_select_property(prop, saved_uuids, saved_titles, use_defaults))
+                check.stateChanged.connect(self._update_run_enabled)
+                check.stateChanged.connect(self._save_selected_properties)
+                self.properties_table.setCellWidget(row, 0, check)
+                values = [
+                    result.label,
+                    prop.title,
+                    prop.uuid,
+                    prop.indexable_element or "",
+                    prop.uom or "",
+                    prop.property_kind or "",
+                    prop.property_type or "",
+                ]
+                for offset, value in enumerate(values, start=1):
+                    self.properties_table.setItem(row, offset, QTableWidgetItem(value))
+                row += 1
         self.properties_table.resizeColumnsToContents()
         self._update_run_enabled()
 
@@ -423,7 +466,7 @@ class MainWindow(QMainWindow):
         uuids: list[str] = []
         for row in range(self.properties_table.rowCount()):
             widget = self.properties_table.cellWidget(row, 0)
-            uuid_item = self.properties_table.item(row, 2)
+            uuid_item = self.properties_table.item(row, 3)
             if isinstance(widget, QCheckBox) and widget.isChecked() and uuid_item is not None:
                 uuids.append(uuid_item.text())
         return uuids
@@ -432,10 +475,53 @@ class MainWindow(QMainWindow):
         titles: list[str] = []
         for row in range(self.properties_table.rowCount()):
             widget = self.properties_table.cellWidget(row, 0)
-            title_item = self.properties_table.item(row, 1)
+            title_item = self.properties_table.item(row, 2)
             if isinstance(widget, QCheckBox) and widget.isChecked() and title_item is not None:
                 titles.append(title_item.text())
         return titles
+
+    def _selected_property_uuids_by_model(self) -> dict[str, list[str]]:
+        selected: dict[str, list[str]] = {}
+        for row in range(self.properties_table.rowCount()):
+            widget = self.properties_table.cellWidget(row, 0)
+            model_item = self.properties_table.item(row, 1)
+            uuid_item = self.properties_table.item(row, 3)
+            if (
+                isinstance(widget, QCheckBox)
+                and widget.isChecked()
+                and model_item is not None
+                and uuid_item is not None
+            ):
+                selected.setdefault(model_item.text(), []).append(uuid_item.text())
+        return selected
+
+    def _extraction_model_specs(self) -> list[ExtractionModelSpec]:
+        selected_by_model = self._selected_property_uuids_by_model()
+        specs: list[ExtractionModelSpec] = []
+        offsets = self._model_depth_offsets()
+        for result in self._model_results:
+            specs.append(
+                ExtractionModelSpec(
+                    path=result.epc_path,
+                    selected_property_uuids=selected_by_model.get(result.label, []),
+                    depth_offset=offsets[result.model_index] if result.model_index < len(offsets) else result.depth_offset,
+                    label=result.label,
+                )
+            )
+        return specs
+
+    def _model_depth_offsets(self) -> list[float]:
+        offsets: list[float] = []
+        for edit in self.model_offset_edits:
+            text = edit.text().strip().replace(",", ".")
+            if not text:
+                offsets.append(0.0)
+                continue
+            try:
+                offsets.append(float(text))
+            except ValueError:
+                offsets.append(0.0)
+        return offsets
 
     def _saved_property_uuids(self) -> set[str]:
         return set(self._settings_list("properties/selected_uuids"))
@@ -462,8 +548,15 @@ class MainWindow(QMainWindow):
         extracted_path = self.settings.value("paths/metrics_extracted", "", type=str)
         intervals_path = self.settings.value("paths/metrics_intervals", "", type=str)
         metrics_output_path = self.settings.value("paths/metrics_output", "", type=str)
-        if epc_path:
+        for index, edit in enumerate(self.model_path_edits):
+            value = self.settings.value(f"paths/model_{index + 1}", "", type=str)
+            if value:
+                edit.setText(value)
+        if epc_path and not self.epc_path_edit.text().strip():
             self.epc_path_edit.setText(epc_path)
+        for index, edit in enumerate(self.model_offset_edits):
+            value = self.settings.value(f"depth_offsets/model_{index + 1}", "0", type=str)
+            edit.setText(value or "0")
         if sleeves_path:
             self.sleeves_path_edit.setText(sleeves_path)
             if Path(sleeves_path).exists():
@@ -479,6 +572,10 @@ class MainWindow(QMainWindow):
 
     def _save_last_paths(self) -> None:
         self.settings.setValue("paths/epc", self.epc_path_edit.text().strip())
+        for index, edit in enumerate(self.model_path_edits):
+            self.settings.setValue(f"paths/model_{index + 1}", edit.text().strip())
+        for index, edit in enumerate(self.model_offset_edits):
+            self.settings.setValue(f"depth_offsets/model_{index + 1}", edit.text().strip() or "0")
         self.settings.setValue("paths/sleeves", self.sleeves_path_edit.text().strip())
         self.settings.setValue("paths/metrics_extracted", self.metrics_extracted_path_edit.text().strip())
         self.settings.setValue("paths/metrics_intervals", self.metrics_intervals_path_edit.text().strip())
@@ -486,7 +583,7 @@ class MainWindow(QMainWindow):
 
     def _update_run_enabled(self, *args) -> None:
         can_run = (
-            self._model_result is not None
+            bool(self._model_results)
             and self._sleeves_loaded
             and bool(self.output_path_edit.text().strip())
             and bool(self._selected_property_uuids())
@@ -495,7 +592,7 @@ class MainWindow(QMainWindow):
         self.run_button.setEnabled(can_run)
 
     def _run_extraction(self) -> None:
-        if self._model_result is None:
+        if not self._model_results:
             QMessageBox.warning(self, "Missing model", "Load a model first.")
             return
         if not self._sleeves_loaded:
@@ -514,12 +611,14 @@ class MainWindow(QMainWindow):
             output_path = str(Path(output_path).with_suffix(".xlsx"))
             self.output_path_edit.setText(output_path)
 
+        model_specs = self._extraction_model_specs()
         request = ExtractionRequest(
-            epc_path=self.epc_path_edit.text().strip(),
+            epc_path=model_specs[0].path,
             sleeves_path=self.sleeves_path_edit.text().strip(),
             output_path=output_path,
             selected_property_uuids=selected_uuids,
             skip_inactive=self.skip_inactive_checkbox.isChecked(),
+            model_specs=model_specs,
         )
         self._save_last_paths()
         self._save_selected_properties()
@@ -648,7 +747,7 @@ class MainWindow(QMainWindow):
             perm_column=self._combo_text_or_none(self.metrics_perm_combo),
             lithology_column=self._combo_text_or_none(self.metrics_lithology_combo),
             reservoir_values=self._split_csv_text(self.metrics_reservoir_values_edit.text()),
-            property_columns=self._split_csv_text(self.metrics_properties_edit.text()),
+            property_columns=self._selected_metrics_properties(),
         )
         self._save_last_paths()
         self.metrics_run_button.setEnabled(False)
@@ -729,17 +828,12 @@ class MainWindow(QMainWindow):
         self._refresh_metrics_channel_options()
 
     def _refresh_metrics_channel_options(self) -> None:
-        selected_properties = self._metrics_allowed_property_titles()
-        if selected_properties:
-            headers = [header for header in self._last_extracted_headers if header in selected_properties]
-        else:
-            headers = []
+        headers = self._metric_property_headers_from_extracted()
         for combo in (
             self.metrics_ntg_combo,
             self.metrics_poro_combo,
             self.metrics_perm_combo,
             self.metrics_lithology_combo,
-            self.metrics_property_combo,
         ):
             current = combo.currentText().strip()
             combo.clear()
@@ -747,15 +841,23 @@ class MainWindow(QMainWindow):
             combo.addItems(headers)
             if current:
                 self._select_combo_text(combo, current)
+        selected = set(self._split_csv_text(self.metrics_properties_edit.text()))
+        self.metrics_property_list.blockSignals(True)
+        self.metrics_property_list.clear()
+        for header in headers:
+            item = QListWidgetItem(header)
+            self.metrics_property_list.addItem(item)
+            item.setSelected(header in selected)
+        self.metrics_property_list.blockSignals(False)
         self._select_combo_text(self.metrics_ntg_combo, "NTG")
         self._select_combo_text(self.metrics_poro_combo, "PORO")
         self._select_first_contains(self.metrics_perm_combo, ("perm",))
         self._select_first_contains(self.metrics_lithology_combo, ("lito", "lith", "layer"))
 
     def _property_titles_from_model(self) -> list[str]:
-        if self._model_result is None:
+        if not self._model_results:
             return []
-        return [prop.title for prop in self._model_result.properties]
+        return [prop.title for result in self._model_results for prop in result.properties]
 
     def _metrics_allowed_property_titles(self) -> list[str]:
         selected = self._selected_property_titles()
@@ -766,14 +868,31 @@ class MainWindow(QMainWindow):
             return saved
         return self._property_titles_from_model()
 
-    def _add_metrics_property(self) -> None:
-        value = self.metrics_property_combo.currentText().strip()
-        if not value:
-            return
-        values = self._split_csv_text(self.metrics_properties_edit.text())
-        if value not in values:
-            values.append(value)
-            self.metrics_properties_edit.setText(",".join(values))
+    def _metric_property_headers_from_extracted(self) -> list[str]:
+        base_columns = {
+            "Well",
+            "Port",
+            "X",
+            "Y",
+            "I",
+            "J",
+            "K",
+            "IsActive",
+            "TVD_top",
+            "TVD_base",
+            "CellHeight",
+            "CellSizeI",
+            "CellSizeJ",
+            "CellAreaXY",
+        }
+        return [header for header in self._last_extracted_headers if header not in base_columns]
+
+    def _sync_metrics_properties_from_list(self) -> None:
+        self.metrics_properties_edit.setText(",".join(self._selected_metrics_properties()))
+
+    def _selected_metrics_properties(self) -> list[str]:
+        selected = [item.text() for item in self.metrics_property_list.selectedItems()]
+        return selected or self._split_csv_text(self.metrics_properties_edit.text())
 
     @staticmethod
     def _table_headers(path: str) -> list[str]:

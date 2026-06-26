@@ -59,17 +59,26 @@ def test_calculate_interval_metrics_for_global_local_and_net() -> None:
     assert row["KH_Global"] == 600.0
     assert row["PHIH_Global"] == 2.0
     assert math.isclose(row["SW_avg_Global"], 0.4)
+    assert math.isclose(row["SW_mean_arith_Global"], 0.4)
     assert row["SW_median_Global"] == 0.4
     assert row["SW_min_Global"] == 0.2
     assert row["SW_max_Global"] == 0.6
     assert row["SW_integral_Global"] == 12.0
+    assert row["SW_min_star_Global"] == 0.2
+    assert row["SW_max_star_Global"] == 0.6
+    assert math.isclose(row["SW_std_Global"], 0.16329931618554522)
+    assert math.isclose(row["SW_delta_Global"], 0.4)
 
     assert row["Thickness_Local"] == 10.0
     assert row["NetThickness_Local"] == 5.0
     assert row["PERM_avg_arith_Local"] == 100.0
     assert row["KH_Local"] == 500.0
+    assert row["Thickness_Total_pm15m"] == 30.0
+    assert row["Thickness_TopTotal_m15m"] == 0.0
+    assert row["Thickness_BotTotal_p15m"] == 0.0
 
     assert row["Thickness_Global_Net"] == 20.0
+    assert row["Thickness_Global_NonNet"] == 10.0
     assert row["KH_Global_Net"] == 600.0
     assert "NetThickness_Global_Net" not in row
     assert "NetThickness_Local_Net" not in row
@@ -216,3 +225,64 @@ def test_calculate_interval_metrics_drops_existing_metric_columns_from_frac_list
     assert row["PORO_avg_Global"] == 0.2
     assert "CellCount_Global" not in row
     assert "SomeLog_avg_Global" not in row
+
+
+def test_calculate_interval_metrics_uses_gross_cells_for_net_without_net_filter() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A", "A"],
+            "Port": [1, 1],
+            "TVD_top": [100.0, 110.0],
+            "TVD_base": [110.0, 120.0],
+            "CellHeight": [10.0, 10.0],
+            "DENSITY": [2.4, 2.6],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [120.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [120.0],
+        }
+    )
+
+    result = calculate_interval_metrics(extracted, intervals, IntervalMetricSettings(ntg_column=None))
+
+    row = result.rows[0]
+    assert row["Thickness_Global"] == 20.0
+    assert row["Thickness_Global_Net"] == 20.0
+    assert row["DENSITY_avg_Global"] == 2.5
+    assert row["DENSITY_avg_Global_Net"] == 2.5
+    assert any("Net metrics use all interval cells" in warning for warning in result.warnings)
+
+
+def test_calculate_interval_metrics_uses_partial_depth_overlap_for_coarse_cells() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVD_top": [90.0],
+            "TVD_base": [130.0],
+            "CellHeight": [40.0],
+            "STRESS": [10.0],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [120.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [120.0],
+        }
+    )
+
+    result = calculate_interval_metrics(extracted, intervals, IntervalMetricSettings(property_columns=["STRESS"]))
+
+    row = result.rows[0]
+    assert row["Thickness_Global"] == 20.0
+    assert row["STRESS_integral_Global"] == 200.0
