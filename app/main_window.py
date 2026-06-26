@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 from PySide6.QtCore import QSettings, QThread
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.widgets.curve_plot import CurvePlotData, CurvePlotWidget, CurveSpec
 from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
@@ -36,6 +40,7 @@ from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
 from core.property_presets import normalize_property_title, should_select_property
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
+from core.table_io import read_table
 from core.xlsx_preview import read_xlsx_headers, read_xlsx_preview
 
 
@@ -57,6 +62,8 @@ class MainWindow(QMainWindow):
         self._model_results: list[ModelLoadResult] = []
         self._sleeves_loaded = False
         self._last_extracted_headers: list[str] = []
+        self._curve_df: pd.DataFrame | None = None
+        self._restoring_curve_settings = False
 
         self.epc_path_edit = QLineEdit()
         self.epc_path_edit.setPlaceholderText("Select .epc file or Rescue folder")
@@ -111,6 +118,32 @@ class MainWindow(QMainWindow):
         self.metrics_progress_bar = QProgressBar()
         self.metrics_status_label = QLabel("No metrics calculated yet.")
         self.metrics_preview_table = self._table(["Well", "Port"])
+        self.curve_extracted_path_edit = QLineEdit()
+        self.curve_extracted_path_edit.setPlaceholderText("Select extracted XLSX/CSV")
+        self.curve_load_button = QPushButton("Load")
+        self.curve_well_combo = self._combo()
+        self.curve_port_combo = self._combo()
+        self.curve1_combo = self._combo()
+        self.curve2_combo = self._combo()
+        self.curve3_combo = self._combo()
+        self.curve4_combo = self._combo()
+        self.curve_depth_min_spin = self._spinbox()
+        self.curve_depth_max_spin = self._spinbox()
+        self.curve1_min_spin = self._spinbox()
+        self.curve1_max_spin = self._spinbox()
+        self.curve2_min_spin = self._spinbox()
+        self.curve2_max_spin = self._spinbox()
+        self.curve3_min_spin = self._spinbox()
+        self.curve3_max_spin = self._spinbox()
+        self.curve4_min_spin = self._spinbox()
+        self.curve4_max_spin = self._spinbox()
+        self.curve2_depth_shift_spin = self._spinbox()
+        self.curve3_depth_shift_spin = self._spinbox()
+        self.curve4_depth_shift_spin = self._spinbox()
+        self.curve_auto_range_button = QPushButton("Auto range")
+        self.curve_plot_button = QPushButton("Draw")
+        self.curve_status_label = QLabel("No curve data loaded.")
+        self.curve_plot = CurvePlotWidget()
 
         tabs = QTabWidget()
         tabs.addTab(self._model_tab(), "Model")
@@ -118,6 +151,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._properties_tab(), "Properties")
         tabs.addTab(self._run_tab(), "Run")
         tabs.addTab(self._preview_tab(), "Preview / QC")
+        tabs.addTab(self._curves_tab(), "Curves / QC")
         tabs.addTab(self._metrics_tab(), "Metrics")
         self.setCentralWidget(tabs)
 
@@ -132,6 +166,31 @@ class MainWindow(QMainWindow):
         self.metrics_output_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_property_list.itemSelectionChanged.connect(self._sync_metrics_properties_from_list)
         self.metrics_run_button.clicked.connect(self._run_metrics)
+        self.curve_load_button.clicked.connect(self._load_curve_table)
+        self.curve_well_combo.currentTextChanged.connect(self._on_curve_well_changed)
+        self.curve_port_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve1_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve2_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve3_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve4_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve2_depth_shift_spin.valueChanged.connect(self._on_curve_control_changed)
+        self.curve3_depth_shift_spin.valueChanged.connect(self._on_curve_control_changed)
+        self.curve4_depth_shift_spin.valueChanged.connect(self._on_curve_control_changed)
+        for spinbox in (
+            self.curve_depth_min_spin,
+            self.curve_depth_max_spin,
+            self.curve1_min_spin,
+            self.curve1_max_spin,
+            self.curve2_min_spin,
+            self.curve2_max_spin,
+            self.curve3_min_spin,
+            self.curve3_max_spin,
+            self.curve4_min_spin,
+            self.curve4_max_spin,
+        ):
+            spinbox.valueChanged.connect(self._on_curve_control_changed)
+        self.curve_auto_range_button.clicked.connect(self._auto_curve_ranges)
+        self.curve_plot_button.clicked.connect(self._update_curve_plot)
         self._restore_last_paths()
 
     def _model_tab(self) -> QWidget:
@@ -223,6 +282,60 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.qc_preview_table, 1)
         return tab
 
+    def _curves_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        file_row = QHBoxLayout()
+        browse = QPushButton("Browse")
+        file_row.addWidget(QLabel("Extracted"))
+        file_row.addWidget(self.curve_extracted_path_edit, 1)
+        file_row.addWidget(browse)
+        file_row.addWidget(self.curve_load_button)
+        layout.addLayout(file_row)
+
+        controls = QGroupBox("Curve controls")
+        grid = QGridLayout(controls)
+        grid.addWidget(QLabel("Well"), 0, 0)
+        grid.addWidget(self.curve_well_combo, 0, 1)
+        grid.addWidget(QLabel("Port"), 0, 2)
+        grid.addWidget(self.curve_port_combo, 0, 3)
+        grid.addWidget(QLabel("Range"), 1, 0)
+        grid.addWidget(QLabel("Channel"), 1, 1)
+        grid.addWidget(QLabel("Min"), 1, 2)
+        grid.addWidget(QLabel("Max"), 1, 3)
+        grid.addWidget(QLabel("Shift m"), 1, 4)
+        grid.addWidget(QLabel("Depth"), 2, 0)
+        grid.addWidget(self.curve_depth_min_spin, 2, 1)
+        grid.addWidget(self.curve_depth_max_spin, 2, 2)
+        grid.addWidget(self.curve_auto_range_button, 2, 3)
+        grid.addWidget(QLabel("Scale 1"), 3, 0)
+        grid.addWidget(self.curve1_combo, 3, 1)
+        grid.addWidget(self.curve1_min_spin, 3, 2)
+        grid.addWidget(self.curve1_max_spin, 3, 3)
+        grid.addWidget(QLabel("Scale 2"), 4, 0)
+        grid.addWidget(self.curve2_combo, 4, 1)
+        grid.addWidget(self.curve2_min_spin, 4, 2)
+        grid.addWidget(self.curve2_max_spin, 4, 3)
+        grid.addWidget(self.curve2_depth_shift_spin, 4, 4)
+        grid.addWidget(QLabel("Scale 3"), 5, 0)
+        grid.addWidget(self.curve3_combo, 5, 1)
+        grid.addWidget(self.curve3_min_spin, 5, 2)
+        grid.addWidget(self.curve3_max_spin, 5, 3)
+        grid.addWidget(self.curve3_depth_shift_spin, 5, 4)
+        grid.addWidget(QLabel("Scale 4"), 6, 0)
+        grid.addWidget(self.curve4_combo, 6, 1)
+        grid.addWidget(self.curve4_min_spin, 6, 2)
+        grid.addWidget(self.curve4_max_spin, 6, 3)
+        grid.addWidget(self.curve4_depth_shift_spin, 6, 4)
+        grid.addWidget(self.curve_plot_button, 6, 5)
+        layout.addWidget(controls)
+
+        layout.addWidget(self.curve_status_label)
+        layout.addWidget(self.curve_plot, 1)
+        browse.clicked.connect(self._browse_curve_extracted)
+        return tab
+
     def _metrics_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -302,6 +415,13 @@ class MainWindow(QMainWindow):
             self.metrics_extracted_path_edit.setText(path)
             self._set_default_metrics_output(path)
             self._load_metrics_channel_options(path)
+            self._save_last_paths()
+
+    def _browse_curve_extracted(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select extracted table", "", "Tables (*.xlsx *.csv);;All files (*)")
+        if path:
+            self.curve_extracted_path_edit.setText(path)
+            self._load_curve_table()
             self._save_last_paths()
 
     def _browse_metrics_intervals(self) -> None:
@@ -546,6 +666,7 @@ class MainWindow(QMainWindow):
         epc_path = self.settings.value("paths/epc", "", type=str)
         sleeves_path = self.settings.value("paths/sleeves", "", type=str)
         extracted_path = self.settings.value("paths/metrics_extracted", "", type=str)
+        curve_extracted_path = self.settings.value("paths/curve_extracted", "", type=str)
         intervals_path = self.settings.value("paths/metrics_intervals", "", type=str)
         metrics_output_path = self.settings.value("paths/metrics_output", "", type=str)
         for index, edit in enumerate(self.model_path_edits):
@@ -565,6 +686,10 @@ class MainWindow(QMainWindow):
             self.metrics_extracted_path_edit.setText(extracted_path)
             if Path(extracted_path).exists():
                 self._load_metrics_channel_options(extracted_path)
+        if curve_extracted_path:
+            self.curve_extracted_path_edit.setText(curve_extracted_path)
+            if Path(curve_extracted_path).exists():
+                self._load_curve_table(auto_range=False)
         if intervals_path:
             self.metrics_intervals_path_edit.setText(intervals_path)
         if metrics_output_path:
@@ -578,6 +703,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue(f"depth_offsets/model_{index + 1}", edit.text().strip() or "0")
         self.settings.setValue("paths/sleeves", self.sleeves_path_edit.text().strip())
         self.settings.setValue("paths/metrics_extracted", self.metrics_extracted_path_edit.text().strip())
+        self.settings.setValue("paths/curve_extracted", self.curve_extracted_path_edit.text().strip())
         self.settings.setValue("paths/metrics_intervals", self.metrics_intervals_path_edit.text().strip())
         self.settings.setValue("paths/metrics_output", self.metrics_output_path_edit.text().strip())
 
@@ -659,8 +785,10 @@ class MainWindow(QMainWindow):
         self.log_panel.append_message(f"Log: {result.log_path}")
         self.output_path_edit.setText(result.output_path)
         self.metrics_extracted_path_edit.setText(result.output_path)
+        self.curve_extracted_path_edit.setText(result.output_path)
         self._set_default_metrics_output(result.output_path)
         self._load_metrics_channel_options(result.output_path)
+        self._load_curve_table()
         self._load_result_preview(result)
         csv_warnings = [warning for warning in result.stats.warnings if "Saved CSV instead" in warning]
         if csv_warnings:
@@ -712,6 +840,227 @@ class MainWindow(QMainWindow):
             for col_index, value in enumerate(row):
                 self.qc_preview_table.setItem(row_index, col_index, QTableWidgetItem(value))
         self.qc_preview_table.resizeColumnsToContents()
+
+    def _load_curve_table(self, *args, auto_range: bool = True) -> None:
+        path = self.curve_extracted_path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Missing extracted table", "Select an extracted XLSX/CSV file first.")
+            return
+        try:
+            df = read_table(path)
+        except Exception as exc:  # noqa: BLE001
+            self.curve_plot.set_message(f"Failed to load curve table: {exc}")
+            QMessageBox.critical(self, "Curve table load failed", str(exc))
+            return
+        if "TVD_top" not in df.columns:
+            self.curve_plot.set_message("Extracted table has no TVD_top column.")
+            QMessageBox.warning(self, "Missing depth", "Extracted table has no TVD_top column.")
+            return
+        self._curve_df = df
+        self.curve_status_label.setText(f"Loaded curve table: {len(df)} rows")
+        self._refresh_curve_controls()
+        self._restore_curve_settings()
+        if auto_range:
+            self._auto_curve_ranges(save_settings=False)
+        else:
+            self._update_curve_plot(save_settings=False)
+
+    def _refresh_curve_controls(self) -> None:
+        if self._curve_df is None:
+            return
+        df = self._curve_df
+        self.curve_well_combo.blockSignals(True)
+        self.curve_well_combo.clear()
+        self.curve_well_combo.addItems(_unique_text_values(df["Well"]) if "Well" in df.columns else [""])
+        self.curve_well_combo.blockSignals(False)
+        self._refresh_curve_port_options()
+
+        channel_columns = self._curve_channel_columns()
+        for combo in self._curve_combos():
+            current = combo.currentText().strip()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(channel_columns)
+            if current:
+                self._select_combo_text(combo, current)
+            combo.blockSignals(False)
+        for index, combo in enumerate(self._curve_combos()):
+            if combo.count() > index and not combo.currentText().strip():
+                combo.setCurrentIndex(index)
+
+    def _refresh_curve_port_options(self) -> None:
+        if self._curve_df is None:
+            return
+        df = self._curve_df
+        well = self.curve_well_combo.currentText().strip()
+        if well and "Well" in df.columns:
+            df = df[df["Well"].map(str) == well]
+        ports = _unique_text_values(df["Port"]) if "Port" in df.columns else [""]
+        current = self.curve_port_combo.currentText().strip()
+        self.curve_port_combo.blockSignals(True)
+        self.curve_port_combo.clear()
+        self.curve_port_combo.addItems(ports)
+        if current:
+            self._select_combo_text(self.curve_port_combo, current)
+        self.curve_port_combo.blockSignals(False)
+
+    def _on_curve_well_changed(self, *args) -> None:
+        self._refresh_curve_port_options()
+        self._on_curve_control_changed()
+
+    def _on_curve_control_changed(self, *args) -> None:
+        if self._restoring_curve_settings:
+            return
+        self._save_curve_settings()
+        self._update_curve_plot(save_settings=False)
+
+    def _curve_channel_columns(self) -> list[str]:
+        if self._curve_df is None:
+            return []
+        base_columns = {
+            "Well",
+            "Port",
+            "X",
+            "Y",
+            "I",
+            "J",
+            "K",
+            "IsActive",
+            "TVD_top",
+            "TVD_base",
+            "CellHeight",
+            "CellSizeI",
+            "CellSizeJ",
+            "CellAreaXY",
+        }
+        columns: list[str] = []
+        for column in self._curve_df.columns:
+            if str(column) in base_columns:
+                continue
+            if pd.to_numeric(self._curve_df[column], errors="coerce").notna().any():
+                columns.append(str(column))
+        return columns
+
+    def _curve_filtered_df(self) -> pd.DataFrame:
+        if self._curve_df is None:
+            return pd.DataFrame()
+        df = self._curve_df
+        well = self.curve_well_combo.currentText().strip()
+        port = self.curve_port_combo.currentText().strip()
+        if well and "Well" in df.columns:
+            df = df[df["Well"].map(str) == well]
+        if port and "Port" in df.columns:
+            df = df[df["Port"].map(str) == port]
+        return df
+
+    def _auto_curve_ranges(self, *args, save_settings: bool = True) -> None:
+        df = self._curve_filtered_df()
+        selected = self._selected_curve_columns()
+        if df.empty or not selected:
+            return
+        self._set_spin_pair(self.curve_depth_min_spin, self.curve_depth_max_spin, _range_with_padding(_numeric_series(df["TVD_top"]), 0.0))
+        for column, min_spin, max_spin, _shift_spin in selected:
+            self._set_spin_pair(min_spin, max_spin, _range_with_padding(_numeric_series(df[column]), 0.02))
+        if save_settings:
+            self._save_curve_settings()
+        self._update_curve_plot(save_settings=False)
+
+    def _update_curve_plot(self, *args, save_settings: bool = True) -> None:
+        if save_settings:
+            self._save_curve_settings()
+        df = self._curve_filtered_df()
+        selected = self._selected_curve_columns()
+        if df.empty:
+            self.curve_plot.set_message("No rows for selected Well/Port.")
+            return
+        if not selected:
+            self.curve_plot.set_message("Select at least one numeric channel.")
+            return
+        curves: list[CurveSpec] = []
+        base_depth = _numeric_series(df["TVD_top"])
+        for column, min_spin, max_spin, shift_spin in selected:
+            shift = shift_spin.value() if shift_spin is not None else 0.0
+            curves.append(
+                CurveSpec(
+                    depth=base_depth + shift,
+                    values=_numeric_series(df[column]),
+                    name=column,
+                    value_range=(min_spin.value(), max_spin.value()),
+                    depth_shift=shift,
+                )
+            )
+        data = CurvePlotData(
+            curves=tuple(curves),
+            depth_range=(self.curve_depth_min_spin.value(), self.curve_depth_max_spin.value()),
+        )
+        self.curve_plot.set_plot_data(data)
+        names = ", ".join(curve.name for curve in curves)
+        self.curve_status_label.setText(
+            f"Rows: {len(df)} | Curves: {names}"
+        )
+
+    def _save_curve_settings(self) -> None:
+        self.settings.setValue("paths/curve_extracted", self.curve_extracted_path_edit.text().strip())
+        self.settings.setValue("curves/well", self.curve_well_combo.currentText().strip())
+        self.settings.setValue("curves/port", self.curve_port_combo.currentText().strip())
+        self.settings.setValue("curves/depth_min", self.curve_depth_min_spin.value())
+        self.settings.setValue("curves/depth_max", self.curve_depth_max_spin.value())
+        for index, (combo, min_spin, max_spin, shift_spin) in enumerate(self._curve_control_sets(), start=1):
+            self.settings.setValue(f"curves/curve_{index}/channel", combo.currentText().strip())
+            self.settings.setValue(f"curves/curve_{index}/min", min_spin.value())
+            self.settings.setValue(f"curves/curve_{index}/max", max_spin.value())
+            if shift_spin is not None:
+                self.settings.setValue(f"curves/curve_{index}/shift", shift_spin.value())
+
+    def _restore_curve_settings(self) -> None:
+        self._restoring_curve_settings = True
+        try:
+            self._select_combo_text(self.curve_well_combo, self.settings.value("curves/well", "", type=str))
+            self._refresh_curve_port_options()
+            self._select_combo_text(self.curve_port_combo, self.settings.value("curves/port", "", type=str))
+            self.curve_depth_min_spin.setValue(_settings_float(self.settings, "curves/depth_min", self.curve_depth_min_spin.value()))
+            self.curve_depth_max_spin.setValue(_settings_float(self.settings, "curves/depth_max", self.curve_depth_max_spin.value()))
+            for index, (combo, min_spin, max_spin, shift_spin) in enumerate(self._curve_control_sets(), start=1):
+                self._select_combo_text(combo, self.settings.value(f"curves/curve_{index}/channel", "", type=str))
+                min_spin.setValue(_settings_float(self.settings, f"curves/curve_{index}/min", min_spin.value()))
+                max_spin.setValue(_settings_float(self.settings, f"curves/curve_{index}/max", max_spin.value()))
+                if shift_spin is not None:
+                    shift_spin.setValue(_settings_float(self.settings, f"curves/curve_{index}/shift", shift_spin.value()))
+        finally:
+            self._restoring_curve_settings = False
+
+    def _curve_combos(self) -> tuple[QComboBox, QComboBox, QComboBox, QComboBox]:
+        return self.curve1_combo, self.curve2_combo, self.curve3_combo, self.curve4_combo
+
+    def _curve_control_sets(
+        self,
+    ) -> tuple[
+        tuple[QComboBox, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None],
+        tuple[QComboBox, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None],
+        tuple[QComboBox, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None],
+        tuple[QComboBox, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None],
+    ]:
+        return (
+            (self.curve1_combo, self.curve1_min_spin, self.curve1_max_spin, None),
+            (self.curve2_combo, self.curve2_min_spin, self.curve2_max_spin, self.curve2_depth_shift_spin),
+            (self.curve3_combo, self.curve3_min_spin, self.curve3_max_spin, self.curve3_depth_shift_spin),
+            (self.curve4_combo, self.curve4_min_spin, self.curve4_max_spin, self.curve4_depth_shift_spin),
+        )
+
+    def _selected_curve_columns(self) -> list[tuple[str, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None]]:
+        if self._curve_df is None:
+            return []
+        values: list[tuple[str, QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox | None]] = []
+        for combo, min_spin, max_spin, shift_spin in self._curve_control_sets():
+            column = combo.currentText().strip()
+            if column and column in self._curve_df.columns:
+                values.append((column, min_spin, max_spin, shift_spin))
+        return values
+
+    @staticmethod
+    def _set_spin_pair(min_spin: QDoubleSpinBox, max_spin: QDoubleSpinBox, value_range: tuple[float, float]) -> None:
+        min_spin.setValue(value_range[0])
+        max_spin.setValue(value_range[1])
 
     def _update_metrics_enabled(self, *args) -> None:
         can_run = (
@@ -947,6 +1296,44 @@ class MainWindow(QMainWindow):
         combo.setEditable(True)
         combo.addItem("")
         return combo
+
+    @staticmethod
+    def _spinbox() -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox()
+        spinbox.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        spinbox.setDecimals(4)
+        spinbox.setKeyboardTracking(False)
+        return spinbox
+
+
+def _unique_text_values(series: pd.Series) -> list[str]:
+    values = [str(value) for value in series.dropna().tolist()]
+    return list(dict.fromkeys(values))
+
+
+def _numeric_series(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _range_with_padding(series: pd.Series, padding_fraction: float) -> tuple[float, float]:
+    values = series.dropna()
+    if values.empty:
+        return 0.0, 1.0
+    low = float(values.min())
+    high = float(values.max())
+    if low == high:
+        padding = max(1.0, abs(low) * 0.05)
+        return low - padding, high + padding
+    padding = (high - low) * padding_fraction
+    return low - padding, high + padding
+
+
+def _settings_float(settings: QSettings, key: str, default: float) -> float:
+    value = settings.value(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _main_for_manual_debug() -> None:
