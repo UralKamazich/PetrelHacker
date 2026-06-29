@@ -35,6 +35,9 @@ class _PropertyFile:
 class _GeometryFile:
     path: Path
     block_starts: tuple[int, ...]
+    raw_ni: int
+    raw_nj: int
+    raw_nk: int
 
 
 def is_rescue_path(path: str | Path) -> bool:
@@ -88,8 +91,11 @@ class RescueReader:
         self.main_path = self._resolve_main_path(self.model_path)
         self.root_path = self.main_path.parent
         geom_path = self._find_geometry_file()
-        ni, nj, nk = _read_rescue_geometry_shape(geom_path)
-        self._geometry_file = _read_rescue_geometry_file_info(geom_path, ni, nj, nk)
+        raw_ni, raw_nj, raw_nk = _read_rescue_geometry_shape(geom_path)
+        if raw_ni < 2 or raw_nj < 2 or raw_nk < 2:
+            raise ValueError(f"Rescue geometry has invalid raw node shape: {raw_ni}/{raw_nj}/{raw_nk}")
+        ni, nj, nk = raw_ni - 1, raw_nj - 1, raw_nk - 1
+        self._geometry_file = _read_rescue_geometry_file_info(geom_path, raw_ni, raw_nj, raw_nk)
         self._xy_bounds = _read_xy_bounds_from_crsmeta(self.root_path)
 
         grid_uuid = f"rescue-grid:{self.main_path.stem}"
@@ -173,13 +179,19 @@ class RescueReader:
         if not (0 <= i < ni and 0 <= j < nj):
             raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
         size_i, size_j = self._cell_xy_size()
-        z_values = self._decoded_geometry_column(i, j)
-        if z_values is None:
+        pillar_values = [
+            self._decoded_geometry_column(i, j),
+            self._decoded_geometry_column(i + 1, j),
+            self._decoded_geometry_column(i, j + 1),
+            self._decoded_geometry_column(i + 1, j + 1),
+        ]
+        if any(values is None for values in pillar_values):
             tvd_top = [math.nan] * nk
             tvd_base = [math.nan] * nk
             cell_height = [math.nan] * nk
         else:
-            tvd_top, tvd_base, cell_height = _geometry_from_z_centers(z_values)
+            interfaces = np.nanmean(np.stack(pillar_values), axis=0)
+            tvd_top, tvd_base, cell_height = _geometry_from_z_interfaces(interfaces)
         return {
             "TVD_top": tvd_top,
             "TVD_base": tvd_base,
@@ -194,8 +206,10 @@ class RescueReader:
         if self._xy_bounds is None:
             raise ValueError("Rescue CRS metadata was not found; cannot build XY grid.")
         xmin, xmax, ymin, ymax = self._xy_bounds
-        xs = np.linspace(xmin, xmax, ni, dtype=float)
-        ys = np.linspace(ymin, ymax, nj, dtype=float)
+        x_nodes = np.linspace(xmin, xmax, ni + 1, dtype=float)
+        y_nodes = np.linspace(ymin, ymax, nj + 1, dtype=float)
+        xs = (x_nodes[:-1] + x_nodes[1:]) / 2.0
+        ys = (y_nodes[:-1] + y_nodes[1:]) / 2.0
         xx, yy = np.meshgrid(xs, ys)
         return np.stack((xx, yy), axis=2)
 
@@ -207,7 +221,7 @@ class RescueReader:
         if prop_file is None:
             raise ValueError(f"Property UUID not found: {property_uuid}")
 
-        flat_index = k * nj * ni + j * ni + i
+        flat_index = (nk - 1 - k) * nj * ni + j * ni + i
         values = self._decoded_property_values(property_uuid)
         if flat_index >= values.size:
             return ""
@@ -294,8 +308,8 @@ class RescueReader:
         if self._xy_bounds is None:
             return math.nan, math.nan
         xmin, xmax, ymin, ymax = self._xy_bounds
-        size_i = abs(xmax - xmin) / max(ni - 1, 1)
-        size_j = abs(ymax - ymin) / max(nj - 1, 1)
+        size_i = abs(xmax - xmin) / max(ni, 1)
+        size_j = abs(ymax - ymin) / max(nj, 1)
         return float(size_i), float(size_j)
 
     def _decoded_property_values(self, property_uuid: str) -> np.ndarray:
@@ -323,8 +337,10 @@ class RescueReader:
         geometry_file = self._geometry_file
         if geometry_file is None:
             return None
-        ni, _nj, nk = self._require_shape()
-        column_index = j * ni + i
+        raw_ni, raw_nj, raw_nk = geometry_file.raw_ni, geometry_file.raw_nj, geometry_file.raw_nk
+        if not (0 <= i < raw_ni and 0 <= j < raw_nj):
+            return None
+        column_index = j * raw_ni + i
         cached = self._decoded_geometry_columns.get(column_index)
         if cached is not None:
             self._decoded_geometry_columns.move_to_end(column_index)
@@ -337,7 +353,7 @@ class RescueReader:
             if column_index + 1 < len(geometry_file.block_starts)
             else geometry_file.path.stat().st_size
         )
-        values = _decode_geometry_column_block(geometry_file.path, start, next_start, nk)
+        values = _decode_geometry_column_block(geometry_file.path, start, next_start, raw_nk)
         if values is None:
             return None
         self._decoded_geometry_columns[column_index] = values
@@ -389,7 +405,7 @@ def _read_rescue_geometry_file_info(path: Path, ni: int, nj: int, nk: int) -> _G
         position = index + 1
     if len(starts) != ni * nj:
         return None
-    return _GeometryFile(path=path, block_starts=tuple(starts))
+    return _GeometryFile(path=path, block_starts=tuple(starts), raw_ni=ni, raw_nj=nj, raw_nk=nk)
 
 
 def _read_property_file_info(file_id: int, path: Path) -> _PropertyFile:
@@ -566,6 +582,19 @@ def _geometry_from_z_centers(z_values: np.ndarray) -> tuple[list[float], list[fl
     height = np.abs(top - base)
     top = np.abs(top)
     base = np.abs(base)
+    return top.tolist(), base.tolist(), height.tolist()
+
+
+def _geometry_from_z_interfaces(z_values: np.ndarray) -> tuple[list[float], list[float], list[float]]:
+    z = np.asarray(z_values, dtype=float)[::-1]
+    if z.size < 2:
+        return [], [], []
+    depth = np.abs(z)
+    first = depth[:-1]
+    second = depth[1:]
+    top = np.minimum(first, second)
+    base = np.maximum(first, second)
+    height = np.abs(second - first)
     return top.tolist(), base.tolist(), height.tolist()
 
 

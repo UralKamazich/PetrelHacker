@@ -15,10 +15,16 @@ from core.property_extractor import (
     ExtractionStats,
     LogCallback,
     ProgressCallback,
+    _cell_center as _depth_cell_center,
     _is_blank_property_value,
+    _numeric_or_blank,
+    _relative_depth as _depth_relative_depth,
     transform_property_value,
 )
 from core.resqml_reader import PropertyInfo
+
+
+PORT_DEPTH_COLUMN = "TVDSS_PORT"
 
 
 @dataclass(frozen=True)
@@ -138,12 +144,17 @@ class MultiModelPropertyExtractor:
             "Port",
             "X",
             "Y",
+            PORT_DEPTH_COLUMN,
             "I",
             "J",
             "K",
             "IsActive",
             "TVD_top",
             "TVD_base",
+            "TVD_center",
+            "Rel_TVD_top",
+            "Rel_TVD_base",
+            "Rel_TVD_center",
             "CellHeight",
             "CellSizeI",
             "CellSizeJ",
@@ -162,7 +173,8 @@ class MultiModelPropertyExtractor:
         if not self.contexts:
             self.open(log_callback)
         stats = ExtractionStats(sleeves_total=len(sleeves_df), started=datetime.now())
-        _log(log_callback, f"Selected properties: {', '.join(self.output_columns()[14:])}")
+        property_columns = [name for context in self.contexts for name in context.output_names.values()]
+        _log(log_callback, f"Selected properties: {', '.join(property_columns)}")
         _log(log_callback, f"Writing output: {output_path}")
 
         with exporter_cls(output_path, self.output_columns()) as exporter:
@@ -177,6 +189,7 @@ class MultiModelPropertyExtractor:
                 display_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
                 x = float(getattr(sleeve, "X"))
                 y = float(getattr(sleeve, "Y"))
+                port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
                 model_columns = [_load_model_column(context, x, y) for context in self.contexts]
                 if not any(model_columns):
                     stats.sleeves_outside_grid += 1
@@ -203,12 +216,17 @@ class MultiModelPropertyExtractor:
                         "Port": port,
                         "X": x,
                         "Y": y,
+                        PORT_DEPTH_COLUMN: port_tvd,
                         "I": "" if geometry_source is None else geometry_source[0].i + 1,
                         "J": "" if geometry_source is None else geometry_source[0].j + 1,
                         "K": segment_index,
                         "IsActive": is_active,
                         "TVD_top": target_top,
                         "TVD_base": target_base,
+                        "TVD_center": _depth_cell_center(target_top, target_base),
+                        "Rel_TVD_top": _depth_relative_depth(target_top, port_tvd),
+                        "Rel_TVD_base": _depth_relative_depth(target_base, port_tvd),
+                        "Rel_TVD_center": _depth_relative_depth(_depth_cell_center(target_top, target_base), port_tvd),
                         "CellHeight": abs(target_base - target_top),
                         "CellSizeI": "" if geometry_source is None else geometry_source[1].get("CellSizeI", ""),
                         "CellSizeJ": "" if geometry_source is None else geometry_source[1].get("CellSizeJ", ""),

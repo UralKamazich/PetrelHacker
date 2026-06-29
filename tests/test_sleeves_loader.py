@@ -7,17 +7,18 @@ from core.sleeves_loader import _read_simple_xlsx, normalize_sleeves_columns, va
 
 
 def test_normalize_well_port_aliases() -> None:
-    df = pd.DataFrame({"well_name": ["A"], "stage": [1], "x": [1], "y": [2]})
+    df = pd.DataFrame({"well_name": ["A"], "stage": [1], "x": [1], "y": [2], "tvdss_port": [100.0]})
     out = normalize_sleeves_columns(df)
-    assert list(out.columns) == ["Well", "Port", "X", "Y"]
+    assert list(out.columns) == ["Well", "Port", "X", "Y", "TVDSS_PORT"]
 
 
 def test_validate_sleeves_table_coerces_xy() -> None:
-    df = pd.DataFrame({"Well": ["A"], "Port": [1], "X": ["1.5"], "Y": ["2.5"]})
+    df = pd.DataFrame({"Well": ["A"], "Port": [1], "X": ["1.5"], "Y": ["2.5"], "TVDSS_PORT": ["100.5"]})
     warnings = validate_sleeves_table(df)
     assert warnings == []
     assert df.loc[0, "X"] == 1.5
     assert df.loc[0, "Y"] == 2.5
+    assert df.loc[0, "TVDSS_PORT"] == 100.5
 
 
 def test_validate_sleeves_table_reports_missing_columns() -> None:

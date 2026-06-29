@@ -16,6 +16,7 @@ ProgressCallback = Callable[[int, int], None]
 LogCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 PERM_TO_MD_MULTIPLIER = 1_013_250_000_000_000
+PORT_DEPTH_COLUMN = "TVDSS_PORT"
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ class PropertyExtractor:
                 display_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
                 x = float(getattr(sleeve, self.settings.x_col))
                 y = float(getattr(sleeve, self.settings.y_col))
+                port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
                 match = self.indexer.find_column(x, y)
                 if match is None:
                     stats.sleeves_outside_grid += 1
@@ -163,12 +165,20 @@ class PropertyExtractor:
                         "Port": port,
                         "X": x,
                         "Y": y,
+                        PORT_DEPTH_COLUMN: port_tvd,
                         "I": i + 1,
                         "J": j + 1,
                         "K": k + 1,
                         "IsActive": is_active,
                         "TVD_top": geometry_column["TVD_top"][k],
                         "TVD_base": geometry_column["TVD_base"][k],
+                        "TVD_center": _cell_center(geometry_column["TVD_top"][k], geometry_column["TVD_base"][k]),
+                        "Rel_TVD_top": _relative_depth(geometry_column["TVD_top"][k], port_tvd),
+                        "Rel_TVD_base": _relative_depth(geometry_column["TVD_base"][k], port_tvd),
+                        "Rel_TVD_center": _relative_depth(
+                            _cell_center(geometry_column["TVD_top"][k], geometry_column["TVD_base"][k]),
+                            port_tvd,
+                        ),
                         "CellHeight": geometry_column["CellHeight"][k],
                         "CellSizeI": geometry_column["CellSizeI"][k],
                         "CellSizeJ": geometry_column["CellSizeJ"][k],
@@ -199,12 +209,17 @@ class PropertyExtractor:
             "Port",
             "X",
             "Y",
+            PORT_DEPTH_COLUMN,
             "I",
             "J",
             "K",
             "IsActive",
             "TVD_top",
             "TVD_base",
+            "TVD_center",
+            "Rel_TVD_top",
+            "Rel_TVD_base",
+            "Rel_TVD_center",
             "CellHeight",
             "CellSizeI",
             "CellSizeJ",
@@ -289,3 +304,26 @@ def _is_blank_property_value(value: object) -> bool:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
+
+
+def _numeric_or_blank(value) -> float | str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return ""
+    return float(numeric)
+
+
+def _cell_center(top, base) -> float | str:
+    top_value = _numeric_or_blank(top)
+    base_value = _numeric_or_blank(base)
+    if top_value == "" or base_value == "":
+        return ""
+    return (float(top_value) + float(base_value)) / 2.0
+
+
+def _relative_depth(depth, port_tvd) -> float | str:
+    depth_value = _numeric_or_blank(depth)
+    port_value = _numeric_or_blank(port_tvd)
+    if depth_value == "" or port_value == "":
+        return ""
+    return float(depth_value) - float(port_value)

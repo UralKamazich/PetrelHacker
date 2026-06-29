@@ -429,7 +429,7 @@ class ResqmlReader:
                 if not name.lower().endswith(".xml"):
                     continue
                 try:
-                    root = ET.fromstring(package.read(name))
+                    root = _parse_epc_xml(package.read(name))
                 except ET.ParseError:
                     continue
                 objects.append((name, _object_kind(root, name), root))
@@ -502,6 +502,16 @@ def _read_first_hdf_info(
     except Exception:
         return None, None
     return None, None
+
+
+def _parse_epc_xml(data: bytes) -> ET.Element:
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError:
+        # Some Petrel/fesapi exports declare UTF-8 but contain legacy-encoded
+        # bytes in free-text titles. Keep structural XML readable by replacing
+        # only those invalid text bytes.
+        return ET.fromstring(data.decode("utf-8", errors="replace"))
 
 
 def _z_to_depth(values):

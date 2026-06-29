@@ -43,6 +43,7 @@ def test_metrics_worker_writes_metrics_xlsx(tmp_path) -> None:
             lithology_column=None,
             reservoir_values=[],
             property_columns=["NTG"],
+            metric_keys=[],
         )
     )
     results = []

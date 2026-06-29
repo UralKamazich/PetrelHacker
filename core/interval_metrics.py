@@ -46,6 +46,33 @@ INTERVAL_DEFINITIONS = (
     ("TopTotal_m15m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -INTERVAL_BUFFER_METERS, 0.0),
     ("BotTotal_p15m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, INTERVAL_BUFFER_METERS),
 )
+BASE_METRIC_KEYS = (
+    "thickness",
+    "net_thickness",
+    "ntg_avg",
+    "ntg_median",
+    "poro_avg",
+    "poro_median",
+    "perm_avg_arith",
+    "perm_avg_geom",
+    "perm_median",
+    "kh",
+    "phih",
+)
+PROPERTY_METRIC_KEYS = (
+    "avg",
+    "mean_arith",
+    "geom",
+    "median",
+    "min",
+    "max",
+    "integral",
+    "min_star",
+    "max_star",
+    "std",
+    "delta",
+)
+DEFAULT_METRIC_KEYS = BASE_METRIC_KEYS + PROPERTY_METRIC_KEYS
 
 
 @dataclass(frozen=True)
@@ -56,6 +83,7 @@ class IntervalMetricSettings:
     lithology_column: str | None = None
     reservoir_values: set[str] = field(default_factory=set)
     property_columns: list[str] = field(default_factory=list)
+    metric_keys: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -87,6 +115,7 @@ def calculate_interval_metrics(
         settings,
         settings.property_columns or _default_property_columns(extracted.columns),
     )
+    metric_keys = _metric_key_set(settings.metric_keys)
     warnings.extend(_settings_warnings(extracted, settings, property_columns))
     rows: list[dict] = []
     grouped = {
@@ -129,9 +158,9 @@ def calculate_interval_metrics(
 
         metric_suffixes = _metric_suffixes()
         for suffix in metric_suffixes:
-            _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings)
+            _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings, metric_keys)
         for suffix in metric_suffixes:
-            _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns)
+            _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns, metric_keys)
 
         rows.append(row)
 
@@ -289,43 +318,71 @@ def _add_base_metrics(
     cells: pd.DataFrame,
     suffix: str,
     settings: IntervalMetricSettings,
+    metric_keys: set[str],
 ) -> None:
     heights = _metric_heights(cells)
     ntg = _optional_numeric(cells, settings.ntg_column)
     poro = _optional_numeric(cells, settings.poro_column)
     perm = _optional_numeric(cells, settings.perm_column) if settings.perm_column else _auto_perm(cells)
 
-    row[f"Thickness_{suffix}"] = _sum(heights)
-    if not suffix.endswith("_Net"):
+    if "thickness" in metric_keys:
+        row[f"Thickness_{suffix}"] = _sum(heights)
+    if "net_thickness" in metric_keys and not suffix.endswith("_Net"):
         row[f"NetThickness_{suffix}"] = _sum(heights * ntg) if ntg is not None else ""
-    row[f"NTG_avg_{suffix}"] = _mean(ntg, heights) if ntg is not None else ""
-    row[f"NTG_median_{suffix}"] = _median(ntg) if ntg is not None else ""
-    row[f"PORO_avg_{suffix}"] = _mean(poro, heights) if poro is not None else ""
-    row[f"PORO_median_{suffix}"] = _median(poro) if poro is not None else ""
-    row[f"PERM_avg_arith_{suffix}"] = _mean(perm, heights) if perm is not None else ""
-    row[f"PERM_avg_geom_{suffix}"] = _geom_mean(perm, heights) if perm is not None else ""
-    row[f"PERM_median_{suffix}"] = _median(perm) if perm is not None else ""
-    row[f"KH_{suffix}"] = _sum(perm * heights * (ntg if ntg is not None else 1.0)) if perm is not None else ""
-    row[f"PHIH_{suffix}"] = _sum(poro * heights * (ntg if ntg is not None else 1.0)) if poro is not None else ""
+    if "ntg_avg" in metric_keys:
+        row[f"NTG_avg_{suffix}"] = _mean(ntg, heights) if ntg is not None else ""
+    if "ntg_median" in metric_keys:
+        row[f"NTG_median_{suffix}"] = _median(ntg) if ntg is not None else ""
+    if "poro_avg" in metric_keys:
+        row[f"PORO_avg_{suffix}"] = _mean(poro, heights) if poro is not None else ""
+    if "poro_median" in metric_keys:
+        row[f"PORO_median_{suffix}"] = _median(poro) if poro is not None else ""
+    if "perm_avg_arith" in metric_keys:
+        row[f"PERM_avg_arith_{suffix}"] = _mean(perm, heights) if perm is not None else ""
+    if "perm_avg_geom" in metric_keys:
+        row[f"PERM_avg_geom_{suffix}"] = _geom_mean(perm, heights) if perm is not None else ""
+    if "perm_median" in metric_keys:
+        row[f"PERM_median_{suffix}"] = _median(perm) if perm is not None else ""
+    if "kh" in metric_keys:
+        row[f"KH_{suffix}"] = _sum(perm * heights * (ntg if ntg is not None else 1.0)) if perm is not None else ""
+    if "phih" in metric_keys:
+        row[f"PHIH_{suffix}"] = _sum(poro * heights * (ntg if ntg is not None else 1.0)) if poro is not None else ""
 
 
-def _add_property_metrics(row: dict, cells: pd.DataFrame, suffix: str, property_columns: list[str]) -> None:
+def _add_property_metrics(
+    row: dict,
+    cells: pd.DataFrame,
+    suffix: str,
+    property_columns: list[str],
+    metric_keys: set[str],
+) -> None:
     heights = _metric_heights(cells)
     for column in property_columns:
         values = _optional_numeric(cells, column)
         if values is None:
             continue
-        row[f"{column}_avg_{suffix}"] = _mean(values, heights)
-        row[f"{column}_mean_arith_{suffix}"] = _mean(values, heights)
-        row[f"{column}_geom_{suffix}"] = _geom_mean(values, heights)
-        row[f"{column}_median_{suffix}"] = _median(values)
-        row[f"{column}_min_{suffix}"] = _min(values)
-        row[f"{column}_max_{suffix}"] = _max(values)
-        row[f"{column}_integral_{suffix}"] = _sum(values * heights)
-        row[f"{column}_min_star_{suffix}"] = _robust_tail_mean(values, lower=True)
-        row[f"{column}_max_star_{suffix}"] = _robust_tail_mean(values, lower=False)
-        row[f"{column}_std_{suffix}"] = _std(values, heights)
-        row[f"{column}_delta_{suffix}"] = _delta_star(values)
+        if "avg" in metric_keys:
+            row[f"{column}_avg_{suffix}"] = _mean(values, heights)
+        if "mean_arith" in metric_keys:
+            row[f"{column}_mean_arith_{suffix}"] = _mean(values, heights)
+        if "geom" in metric_keys:
+            row[f"{column}_geom_{suffix}"] = _geom_mean(values, heights)
+        if "median" in metric_keys:
+            row[f"{column}_median_{suffix}"] = _median(values)
+        if "min" in metric_keys:
+            row[f"{column}_min_{suffix}"] = _min(values)
+        if "max" in metric_keys:
+            row[f"{column}_max_{suffix}"] = _max(values)
+        if "integral" in metric_keys:
+            row[f"{column}_integral_{suffix}"] = _sum(values * heights)
+        if "min_star" in metric_keys:
+            row[f"{column}_min_star_{suffix}"] = _robust_tail_mean(values, lower=True)
+        if "max_star" in metric_keys:
+            row[f"{column}_max_star_{suffix}"] = _robust_tail_mean(values, lower=False)
+        if "std" in metric_keys:
+            row[f"{column}_std_{suffix}"] = _std(values, heights)
+        if "delta" in metric_keys:
+            row[f"{column}_delta_{suffix}"] = _delta_star(values)
 
 
 def _net_cells(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.DataFrame:
@@ -359,6 +416,13 @@ def _default_property_columns(columns) -> list[str]:
 def _additional_property_columns(settings: IntervalMetricSettings, property_columns: list[str]) -> list[str]:
     base_columns = {settings.ntg_column, settings.poro_column, settings.perm_column}
     return [column for column in property_columns if column and column not in base_columns]
+
+
+def _metric_key_set(metric_keys: list[str]) -> set[str]:
+    selected = set(metric_keys)
+    if not selected:
+        return set(DEFAULT_METRIC_KEYS)
+    return selected & set(DEFAULT_METRIC_KEYS)
 
 
 def _auto_perm(cells: pd.DataFrame) -> pd.Series | None:

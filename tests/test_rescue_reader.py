@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import struct
 
+import pytest
+
 from core.model_reader import open_model_reader
 from core.rescue_reader import is_rescue_path
 
@@ -20,7 +22,7 @@ def test_rescue_reader_loads_grid_properties_and_values(tmp_path: Path) -> None:
         + b"\x00\x0bdirtyMinMax"
         b"\x00\x06minMax"
     )
-    _write_geometry(tmp_path / "model.bin.60", ni=2, nj=3, nk=4)
+    _write_geometry(tmp_path / "model.bin.60", ni=3, nj=4, nk=5)
     _write_property(tmp_path / "model.bin.123", [0.1, 0.2, 0.3, 0.4])
     (tmp_path / "model.crsmeta.xml").write_text(
         """
@@ -45,20 +47,20 @@ def test_rescue_reader_loads_grid_properties_and_values(tmp_path: Path) -> None:
     assert prop.title == "PORO"
     stats = reader.get_property_decode_stats(prop.uuid)
     assert stats["logical_count"] == 24
-    assert stats["valid_count"] == 3
-    assert stats["blank_count"] == 21
-    assert stats["first_run_length"] == 2
+    assert stats["valid_count"] == 2
+    assert stats["blank_count"] == 22
+    assert stats["first_run_length"] == 0
     assert reader.get_property_value(prop.uuid, 1, 0, 0) == 0.20000000298023224
     assert reader.get_property_value(prop.uuid, 0, 1, 0) == ""
     assert reader.get_property_value(prop.uuid, 1, 1, 0) == 0.4000000059604645
     geometry = reader.get_cell_geometry_column(0, 0)
-    assert geometry["TVD_top"] == [95.0, 85.0, 75.0, 65.0]
-    assert geometry["TVD_base"] == [105.0, 95.0, 85.0, 75.0]
+    assert geometry["TVD_top"] == [58.0, 68.0, 78.0, 88.0]
+    assert geometry["TVD_base"] == [68.0, 78.0, 88.0, 98.0]
     assert geometry["CellHeight"] == [10.0, 10.0, 10.0, 10.0]
     centers = reader.get_column_centers_xy()
     assert centers.shape == (3, 2, 2)
-    assert centers[0, 0].tolist() == [10.0, 20.0]
-    assert centers[-1, -1].tolist() == [30.0, 60.0]
+    assert centers[0, 0].tolist() == pytest.approx([15.0, 26.666666666666668])
+    assert centers[-1, -1].tolist() == pytest.approx([25.0, 53.33333333333333])
 
 
 def _write_geometry(path: Path, *, ni: int, nj: int, nk: int) -> None:
@@ -75,7 +77,7 @@ def _write_geometry(path: Path, *, ni: int, nj: int, nk: int) -> None:
         data.extend((1).to_bytes(4, "big"))
         data.extend(bytes([nk]))
         z0 = -100.0 + column
-        data.extend(struct.pack(">ffff", z0, z0 + 10.0, z0 + 20.0, z0 + 30.0))
+        data.extend(struct.pack(">" + "f" * nk, *(z0 + 10.0 * k for k in range(nk))))
     data.extend(b"\x00\x16abracadabra jump jump\x00")
     path.write_bytes(data)
 
@@ -86,8 +88,9 @@ def _write_property(path: Path, values: list[float]) -> None:
     data[: len(label)] = label
     data[22:25] = b"\x00\x00\x01"
     data[26:30] = struct.pack(">f", -999.25)
-    data[30:34] = (2).to_bytes(4, "big")
-    data.extend(struct.pack(">ff", values[0], values[1]))
+    data[30:34] = (0).to_bytes(4, "big")
+    data.extend(b"\x13\x7f\x7f\xff\xff\xfd\x01")
+    data.extend(struct.pack(">f", values[1]))
     data.extend(b"\x01\x7f\x7f\xff\xff\xfd\x01")
     data.extend(struct.pack(">f", values[3]))
     data.extend(b"\x00\x16abracadabra jump jump\x00")

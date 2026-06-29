@@ -21,6 +21,7 @@ class MetricsRequest:
     lithology_column: str | None
     reservoir_values: list[str]
     property_columns: list[str]
+    metric_keys: list[str]
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class MetricsWorker(QObject):
                 lithology_column=self.request.lithology_column,
                 reservoir_values={_normalize_value(value) for value in self.request.reservoir_values},
                 property_columns=self.request.property_columns,
+                metric_keys=self.request.metric_keys,
             )
             self.log.emit("Calculating interval metrics...")
             result = calculate_interval_metrics(extracted, intervals, settings)

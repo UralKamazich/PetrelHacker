@@ -286,3 +286,43 @@ def test_calculate_interval_metrics_uses_partial_depth_overlap_for_coarse_cells(
     row = result.rows[0]
     assert row["Thickness_Global"] == 20.0
     assert row["STRESS_integral_Global"] == 200.0
+
+
+def test_calculate_interval_metrics_honors_selected_metric_keys() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVD_top": [100.0],
+            "TVD_base": [110.0],
+            "CellHeight": [10.0],
+            "NTG": [1.0],
+            "SW": [0.25],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [110.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(
+            ntg_column="NTG",
+            property_columns=["SW"],
+            metric_keys=["thickness", "mean_arith"],
+        ),
+    )
+
+    row = result.rows[0]
+    assert row["Thickness_Global"] == 10.0
+    assert row["SW_mean_arith_Global"] == 0.25
+    assert "SW_median_Global" not in row
+    assert "NTG_avg_Global" not in row

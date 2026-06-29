@@ -27,7 +27,10 @@ COLUMN_ALIASES = {
     "y": "Y",
     "coord_y": "Y",
     "coordinate_y": "Y",
+    "tvdss_port": "TVDSS_PORT",
+    "tvd_port": "TVDSS_PORT",
 }
+OPTIONAL_NUMERIC_COLUMNS = ("TVDSS_PORT",)
 
 
 def load_sleeves_table(path: str | Path) -> pd.DataFrame:
@@ -87,6 +90,16 @@ def validate_sleeves_table(
         warnings.append(f"Identity columns {', '.join(identity_columns)} contain {int(duplicated.sum())} duplicates.")
 
     for column in (x_col, y_col):
+        numeric = pd.to_numeric(df[column], errors="coerce")
+        bad_count = int(numeric.isna().sum())
+        if bad_count:
+            warnings.append(f"Column {column} contains {bad_count} non-numeric or empty values.")
+        else:
+            df[column] = numeric.astype(float)
+
+    for column in OPTIONAL_NUMERIC_COLUMNS:
+        if column not in df.columns:
+            continue
         numeric = pd.to_numeric(df[column], errors="coerce")
         bad_count = int(numeric.isna().sum())
         if bad_count:

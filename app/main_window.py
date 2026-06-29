@@ -30,11 +30,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.widgets.checklist_dialog import CheckListDialog
 from app.widgets.curve_plot import CurvePlotData, CurvePlotWidget, CurveSpec
 from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
 from app.workers.load_model_worker import LoadModelWorker, ModelLoadResult
 from app.workers.metrics_worker import MetricsRequest, MetricsResult, MetricsWorker
+from core.interval_metrics import DEFAULT_METRIC_KEYS
 from core.multi_model_extractor import ExtractionModelSpec
 from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
@@ -42,6 +44,32 @@ from core.property_presets import normalize_property_title, should_select_proper
 from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
 from core.table_io import read_table
 from core.xlsx_preview import read_xlsx_headers, read_xlsx_preview
+
+
+METRIC_OPTIONS = [
+    ("Thickness", "thickness"),
+    ("Net thickness", "net_thickness"),
+    ("NTG avg", "ntg_avg"),
+    ("NTG median", "ntg_median"),
+    ("PORO avg", "poro_avg"),
+    ("PORO median", "poro_median"),
+    ("PERM arithmetic avg", "perm_avg_arith"),
+    ("PERM geometric avg", "perm_avg_geom"),
+    ("PERM median", "perm_median"),
+    ("KH", "kh"),
+    ("PHIH", "phih"),
+    ("Additional: avg", "avg"),
+    ("Additional: arithmetic mean", "mean_arith"),
+    ("Additional: geometric mean", "geom"),
+    ("Additional: median", "median"),
+    ("Additional: min", "min"),
+    ("Additional: max", "max"),
+    ("Additional: integral", "integral"),
+    ("Additional: min*", "min_star"),
+    ("Additional: max*", "max_star"),
+    ("Additional: std", "std"),
+    ("Additional: delta", "delta"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -64,6 +92,7 @@ class MainWindow(QMainWindow):
         self._last_extracted_headers: list[str] = []
         self._curve_df: pd.DataFrame | None = None
         self._restoring_curve_settings = False
+        self._selected_metric_keys = list(DEFAULT_METRIC_KEYS)
 
         self.epc_path_edit = QLineEdit()
         self.epc_path_edit.setPlaceholderText("Select .epc file or Rescue folder")
@@ -111,8 +140,13 @@ class MainWindow(QMainWindow):
         self.metrics_reservoir_values_edit.setPlaceholderText("Example: 1,2")
         self.metrics_property_list = QListWidget()
         self.metrics_property_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.metrics_select_properties_button = QPushButton("Select channels")
         self.metrics_properties_edit = QLineEdit()
         self.metrics_properties_edit.setPlaceholderText("Example: NTG,PORO,Perm_1A")
+        self.metrics_properties_edit.setReadOnly(True)
+        self.metrics_select_metrics_button = QPushButton("Select metrics")
+        self.metrics_metric_keys_edit = QLineEdit()
+        self.metrics_metric_keys_edit.setReadOnly(True)
         self.metrics_run_button = QPushButton("Calculate metrics")
         self.metrics_run_button.setEnabled(False)
         self.metrics_progress_bar = QProgressBar()
@@ -165,6 +199,8 @@ class MainWindow(QMainWindow):
         self.metrics_intervals_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_output_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_property_list.itemSelectionChanged.connect(self._sync_metrics_properties_from_list)
+        self.metrics_select_properties_button.clicked.connect(self._open_metrics_properties_dialog)
+        self.metrics_select_metrics_button.clicked.connect(self._open_metrics_dialog)
         self.metrics_run_button.clicked.connect(self._run_metrics)
         self.curve_load_button.clicked.connect(self._load_curve_table)
         self.curve_well_combo.currentTextChanged.connect(self._on_curve_well_changed)
@@ -368,8 +404,14 @@ class MainWindow(QMainWindow):
         form.addRow("PERM column", self.metrics_perm_combo)
         form.addRow("Lithology column", self.metrics_lithology_combo)
         form.addRow("Reservoir values", self.metrics_reservoir_values_edit)
-        form.addRow("Additional channels", self.metrics_property_list)
-        form.addRow("Properties", self.metrics_properties_edit)
+        property_row = QHBoxLayout()
+        property_row.addWidget(self.metrics_properties_edit, 1)
+        property_row.addWidget(self.metrics_select_properties_button)
+        form.addRow("Additional channels", property_row)
+        metric_row = QHBoxLayout()
+        metric_row.addWidget(self.metrics_metric_keys_edit, 1)
+        metric_row.addWidget(self.metrics_select_metrics_button)
+        form.addRow("Metrics", metric_row)
         layout.addWidget(settings_box)
 
         buttons = QHBoxLayout()
@@ -669,6 +711,13 @@ class MainWindow(QMainWindow):
         curve_extracted_path = self.settings.value("paths/curve_extracted", "", type=str)
         intervals_path = self.settings.value("paths/metrics_intervals", "", type=str)
         metrics_output_path = self.settings.value("paths/metrics_output", "", type=str)
+        metric_keys = self._settings_list("metrics/selected_metric_keys")
+        if metric_keys:
+            self._selected_metric_keys = [key for key in metric_keys if key in set(DEFAULT_METRIC_KEYS)]
+        self._update_metrics_metric_summary()
+        saved_metrics_properties = self._settings_list("metrics/selected_properties")
+        if saved_metrics_properties:
+            self.metrics_properties_edit.setText(",".join(saved_metrics_properties))
         for index, edit in enumerate(self.model_path_edits):
             value = self.settings.value(f"paths/model_{index + 1}", "", type=str)
             if value:
@@ -706,6 +755,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("paths/curve_extracted", self.curve_extracted_path_edit.text().strip())
         self.settings.setValue("paths/metrics_intervals", self.metrics_intervals_path_edit.text().strip())
         self.settings.setValue("paths/metrics_output", self.metrics_output_path_edit.text().strip())
+        self.settings.setValue("metrics/selected_metric_keys", self._selected_metric_keys)
+        self.settings.setValue("metrics/selected_properties", self._split_csv_text(self.metrics_properties_edit.text()))
 
     def _update_run_enabled(self, *args) -> None:
         can_run = (
@@ -922,12 +973,17 @@ class MainWindow(QMainWindow):
             "Port",
             "X",
             "Y",
+            "TVDSS_PORT",
             "I",
             "J",
             "K",
             "IsActive",
             "TVD_top",
             "TVD_base",
+            "TVD_center",
+            "Rel_TVD_top",
+            "Rel_TVD_base",
+            "Rel_TVD_center",
             "CellHeight",
             "CellSizeI",
             "CellSizeJ",
@@ -1097,6 +1153,7 @@ class MainWindow(QMainWindow):
             lithology_column=self._combo_text_or_none(self.metrics_lithology_combo),
             reservoir_values=self._split_csv_text(self.metrics_reservoir_values_edit.text()),
             property_columns=self._selected_metrics_properties(),
+            metric_keys=self._selected_metrics_metric_keys(),
         )
         self._save_last_paths()
         self.metrics_run_button.setEnabled(False)
@@ -1202,6 +1259,7 @@ class MainWindow(QMainWindow):
         self._select_combo_text(self.metrics_poro_combo, "PORO")
         self._select_first_contains(self.metrics_perm_combo, ("perm",))
         self._select_first_contains(self.metrics_lithology_combo, ("lito", "lith", "layer"))
+        self._update_metrics_metric_summary()
 
     def _property_titles_from_model(self) -> list[str]:
         if not self._model_results:
@@ -1223,12 +1281,17 @@ class MainWindow(QMainWindow):
             "Port",
             "X",
             "Y",
+            "TVDSS_PORT",
             "I",
             "J",
             "K",
             "IsActive",
             "TVD_top",
             "TVD_base",
+            "TVD_center",
+            "Rel_TVD_top",
+            "Rel_TVD_base",
+            "Rel_TVD_center",
             "CellHeight",
             "CellSizeI",
             "CellSizeJ",
@@ -1238,10 +1301,59 @@ class MainWindow(QMainWindow):
 
     def _sync_metrics_properties_from_list(self) -> None:
         self.metrics_properties_edit.setText(",".join(self._selected_metrics_properties()))
+        self.settings.setValue("metrics/selected_properties", self._selected_metrics_properties())
 
     def _selected_metrics_properties(self) -> list[str]:
         selected = [item.text() for item in self.metrics_property_list.selectedItems()]
         return selected or self._split_csv_text(self.metrics_properties_edit.text())
+
+    def _open_metrics_properties_dialog(self) -> None:
+        headers = self._metric_property_headers_from_extracted()
+        if not headers:
+            QMessageBox.warning(self, "No channels", "Load an extracted table first.")
+            return
+        dialog = CheckListDialog(
+            title="Select additional channels",
+            items=[(header, header) for header in headers],
+            selected_values=set(self._selected_metrics_properties()),
+            parent=self,
+        )
+        if dialog.exec() != CheckListDialog.DialogCode.Accepted:
+            return
+        selected = set(dialog.selected_values())
+        self.metrics_property_list.blockSignals(True)
+        for index in range(self.metrics_property_list.count()):
+            item = self.metrics_property_list.item(index)
+            item.setSelected(item.text() in selected)
+        self.metrics_property_list.blockSignals(False)
+        self.metrics_properties_edit.setText(",".join(value for value in headers if value in selected))
+        self.settings.setValue("metrics/selected_properties", self._selected_metrics_properties())
+
+    def _open_metrics_dialog(self) -> None:
+        dialog = CheckListDialog(
+            title="Select metrics",
+            items=METRIC_OPTIONS,
+            selected_values=set(self._selected_metrics_metric_keys()),
+            parent=self,
+        )
+        if dialog.exec() != CheckListDialog.DialogCode.Accepted:
+            return
+        selected = [value for _label, value in METRIC_OPTIONS if value in set(dialog.selected_values())]
+        self._selected_metric_keys = selected or list(DEFAULT_METRIC_KEYS)
+        self._update_metrics_metric_summary()
+        self.settings.setValue("metrics/selected_metric_keys", self._selected_metric_keys)
+
+    def _selected_metrics_metric_keys(self) -> list[str]:
+        keys = [key for key in self._selected_metric_keys if key in set(DEFAULT_METRIC_KEYS)]
+        return keys or list(DEFAULT_METRIC_KEYS)
+
+    def _update_metrics_metric_summary(self) -> None:
+        selected = set(self._selected_metrics_metric_keys())
+        labels = [label for label, value in METRIC_OPTIONS if value in selected]
+        if len(labels) == len(METRIC_OPTIONS):
+            self.metrics_metric_keys_edit.setText("All metrics")
+        else:
+            self.metrics_metric_keys_edit.setText(", ".join(labels))
 
     @staticmethod
     def _table_headers(path: str) -> list[str]:
