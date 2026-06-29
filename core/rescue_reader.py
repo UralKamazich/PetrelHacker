@@ -126,6 +126,9 @@ class RescueReader:
     def list_properties(self) -> list[PropertyInfo]:
         return list(self._properties)
 
+    def list_md_datums(self) -> list[object]:
+        return []
+
     def get_grid_shape(self) -> tuple[int | None, int | None, int | None]:
         self._require_selected_grid()
         grid = self._grids[0]

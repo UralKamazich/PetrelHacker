@@ -47,6 +47,16 @@ class PropertyInfo:
     dtype: str | None = None
 
 
+@dataclass(frozen=True)
+class MdDatumInfo:
+    title: str
+    well_name: str
+    x: float | None
+    y: float | None
+    z: float | None
+    md_reference: str | None = None
+
+
 def _strip_namespace(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
@@ -178,6 +188,25 @@ class ResqmlReader:
             for prop in self._properties
             if prop.supporting_grid_uuid in (None, self._selected_grid_uuid)
         ]
+
+    def list_md_datums(self) -> list[MdDatumInfo]:
+        datums: list[MdDatumInfo] = []
+        for _name, kind, root in self._objects:
+            if "MdDatum" not in kind:
+                continue
+            datum_title = _title(root)
+            x, y, z = _md_datum_location(root)
+            datums.append(
+                MdDatumInfo(
+                    title=datum_title,
+                    well_name=_well_name_from_md_datum_title(datum_title),
+                    x=x,
+                    y=y,
+                    z=z,
+                    md_reference=_child_text(root, "MdReference"),
+                )
+            )
+        return datums
 
     def get_grid_shape(self) -> tuple[int | None, int | None, int | None]:
         if self._selected_grid_uuid is None:
@@ -512,6 +541,31 @@ def _parse_epc_xml(data: bytes) -> ET.Element:
         # bytes in free-text titles. Keep structural XML readable by replacing
         # only those invalid text bytes.
         return ET.fromstring(data.decode("utf-8", errors="replace"))
+
+
+def _md_datum_location(root: ET.Element) -> tuple[float | None, float | None, float | None]:
+    for element in root.iter():
+        if _local_name(element) != "Location":
+            continue
+        values = _float_tokens(" ".join(element.itertext()))
+        if len(values) >= 3:
+            return values[0], values[1], values[2]
+    return None, None, None
+
+
+def _float_tokens(text: str) -> list[float]:
+    values: list[float] = []
+    for token in re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", text):
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+    return values
+
+
+def _well_name_from_md_datum_title(title: str) -> str:
+    match = re.search(r"\bwell\s+(.+)$", title, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else title.strip()
 
 
 def _z_to_depth(values):

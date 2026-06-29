@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Callable
 
 import pandas as pd
@@ -61,6 +62,7 @@ class MultiModelPropertyExtractor:
         self.skip_inactive = skip_inactive
         self.contexts: list[ModelContext] = []
         self.metadata: MultiModelMetadata | None = None
+        self.well_depth_datums: dict[str, float] = {}
 
     def open(self, log_callback: LogCallback | None = None) -> None:
         if not self.specs:
@@ -69,6 +71,7 @@ class MultiModelPropertyExtractor:
             raise ValueError("Select at least one property in one model.")
 
         raw_contexts: list[tuple[ExtractionModelSpec, object, FastGridIndexer, list[PropertyInfo]]] = []
+        well_depth_datums: dict[str, float] = {}
         selected_titles: list[str] = []
         for model_index, spec in enumerate(self.specs, start=1):
             _log(log_callback, f"Opening model {model_index}: {spec.path}")
@@ -88,6 +91,7 @@ class MultiModelPropertyExtractor:
             indexer = FastGridIndexer(reader, grid)
             indexer.build_column_index()
             selected = _selected_properties(reader.list_properties(), spec.selected_property_uuids)
+            well_depth_datums.update(_well_depth_datums_from_reader(reader))
             raw_contexts.append((spec, reader, indexer, selected))
             selected_titles.extend(prop.title for prop in selected)
 
@@ -114,6 +118,9 @@ class MultiModelPropertyExtractor:
                 )
             )
         self.contexts = contexts
+        self.well_depth_datums = well_depth_datums
+        if well_depth_datums:
+            _log(log_callback, f"Loaded well depth datums: {len(well_depth_datums)} aliases")
 
         primary_reader = contexts[0].reader
         primary_grid = primary_reader.list_grids()[0]
@@ -155,13 +162,21 @@ class MultiModelPropertyExtractor:
             "X",
             "Y",
             PORT_DEPTH_COLUMN,
+            "Datum_Z",
+            "Depth_KB_PORT",
             "I",
             "J",
             "K",
             "IsActive",
+            "TVDSS_top",
+            "TVDSS_base",
+            "TVDSS_center",
             "TVD_top",
             "TVD_base",
             "TVD_center",
+            "Depth_KB_top",
+            "Depth_KB_base",
+            "Depth_KB_center",
             "Rel_TVD_top",
             "Rel_TVD_base",
             "Rel_TVD_center",
@@ -200,6 +215,7 @@ class MultiModelPropertyExtractor:
                 x = float(getattr(sleeve, "X"))
                 y = float(getattr(sleeve, "Y"))
                 port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
+                datum_z = _datum_for_well(self.well_depth_datums, well)
                 model_columns = [_load_model_column(context, x, y) for context in self.contexts]
                 if not any(model_columns):
                     stats.sleeves_outside_grid += 1
@@ -227,13 +243,21 @@ class MultiModelPropertyExtractor:
                         "X": x,
                         "Y": y,
                         PORT_DEPTH_COLUMN: port_tvd,
+                        "Datum_Z": datum_z,
+                        "Depth_KB_PORT": _depth_kb(port_tvd, datum_z),
                         "I": "" if geometry_source is None else geometry_source[0].i + 1,
                         "J": "" if geometry_source is None else geometry_source[0].j + 1,
                         "K": segment_index,
                         "IsActive": is_active,
+                        "TVDSS_top": target_top,
+                        "TVDSS_base": target_base,
+                        "TVDSS_center": _depth_cell_center(target_top, target_base),
                         "TVD_top": target_top,
                         "TVD_base": target_base,
                         "TVD_center": _depth_cell_center(target_top, target_base),
+                        "Depth_KB_top": _depth_kb(target_top, datum_z),
+                        "Depth_KB_base": _depth_kb(target_base, datum_z),
+                        "Depth_KB_center": _depth_kb(_depth_cell_center(target_top, target_base), datum_z),
                         "Rel_TVD_top": _depth_relative_depth(target_top, port_tvd),
                         "Rel_TVD_base": _depth_relative_depth(target_base, port_tvd),
                         "Rel_TVD_center": _depth_relative_depth(_depth_cell_center(target_top, target_base), port_tvd),
@@ -253,6 +277,7 @@ class MultiModelPropertyExtractor:
                                 target_top,
                                 target_base,
                                 skip_inactive=self.skip_inactive,
+                                datum_z=datum_z,
                                 allow_nearest=False,
                             )
                         property_value_names = set(context.output_names.values())
@@ -320,6 +345,7 @@ def _property_values_for_interval(
     target_base: float,
     *,
     skip_inactive: bool,
+    datum_z: float | str = "",
     allow_nearest: bool = True,
 ) -> dict[str, object]:
     samples: dict[str, list[tuple[object, float, int]]] = {prop.uuid: [] for prop in context.properties}
@@ -342,7 +368,7 @@ def _property_values_for_interval(
         values = _property_values_for_k(context, column, nearest_k)
         if skip_inactive and not _is_active(column, nearest_k, values):
             return _blank_values_with_diagnostics(context)
-        values.update(_property_diagnostics_for_k(context, column, nearest_k, values))
+        values.update(_property_diagnostics_for_k(context, column, nearest_k, values, datum_z))
         return values
 
     result: dict[str, object] = {}
@@ -353,7 +379,7 @@ def _property_values_for_interval(
             prop,
             [(value, weight) for value, weight, _k in prop_samples],
         )
-        result.update(_property_diagnostics_for_samples(context, column, prop, prop_samples))
+        result.update(_property_diagnostics_for_samples(context, column, prop, prop_samples, datum_z))
     return result
 
 
@@ -415,6 +441,7 @@ def _blank_property_diagnostics_for_name(output_name: str) -> dict[str, str]:
         f"{output_name}_J": "",
         f"{output_name}_K": "",
         f"{output_name}_TVD_center": "",
+        f"{output_name}_Depth_KB": "",
     }
 
 
@@ -429,6 +456,7 @@ def _property_output_columns(context: ModelContext) -> list[str]:
                 f"{output_name}_J",
                 f"{output_name}_K",
                 f"{output_name}_TVD_center",
+                f"{output_name}_Depth_KB",
             ]
         )
     return columns
@@ -439,6 +467,7 @@ def _property_diagnostics_for_samples(
     column: LoadedColumn,
     prop: PropertyInfo,
     samples: list[tuple[object, float, int]],
+    datum_z: float | str = "",
 ) -> dict[str, object]:
     output_name = context.output_names[prop.uuid]
     if not samples:
@@ -447,7 +476,7 @@ def _property_diagnostics_for_samples(
         enumerate(samples),
         key=lambda indexed_sample: (float(indexed_sample[1][1]), -indexed_sample[0]),
     )
-    return _property_diagnostics_for_property(context, column, output_name, k, _value)
+    return _property_diagnostics_for_property(context, column, output_name, k, _value, datum_z)
 
 
 def _property_diagnostics_for_k(
@@ -455,12 +484,13 @@ def _property_diagnostics_for_k(
     column: LoadedColumn,
     k: int,
     values: dict[str, object],
+    datum_z: float | str = "",
 ) -> dict[str, object]:
     diagnostics: dict[str, object] = {}
     for prop in context.properties:
         output_name = context.output_names[prop.uuid]
         diagnostics.update(
-            _property_diagnostics_for_property(context, column, output_name, k, values.get(output_name, ""))
+            _property_diagnostics_for_property(context, column, output_name, k, values.get(output_name, ""), datum_z)
         )
     return diagnostics
 
@@ -471,6 +501,7 @@ def _property_diagnostics_for_property(
     output_name: str,
     k: int,
     value: object,
+    datum_z: float | str = "",
 ) -> dict[str, object]:
     if _is_blank_property_value(value):
         return _blank_property_diagnostics_for_name(output_name)
@@ -480,6 +511,7 @@ def _property_diagnostics_for_property(
         f"{output_name}_J": column.j + 1,
         f"{output_name}_K": k + 1,
         f"{output_name}_TVD_center": _cell_center(column.geometry, k),
+        f"{output_name}_Depth_KB": _depth_kb(_cell_center(column.geometry, k), datum_z),
     }
 
 
@@ -592,6 +624,93 @@ def _offset_geometry(geometry: dict[str, list[float]], offset: float) -> dict[st
 def _selected_properties(properties: list[PropertyInfo], selected_uuids: list[str]) -> list[PropertyInfo]:
     selected = {uuid.lower() for uuid in selected_uuids}
     return [prop for prop in properties if prop.uuid in selected]
+
+
+def _well_depth_datums_from_reader(reader: object) -> dict[str, float]:
+    list_md_datums = getattr(reader, "list_md_datums", None)
+    if not callable(list_md_datums):
+        return {}
+    datums: dict[str, float] = {}
+    try:
+        md_datums = list_md_datums()
+    except Exception:
+        return {}
+    for datum in md_datums:
+        z = getattr(datum, "z", None)
+        if z is None:
+            continue
+        try:
+            value = float(z)
+        except (TypeError, ValueError):
+            continue
+        for candidate in _well_key_candidates(getattr(datum, "well_name", "")):
+            datums.setdefault(candidate, value)
+    return datums
+
+
+def _datum_for_well(datums: dict[str, float], well: object) -> float | str:
+    for candidate in _well_key_candidates(str(well)):
+        if candidate in datums:
+            return datums[candidate]
+    return ""
+
+
+def _well_key_candidates(value: object) -> list[str]:
+    text = _normalize_well_text(str(value))
+    tokens = re.findall(r"[0-9A-Z]+", text)
+    candidates: list[str] = []
+    for token in tokens:
+        _append_unique(candidates, token)
+        match = re.search(r"\d+[A-Z]+\d+", token)
+        if match:
+            _append_unique(candidates, match.group(0))
+    return candidates
+
+
+def _normalize_well_text(value: str) -> str:
+    translation = str.maketrans(
+        {
+            "А": "A",
+            "В": "B",
+            "Е": "E",
+            "К": "K",
+            "М": "M",
+            "Н": "H",
+            "О": "O",
+            "Р": "P",
+            "С": "C",
+            "Т": "T",
+            "У": "Y",
+            "Х": "X",
+            "а": "A",
+            "в": "B",
+            "е": "E",
+            "к": "K",
+            "м": "M",
+            "н": "H",
+            "о": "O",
+            "р": "P",
+            "с": "C",
+            "т": "T",
+            "у": "Y",
+            "х": "X",
+        }
+    )
+    return value.translate(translation).upper()
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
+
+
+def _depth_kb(depth: object, datum_z: object) -> float | str:
+    if _is_blank_property_value(depth) or _is_blank_property_value(datum_z):
+        return ""
+    try:
+        return float(depth) + float(datum_z)
+    except (TypeError, ValueError):
+        return ""
 
 
 def _max_nk(contexts: list[ModelContext]) -> int | None:

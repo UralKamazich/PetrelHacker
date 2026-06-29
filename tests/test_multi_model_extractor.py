@@ -7,6 +7,7 @@ from core.multi_model_extractor import (
     ExtractionModelSpec,
     ModelContext,
     MultiModelPropertyExtractor,
+    _datum_for_well,
     _find_depth_k,
     _offset_geometry,
     _union_depth_segments,
@@ -100,6 +101,7 @@ def test_union_depth_segments_keeps_broad_geomechanics_coverage() -> None:
 
 def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
     extractor = MultiModelPropertyExtractor([], skip_inactive=False)
+    extractor.well_depth_datums = {"A": 85.0}
     extractor.contexts = [
         ModelContext(
             spec=ExtractionModelSpec(path="fake"),
@@ -126,7 +128,11 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
 
     assert stats.extracted_rows == 1
     assert rows.loc[0, "TVDSS_PORT"] == 95.0
+    assert rows.loc[0, "Datum_Z"] == 85.0
+    assert rows.loc[0, "Depth_KB_PORT"] == 180.0
+    assert rows.loc[0, "TVDSS_center"] == 105.0
     assert rows.loc[0, "TVD_center"] == 105.0
+    assert rows.loc[0, "Depth_KB_center"] == 190.0
     assert rows.loc[0, "Rel_TVD_top"] == 5.0
     assert rows.loc[0, "Rel_TVD_base"] == 15.0
     assert rows.loc[0, "Rel_TVD_center"] == 10.0
@@ -134,6 +140,7 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
 
 def test_multi_model_extractor_writes_property_source_diagnostics(tmp_path) -> None:
     extractor = MultiModelPropertyExtractor([], skip_inactive=False)
+    extractor.well_depth_datums = {"A": 85.0}
     prop = PropertyInfo(index=0, title="YME_STA", uuid="prop-1")
     extractor.contexts = [
         ModelContext(
@@ -166,3 +173,11 @@ def test_multi_model_extractor_writes_property_source_diagnostics(tmp_path) -> N
     assert rows.loc[0, "YME_STA_J"] == 1
     assert rows.loc[0, "YME_STA_K"] == 1
     assert rows.loc[0, "YME_STA_TVD_center"] == 105.0
+    assert rows.loc[0, "YME_STA_Depth_KB"] == 190.0
+
+
+def test_datum_matching_normalizes_cyrillic_a_and_well_suffix() -> None:
+    datums = {"6A031": 85.09}
+
+    assert _datum_for_well(datums, "6А031") == 85.09
+    assert _datum_for_well(datums, "6A031GS_NEW") == 85.09

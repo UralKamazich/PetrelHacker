@@ -23,12 +23,25 @@ BASE_EXTRACTION_COLUMNS = {
     "Port",
     "X",
     "Y",
+    "TVDSS_PORT",
+    "Datum_Z",
+    "Depth_KB_PORT",
     "I",
     "J",
     "K",
     "IsActive",
+    "TVDSS_top",
+    "TVDSS_base",
+    "TVDSS_center",
     "TVD_top",
     "TVD_base",
+    "TVD_center",
+    "Depth_KB_top",
+    "Depth_KB_base",
+    "Depth_KB_center",
+    "Rel_TVD_top",
+    "Rel_TVD_base",
+    "Rel_TVD_center",
     "CellHeight",
     "CellSizeI",
     "CellSizeJ",
@@ -410,7 +423,17 @@ def _metric_suffixes() -> tuple[str, ...]:
 
 
 def _default_property_columns(columns) -> list[str]:
-    return [str(column) for column in columns if str(column) not in BASE_EXTRACTION_COLUMNS and str(column) != "CellCenterTVD"]
+    return [
+        str(column)
+        for column in columns
+        if str(column) not in BASE_EXTRACTION_COLUMNS
+        and str(column) != "CellCenterTVD"
+        and not _is_source_diagnostic_column(str(column))
+    ]
+
+
+def _is_source_diagnostic_column(column_name: str) -> bool:
+    return column_name.endswith(("_Model", "_I", "_J", "_K", "_TVD_center", "_Depth_KB"))
 
 
 def _additional_property_columns(settings: IntervalMetricSettings, property_columns: list[str]) -> list[str]:
