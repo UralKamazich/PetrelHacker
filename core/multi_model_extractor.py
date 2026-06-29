@@ -48,6 +48,7 @@ class MultiModelMetadata:
 @dataclass
 class ModelContext:
     spec: ExtractionModelSpec
+    label: str
     reader: object
     indexer: FastGridIndexer
     properties: list[PropertyInfo]
@@ -102,7 +103,16 @@ class MultiModelPropertyExtractor:
             for prop in properties:
                 base_name = prop.title if title_counts.get(prop.title, 0) == 1 else f"{label}_{prop.title}"
                 output_names[prop.uuid] = _unique_name(base_name, output_names_seen)
-            contexts.append(ModelContext(spec=spec, reader=reader, indexer=indexer, properties=properties, output_names=output_names))
+            contexts.append(
+                ModelContext(
+                    spec=spec,
+                    label=label,
+                    reader=reader,
+                    indexer=indexer,
+                    properties=properties,
+                    output_names=output_names,
+                )
+            )
         self.contexts = contexts
 
         primary_reader = contexts[0].reader
@@ -138,7 +148,7 @@ class MultiModelPropertyExtractor:
         return self._extract(sleeves_df, output_path, StreamingXlsxExporter, progress_callback, log_callback, cancel_callback)
 
     def output_columns(self) -> list[str]:
-        property_columns = [name for context in self.contexts for name in context.output_names.values()]
+        property_columns = [column for context in self.contexts for column in _property_output_columns(context)]
         return [
             "Well",
             "Port",
@@ -235,7 +245,7 @@ class MultiModelPropertyExtractor:
 
                     any_property_value = False
                     for context, column in zip(self.contexts, model_columns, strict=False):
-                        secondary_values = _blank_values(context)
+                        secondary_values = _blank_values_with_diagnostics(context)
                         if column is not None:
                             secondary_values = _property_values_for_interval(
                                 context,
@@ -245,8 +255,10 @@ class MultiModelPropertyExtractor:
                                 skip_inactive=self.skip_inactive,
                                 allow_nearest=False,
                             )
+                        property_value_names = set(context.output_names.values())
                         any_property_value = any_property_value or any(
-                            not _is_blank_property_value(value) for value in secondary_values.values()
+                            not _is_blank_property_value(secondary_values.get(name, ""))
+                            for name in property_value_names
                         )
                         row.update(secondary_values)
 
@@ -310,7 +322,7 @@ def _property_values_for_interval(
     skip_inactive: bool,
     allow_nearest: bool = True,
 ) -> dict[str, object]:
-    samples: dict[str, list[tuple[object, float]]] = {prop.uuid: [] for prop in context.properties}
+    samples: dict[str, list[tuple[object, float, int]]] = {prop.uuid: [] for prop in context.properties}
     for k, weight in _overlapping_cells(column.geometry, target_top, target_base):
         values = _property_values_for_k(context, column, k)
         if skip_inactive and not _is_active(column, k, values):
@@ -319,23 +331,29 @@ def _property_values_for_interval(
             output_name = context.output_names[prop.uuid]
             value = values.get(output_name, "")
             if not _is_blank_property_value(value):
-                samples[prop.uuid].append((value, weight))
+                samples[prop.uuid].append((value, weight, k))
 
     if not any(samples.values()):
         if not allow_nearest:
-            return _blank_values(context)
+            return _blank_values_with_diagnostics(context)
         nearest_k = _find_depth_k(column.geometry, (min(target_top, target_base) + max(target_top, target_base)) / 2.0)
         if nearest_k is None:
-            return _blank_values(context)
+            return _blank_values_with_diagnostics(context)
         values = _property_values_for_k(context, column, nearest_k)
         if skip_inactive and not _is_active(column, nearest_k, values):
-            return _blank_values(context)
+            return _blank_values_with_diagnostics(context)
+        values.update(_property_diagnostics_for_k(context, column, nearest_k, values))
         return values
 
     result: dict[str, object] = {}
     for prop in context.properties:
         output_name = context.output_names[prop.uuid]
-        result[output_name] = _aggregate_property_samples(prop, samples[prop.uuid])
+        prop_samples = samples[prop.uuid]
+        result[output_name] = _aggregate_property_samples(
+            prop,
+            [(value, weight) for value, weight, _k in prop_samples],
+        )
+        result.update(_property_diagnostics_for_samples(context, column, prop, prop_samples))
     return result
 
 
@@ -375,6 +393,94 @@ def _is_discrete_property(prop: PropertyInfo) -> bool:
 
 def _blank_values(context: ModelContext) -> dict[str, str]:
     return {name: "" for name in context.output_names.values()}
+
+
+def _blank_values_with_diagnostics(context: ModelContext) -> dict[str, str]:
+    values = _blank_values(context)
+    values.update(_blank_property_diagnostics(context))
+    return values
+
+
+def _blank_property_diagnostics(context: ModelContext) -> dict[str, str]:
+    blanks: dict[str, str] = {}
+    for output_name in context.output_names.values():
+        blanks.update(_blank_property_diagnostics_for_name(output_name))
+    return blanks
+
+
+def _blank_property_diagnostics_for_name(output_name: str) -> dict[str, str]:
+    return {
+        f"{output_name}_Model": "",
+        f"{output_name}_I": "",
+        f"{output_name}_J": "",
+        f"{output_name}_K": "",
+        f"{output_name}_TVD_center": "",
+    }
+
+
+def _property_output_columns(context: ModelContext) -> list[str]:
+    columns: list[str] = []
+    for output_name in context.output_names.values():
+        columns.extend(
+            [
+                output_name,
+                f"{output_name}_Model",
+                f"{output_name}_I",
+                f"{output_name}_J",
+                f"{output_name}_K",
+                f"{output_name}_TVD_center",
+            ]
+        )
+    return columns
+
+
+def _property_diagnostics_for_samples(
+    context: ModelContext,
+    column: LoadedColumn,
+    prop: PropertyInfo,
+    samples: list[tuple[object, float, int]],
+) -> dict[str, object]:
+    output_name = context.output_names[prop.uuid]
+    if not samples:
+        return _blank_property_diagnostics_for_name(output_name)
+    _index, (_value, _weight, k) = max(
+        enumerate(samples),
+        key=lambda indexed_sample: (float(indexed_sample[1][1]), -indexed_sample[0]),
+    )
+    return _property_diagnostics_for_property(context, column, output_name, k, _value)
+
+
+def _property_diagnostics_for_k(
+    context: ModelContext,
+    column: LoadedColumn,
+    k: int,
+    values: dict[str, object],
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {}
+    for prop in context.properties:
+        output_name = context.output_names[prop.uuid]
+        diagnostics.update(
+            _property_diagnostics_for_property(context, column, output_name, k, values.get(output_name, ""))
+        )
+    return diagnostics
+
+
+def _property_diagnostics_for_property(
+    context: ModelContext,
+    column: LoadedColumn,
+    output_name: str,
+    k: int,
+    value: object,
+) -> dict[str, object]:
+    if _is_blank_property_value(value):
+        return _blank_property_diagnostics_for_name(output_name)
+    return {
+        f"{output_name}_Model": context.label,
+        f"{output_name}_I": column.i + 1,
+        f"{output_name}_J": column.j + 1,
+        f"{output_name}_K": k + 1,
+        f"{output_name}_TVD_center": _cell_center(column.geometry, k),
+    }
 
 
 def _is_active(column: LoadedColumn, k: int, values: dict[str, object]) -> bool:

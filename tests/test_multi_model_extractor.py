@@ -11,6 +11,7 @@ from core.multi_model_extractor import (
     _offset_geometry,
     _union_depth_segments,
 )
+from core.resqml_reader import PropertyInfo
 
 
 class _FakeMatch:
@@ -36,6 +37,9 @@ class _FakeReader:
 
     def get_cell_active_column(self, i: int, j: int):
         return None
+
+    def get_property_column_values(self, uuid: str, i: int, j: int):
+        return [2.5]
 
 
 def test_find_depth_k_uses_depth_interval_not_matching_index() -> None:
@@ -99,6 +103,7 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
     extractor.contexts = [
         ModelContext(
             spec=ExtractionModelSpec(path="fake"),
+            label="fake",
             reader=_FakeReader(),
             indexer=_FakeIndexer(),
             properties=[],
@@ -125,3 +130,39 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
     assert rows.loc[0, "Rel_TVD_top"] == 5.0
     assert rows.loc[0, "Rel_TVD_base"] == 15.0
     assert rows.loc[0, "Rel_TVD_center"] == 10.0
+
+
+def test_multi_model_extractor_writes_property_source_diagnostics(tmp_path) -> None:
+    extractor = MultiModelPropertyExtractor([], skip_inactive=False)
+    prop = PropertyInfo(index=0, title="YME_STA", uuid="prop-1")
+    extractor.contexts = [
+        ModelContext(
+            spec=ExtractionModelSpec(path="fake"),
+            label="rescue",
+            reader=_FakeReader(),
+            indexer=_FakeIndexer(),
+            properties=[prop],
+            output_names={prop.uuid: "YME_STA"},
+        )
+    ]
+    sleeves = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "X": [10.0],
+            "Y": [20.0],
+            "TVDSS_PORT": [95.0],
+        }
+    )
+    output_path = tmp_path / "out.csv"
+
+    stats = extractor.extract_to_csv(sleeves, output_path)
+    rows = pd.read_csv(output_path)
+
+    assert stats.extracted_rows == 1
+    assert rows.loc[0, "YME_STA"] == 2.5
+    assert rows.loc[0, "YME_STA_Model"] == "rescue"
+    assert rows.loc[0, "YME_STA_I"] == 1
+    assert rows.loc[0, "YME_STA_J"] == 1
+    assert rows.loc[0, "YME_STA_K"] == 1
+    assert rows.loc[0, "YME_STA_TVD_center"] == 105.0

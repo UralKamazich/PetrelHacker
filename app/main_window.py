@@ -991,10 +991,11 @@ class MainWindow(QMainWindow):
         }
         columns: list[str] = []
         for column in self._curve_df.columns:
-            if str(column) in base_columns:
+            column_name = str(column)
+            if column_name in base_columns or _is_source_diagnostic_column(column_name):
                 continue
             if pd.to_numeric(self._curve_df[column], errors="coerce").notna().any():
-                columns.append(str(column))
+                columns.append(column_name)
         return columns
 
     def _curve_filtered_df(self) -> pd.DataFrame:
@@ -1297,7 +1298,11 @@ class MainWindow(QMainWindow):
             "CellSizeJ",
             "CellAreaXY",
         }
-        return [header for header in self._last_extracted_headers if header not in base_columns]
+        return [
+            header
+            for header in self._last_extracted_headers
+            if header not in base_columns and not _is_source_diagnostic_column(header)
+        ]
 
     def _sync_metrics_properties_from_list(self) -> None:
         self.metrics_properties_edit.setText(",".join(self._selected_metrics_properties()))
@@ -1425,6 +1430,10 @@ def _unique_text_values(series: pd.Series) -> list[str]:
 
 def _numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def _is_source_diagnostic_column(column_name: str) -> bool:
+    return column_name.endswith(("_Model", "_I", "_J", "_K", "_TVD_center"))
 
 
 def _range_with_padding(series: pd.Series, padding_fraction: float) -> tuple[float, float]:
