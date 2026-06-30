@@ -26,6 +26,7 @@ from core.resqml_reader import PropertyInfo
 
 
 PORT_DEPTH_COLUMN = "TVDSS_PORT"
+DEPTH_BOUNDARY_TOLERANCE_M = 1e-3
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ class MultiModelPropertyExtractor:
                 _log(
                     log_callback,
                     "Warning: Rescue support decodes compact property streams and uses regular XY indexing; "
-                    "TVD cell geometry is approximated from decoded per-column Rescue Z centers.",
+                    "TVD cell geometry is decoded from Rescue Z interfaces.",
                 )
             _log(log_callback, f"Building XY index for model {model_index}...")
             indexer = FastGridIndexer(reader, grid)
@@ -561,12 +562,26 @@ def _union_depth_segments(columns: list[LoadedColumn]) -> list[tuple[float, floa
     for column in columns:
         boundaries.extend(float(value) for value in column.geometry["TVD_top"])
         boundaries.extend(float(value) for value in column.geometry["TVD_base"])
-    unique_boundaries = sorted(set(round(value, 6) for value in boundaries))
+    unique_boundaries = _merge_depth_boundaries(boundaries)
     return [
         (float(top), float(base))
         for top, base in zip(unique_boundaries, unique_boundaries[1:], strict=False)
         if base > top
     ]
+
+
+def _merge_depth_boundaries(boundaries: list[float]) -> list[float]:
+    finite = sorted(value for value in boundaries if pd.notna(value))
+    if not finite:
+        return []
+    clusters: list[list[float]] = [[float(finite[0])]]
+    for value in finite[1:]:
+        value = float(value)
+        if value - clusters[-1][-1] <= DEPTH_BOUNDARY_TOLERANCE_M:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return [round(sum(cluster) / len(cluster), 6) for cluster in clusters]
 
 
 def _geometry_source_for_segment(

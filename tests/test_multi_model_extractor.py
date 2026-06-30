@@ -99,6 +99,36 @@ def test_union_depth_segments_keeps_broad_geomechanics_coverage() -> None:
     ]
 
 
+def test_union_depth_segments_merges_float_noise_boundaries() -> None:
+    first = LoadedColumn(
+        i=0,
+        j=0,
+        geometry={
+            "TVD_top": [100.0, 100.3],
+            "TVD_base": [100.3, 100.6],
+            "CellHeight": [0.3, 0.3],
+        },
+        active=None,
+        property_columns={},
+    )
+    second = LoadedColumn(
+        i=0,
+        j=0,
+        geometry={
+            "TVD_top": [100.0002, 100.3001],
+            "TVD_base": [100.3001, 100.6002],
+            "CellHeight": [0.3, 0.3],
+        },
+        active=None,
+        property_columns={},
+    )
+
+    assert _union_depth_segments([first, second]) == [
+        (100.0001, 100.30005),
+        (100.30005, 100.6001),
+    ]
+
+
 def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
     extractor = MultiModelPropertyExtractor([], skip_inactive=False)
     extractor.well_depth_datums = {"A": 85.0}

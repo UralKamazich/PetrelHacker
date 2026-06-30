@@ -54,9 +54,12 @@ def test_rescue_reader_loads_grid_properties_and_values(tmp_path: Path) -> None:
     assert reader.get_property_value(prop.uuid, 0, 1, 0) == ""
     assert reader.get_property_value(prop.uuid, 1, 1, 0) == 0.4000000059604645
     geometry = reader.get_cell_geometry_column(0, 0)
-    assert geometry["TVD_top"] == [58.0, 68.0, 78.0, 88.0]
-    assert geometry["TVD_base"] == [68.0, 78.0, 88.0, 98.0]
+    assert geometry["TVD_top"] == [57.5, 67.5, 77.5, 87.5]
+    assert geometry["TVD_base"] == [67.5, 77.5, 87.5, 97.5]
     assert geometry["CellHeight"] == [10.0, 10.0, 10.0, 10.0]
+    corner_geometry = reader.get_cell_geometry_column(1, 2)
+    assert corner_geometry["TVD_top"] == [51.5, 61.5, 71.5, 81.5]
+    assert corner_geometry["TVD_base"] == [61.5, 71.5, 81.5, 91.5]
     centers = reader.get_column_centers_xy()
     assert centers.shape == (3, 2, 2)
     assert centers[0, 0].tolist() == pytest.approx([15.0, 26.666666666666668])

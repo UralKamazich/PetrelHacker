@@ -231,7 +231,7 @@ class RescueReader:
         value = float(values[flat_index])
         if not math.isfinite(value):
             return ""
-        return value
+        return value * _output_value_scale(self._property_info(property_uuid))
 
     def _resolve_main_path(self, path: Path) -> Path:
         if path.is_file():
@@ -343,7 +343,7 @@ class RescueReader:
         raw_ni, raw_nj, raw_nk = geometry_file.raw_ni, geometry_file.raw_nj, geometry_file.raw_nk
         if not (0 <= i < raw_ni and 0 <= j < raw_nj):
             return None
-        column_index = j * raw_ni + i
+        column_index = i * raw_nj + j
         cached = self._decoded_geometry_columns.get(column_index)
         if cached is not None:
             self._decoded_geometry_columns.move_to_end(column_index)
@@ -629,6 +629,15 @@ def _valid_value_range(prop: PropertyInfo) -> tuple[np.float32, np.float32] | No
     if "friction angle" in text or title == "fang":
         return np.float32(0.0), np.float32(90.0)
     return None
+
+
+def _output_value_scale(prop: PropertyInfo) -> float:
+    title = prop.title.lower()
+    kind = (prop.property_kind or "").lower()
+    text = f"{title} {kind}"
+    if "density" in text or "dens" in title:
+        return 1000.0
+    return 1.0
 
 
 def _read_compact_command(
