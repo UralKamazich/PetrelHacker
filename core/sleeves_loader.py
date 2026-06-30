@@ -33,7 +33,16 @@ COLUMN_ALIASES = {
 OPTIONAL_NUMERIC_COLUMNS = ("TVDSS_PORT",)
 
 
-def load_sleeves_table(path: str | Path) -> pd.DataFrame:
+def load_sleeves_table(path: str | Path, column_mapping: dict[str, str] | None = None) -> pd.DataFrame:
+    df = read_sleeves_table_raw(path)
+    if column_mapping:
+        df = apply_sleeves_column_mapping(df, column_mapping)
+    else:
+        df = normalize_sleeves_columns(df)
+    return df.dropna(how="all").reset_index(drop=True)
+
+
+def read_sleeves_table_raw(path: str | Path) -> pd.DataFrame:
     source = Path(path)
     if not source.exists():
         raise FileNotFoundError(f"Sleeves table does not exist: {source}")
@@ -47,14 +56,77 @@ def load_sleeves_table(path: str | Path) -> pd.DataFrame:
         df = pd.read_excel(source)
     else:
         raise ValueError(f"Unsupported sleeves table format: {source.suffix}")
-
-    df = normalize_sleeves_columns(df)
     return df.dropna(how="all").reset_index(drop=True)
+
+
+def guess_sleeves_column_mapping(columns: list[object]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    used: set[str] = set()
+    for column in columns:
+        column_name = str(column)
+        target = COLUMN_ALIASES.get(_normalize_name(column_name))
+        if target and target not in used:
+            mapping[target] = column_name
+            used.add(target)
+    return mapping
+
+
+def apply_sleeves_column_mapping(df: pd.DataFrame, column_mapping: dict[str, str]) -> pd.DataFrame:
+    out = df.copy()
+    for target, source in column_mapping.items():
+        if not source or source not in df.columns:
+            continue
+        out[target] = df[source]
+    return normalize_sleeves_columns(out)
+
+
+def unique_well_values(df: pd.DataFrame, well_col: str = "Well") -> list[str]:
+    if well_col not in df.columns:
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for value in df[well_col]:
+        text = _normalize_well_value(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        values.append(text)
+    return values
+
+
+def well_value_counts(df: pd.DataFrame, well_col: str = "Well") -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if well_col not in df.columns:
+        return counts
+    for value in df[well_col]:
+        text = _normalize_well_value(value)
+        if not text:
+            continue
+        counts[text] = counts.get(text, 0) + 1
+    return counts
+
+
+def filter_sleeves_by_wells(
+    df: pd.DataFrame,
+    selected_wells: list[str] | tuple[str, ...] | set[str] | None,
+    well_col: str = "Well",
+) -> pd.DataFrame:
+    if selected_wells is None:
+        return df.copy().reset_index(drop=True)
+    selected = {_normalize_well_value(value) for value in selected_wells}
+    selected.discard("")
+    if not selected:
+        return df.iloc[0:0].copy().reset_index(drop=True)
+    if well_col not in df.columns:
+        raise ValueError("Cannot filter sleeves by wells: Well column is missing.")
+    mask = df[well_col].map(_normalize_well_value).isin(selected)
+    return df.loc[mask].copy().reset_index(drop=True)
 
 
 def normalize_sleeves_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename: dict[str, str] = {}
-    used: set[str] = set()
+    canonical_names = set(COLUMN_ALIASES.values())
+    used = {str(column) for column in df.columns if str(column) in canonical_names}
     for column in df.columns:
         normalized = _normalize_name(str(column))
         target = COLUMN_ALIASES.get(normalized)
@@ -112,6 +184,17 @@ def validate_sleeves_table(
 
 def _normalize_name(name: str) -> str:
     return name.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _normalize_well_value(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        head = text[:-2]
+        if head.isdigit():
+            return head
+    return text
 
 
 def _read_excel_with_fallback(path: Path) -> pd.DataFrame:

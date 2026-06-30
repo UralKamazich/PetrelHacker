@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import re
+from threading import RLock
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from core.exporter import StreamingCsvExporter, StreamingXlsxExporter
@@ -27,6 +30,7 @@ from core.resqml_reader import PropertyInfo
 
 PORT_DEPTH_COLUMN = "TVDSS_PORT"
 DEPTH_BOUNDARY_TOLERANCE_M = 1e-3
+MIN_PROPERTY_VALID_OVERLAP_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
@@ -55,12 +59,22 @@ class ModelContext:
     indexer: FastGridIndexer
     properties: list[PropertyInfo]
     output_names: dict[str, str]
+    lock: RLock = field(default_factory=RLock, repr=False)
 
 
 class MultiModelPropertyExtractor:
-    def __init__(self, specs: list[ExtractionModelSpec], *, skip_inactive: bool = True) -> None:
+    def __init__(
+        self,
+        specs: list[ExtractionModelSpec],
+        *,
+        skip_inactive: bool = True,
+        write_diagnostics: bool = True,
+        parallel_workers: int = 1,
+    ) -> None:
         self.specs = [spec for spec in specs if spec.path.strip()]
         self.skip_inactive = skip_inactive
+        self.write_diagnostics = write_diagnostics
+        self.parallel_workers = max(1, int(parallel_workers or 1))
         self.contexts: list[ModelContext] = []
         self.metadata: MultiModelMetadata | None = None
         self.well_depth_datums: dict[str, float] = {}
@@ -156,7 +170,11 @@ class MultiModelPropertyExtractor:
         return self._extract(sleeves_df, output_path, StreamingXlsxExporter, progress_callback, log_callback, cancel_callback)
 
     def output_columns(self) -> list[str]:
-        property_columns = [column for context in self.contexts for column in _property_output_columns(context)]
+        property_columns = [
+            column
+            for context in self.contexts
+            for column in _property_output_columns(context, include_diagnostics=self.write_diagnostics)
+        ]
         return [
             "Well",
             "Port",
@@ -201,105 +219,148 @@ class MultiModelPropertyExtractor:
         stats = ExtractionStats(sleeves_total=len(sleeves_df), started=datetime.now())
         property_columns = [name for context in self.contexts for name in context.output_names.values()]
         _log(log_callback, f"Selected properties: {', '.join(property_columns)}")
+        _log(log_callback, f"Property diagnostics: {'enabled' if self.write_diagnostics else 'disabled'}")
+        if self.parallel_workers > 1:
+            _log(log_callback, f"Parallel sleeve workers: {self.parallel_workers}")
         _log(log_callback, f"Writing output: {output_path}")
 
         with exporter_cls(output_path, self.output_columns()) as exporter:
-            for sleeve_index, sleeve in enumerate(sleeves_df.itertuples(index=False), start=1):
-                if cancel_callback and cancel_callback():
-                    stats.warnings.append("Extraction cancelled by user.")
-                    break
-
-                well = _row_value(sleeve, "Well")
-                port = _row_value(sleeve, "Port")
-                legacy_id = _row_value(sleeve, "Sleeve_ID")
-                display_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
-                x = float(getattr(sleeve, "X"))
-                y = float(getattr(sleeve, "Y"))
-                port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
-                datum_z = _datum_for_well(self.well_depth_datums, well)
-                model_columns = [_load_model_column(context, x, y) for context in self.contexts]
-                if not any(model_columns):
-                    stats.sleeves_outside_grid += 1
-                    stats.warnings.append(f"Sleeve {display_id} is outside all model grid footprints.")
-                    _log(log_callback, f"Sleeve outside all model grids: {display_id}")
+            sleeve_items = list(enumerate(sleeves_df.itertuples(index=False), start=1))
+            if self.parallel_workers <= 1:
+                for sleeve_index, sleeve in sleeve_items:
+                    if cancel_callback and cancel_callback():
+                        stats.warnings.append("Extraction cancelled by user.")
+                        break
+                    result = self._extract_sleeve(sleeve_index, sleeve, cancel_requested=False)
+                    _write_sleeve_result(result, exporter, stats, log_callback)
                     _progress(progress_callback, sleeve_index, stats.sleeves_total)
-                    continue
-
-                stats.sleeves_inside_grid += 1
-                rows = []
-                depth_segments = _union_depth_segments([column for column in model_columns if column is not None])
-                for segment_index, (target_top, target_base) in enumerate(depth_segments, start=1):
-                    geometry_source = _geometry_source_for_segment(model_columns, target_top, target_base)
-                    active_values = [
-                        _is_active(column, k, _blank_values(context))
-                        for context, column in zip(self.contexts, model_columns, strict=False)
-                        if column is not None
-                        for k in [_find_depth_k(column.geometry, (target_top + target_base) / 2.0)]
-                        if k is not None
-                    ]
-                    is_active = any(active_values)
-                    row = {
-                        "Well": well,
-                        "Port": port,
-                        "X": x,
-                        "Y": y,
-                        PORT_DEPTH_COLUMN: port_tvd,
-                        "Datum_Z": datum_z,
-                        "Depth_KB_PORT": _depth_kb(port_tvd, datum_z),
-                        "I": "" if geometry_source is None else geometry_source[0].i + 1,
-                        "J": "" if geometry_source is None else geometry_source[0].j + 1,
-                        "K": segment_index,
-                        "IsActive": is_active,
-                        "TVDSS_top": target_top,
-                        "TVDSS_base": target_base,
-                        "TVDSS_center": _depth_cell_center(target_top, target_base),
-                        "TVD_top": target_top,
-                        "TVD_base": target_base,
-                        "TVD_center": _depth_cell_center(target_top, target_base),
-                        "Depth_KB_top": _depth_kb(target_top, datum_z),
-                        "Depth_KB_base": _depth_kb(target_base, datum_z),
-                        "Depth_KB_center": _depth_kb(_depth_cell_center(target_top, target_base), datum_z),
-                        "Rel_TVD_top": _depth_relative_depth(target_top, port_tvd),
-                        "Rel_TVD_base": _depth_relative_depth(target_base, port_tvd),
-                        "Rel_TVD_center": _depth_relative_depth(_depth_cell_center(target_top, target_base), port_tvd),
-                        "CellHeight": abs(target_base - target_top),
-                        "CellSizeI": "" if geometry_source is None else geometry_source[1].get("CellSizeI", ""),
-                        "CellSizeJ": "" if geometry_source is None else geometry_source[1].get("CellSizeJ", ""),
-                        "CellAreaXY": "" if geometry_source is None else geometry_source[1].get("CellAreaXY", ""),
-                    }
-
-                    any_property_value = False
-                    for context, column in zip(self.contexts, model_columns, strict=False):
-                        secondary_values = _blank_values_with_diagnostics(context)
-                        if column is not None:
-                            secondary_values = _property_values_for_interval(
-                                context,
-                                column,
-                                target_top,
-                                target_base,
-                                skip_inactive=self.skip_inactive,
-                                datum_z=datum_z,
-                                allow_nearest=False,
-                            )
-                        property_value_names = set(context.output_names.values())
-                        any_property_value = any_property_value or any(
-                            not _is_blank_property_value(secondary_values.get(name, ""))
-                            for name in property_value_names
-                        )
-                        row.update(secondary_values)
-
-                    if self.skip_inactive and not is_active and not any_property_value:
-                        stats.skipped_inactive_cells += 1
-                        continue
-                    rows.append(row)
-
-                exporter.write_rows(rows)
-                stats.extracted_rows += len(rows)
-                _log(log_callback, f"{display_id}: wrote {len(rows)} rows")
-                _progress(progress_callback, sleeve_index, stats.sleeves_total)
+            else:
+                executor = ThreadPoolExecutor(max_workers=self.parallel_workers)
+                futures = {
+                    executor.submit(self._extract_sleeve, sleeve_index, sleeve, cancel_requested=False): sleeve_index
+                    for sleeve_index, sleeve in sleeve_items
+                }
+                completed_results: dict[int, SleeveExtractionResult] = {}
+                next_to_write = 1
+                completed_count = 0
+                try:
+                    for future in as_completed(futures):
+                        if cancel_callback and cancel_callback():
+                            stats.warnings.append("Extraction cancelled by user.")
+                            break
+                        result = future.result()
+                        completed_count += 1
+                        completed_results[result.sleeve_index] = result
+                        while next_to_write in completed_results:
+                            _write_sleeve_result(completed_results.pop(next_to_write), exporter, stats, log_callback)
+                            next_to_write += 1
+                        _progress(progress_callback, completed_count, stats.sleeves_total)
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
         stats.finished = datetime.now()
         return stats
+
+    def _extract_sleeve(self, sleeve_index: int, sleeve, *, cancel_requested: bool) -> "SleeveExtractionResult":
+        well = _row_value(sleeve, "Well")
+        port = _row_value(sleeve, "Port")
+        legacy_id = _row_value(sleeve, "Sleeve_ID")
+        display_id = f"{well}_{port}" if well != "" or port != "" else str(legacy_id)
+        x = float(getattr(sleeve, "X"))
+        y = float(getattr(sleeve, "Y"))
+        port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
+        datum_z = _datum_for_well(self.well_depth_datums, well)
+        model_columns = [_load_model_column(context, x, y) for context in self.contexts]
+        if not any(model_columns):
+            warning = f"Sleeve {display_id} is outside all model grid footprints."
+            return SleeveExtractionResult(
+                sleeve_index=sleeve_index,
+                display_id=display_id,
+                rows=[],
+                skipped_inactive_cells=0,
+                outside_grid=True,
+                warning=warning,
+                log_message=f"Sleeve outside all model grids: {display_id}",
+            )
+
+        rows = []
+        skipped_inactive_cells = 0
+        depth_segments = _union_depth_segments([column for column in model_columns if column is not None])
+        for segment_index, (target_top, target_base) in enumerate(depth_segments, start=1):
+            geometry_source = _geometry_source_for_segment(model_columns, target_top, target_base)
+            active_values = [
+                _is_active(column, k, _blank_values(context))
+                for context, column in zip(self.contexts, model_columns, strict=False)
+                if column is not None
+                for k in [_find_depth_k(column, (target_top + target_base) / 2.0)]
+                if k is not None
+            ]
+            is_active = any(active_values)
+            row = {
+                "Well": well,
+                "Port": port,
+                "X": x,
+                "Y": y,
+                PORT_DEPTH_COLUMN: port_tvd,
+                "Datum_Z": datum_z,
+                "Depth_KB_PORT": _depth_kb(port_tvd, datum_z),
+                "I": "" if geometry_source is None else geometry_source[0].i + 1,
+                "J": "" if geometry_source is None else geometry_source[0].j + 1,
+                "K": segment_index,
+                "IsActive": is_active,
+                "TVDSS_top": target_top,
+                "TVDSS_base": target_base,
+                "TVDSS_center": _depth_cell_center(target_top, target_base),
+                "TVD_top": target_top,
+                "TVD_base": target_base,
+                "TVD_center": _depth_cell_center(target_top, target_base),
+                "Depth_KB_top": _depth_kb(target_top, datum_z),
+                "Depth_KB_base": _depth_kb(target_base, datum_z),
+                "Depth_KB_center": _depth_kb(_depth_cell_center(target_top, target_base), datum_z),
+                "Rel_TVD_top": _depth_relative_depth(target_top, port_tvd),
+                "Rel_TVD_base": _depth_relative_depth(target_base, port_tvd),
+                "Rel_TVD_center": _depth_relative_depth(_depth_cell_center(target_top, target_base), port_tvd),
+                "CellHeight": abs(target_base - target_top),
+                "CellSizeI": "" if geometry_source is None else geometry_source[1].get("CellSizeI", ""),
+                "CellSizeJ": "" if geometry_source is None else geometry_source[1].get("CellSizeJ", ""),
+                "CellAreaXY": "" if geometry_source is None else geometry_source[1].get("CellAreaXY", ""),
+            }
+
+            any_property_value = False
+            for context, column in zip(self.contexts, model_columns, strict=False):
+                secondary_values = _blank_values_for_context(context, include_diagnostics=self.write_diagnostics)
+                if column is not None:
+                    secondary_values = _property_values_for_interval(
+                        context,
+                        column,
+                        target_top,
+                        target_base,
+                        skip_inactive=self.skip_inactive,
+                        datum_z=datum_z,
+                        allow_nearest=False,
+                        include_diagnostics=self.write_diagnostics,
+                    )
+                property_value_names = set(context.output_names.values())
+                any_property_value = any_property_value or any(
+                    not _is_blank_property_value(secondary_values.get(name, ""))
+                    for name in property_value_names
+                )
+                row.update(secondary_values)
+
+            if self.skip_inactive and not is_active and not any_property_value:
+                skipped_inactive_cells += 1
+                continue
+            rows.append(row)
+
+        return SleeveExtractionResult(
+            sleeve_index=sleeve_index,
+            display_id=display_id,
+            rows=rows,
+            skipped_inactive_cells=skipped_inactive_cells,
+            outside_grid=False,
+            warning="",
+            log_message="",
+        )
 
 
 @dataclass
@@ -309,25 +370,69 @@ class LoadedColumn:
     geometry: dict[str, list[float]]
     active: object | None
     property_columns: dict[str, object]
+    depth_index: "DepthIndex" = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.depth_index = _build_depth_index(self.geometry)
+
+
+@dataclass(frozen=True)
+class DepthIndex:
+    lows: np.ndarray
+    highs: np.ndarray
+    centers: np.ndarray
+    order: np.ndarray
+    median_height: float
+
+
+@dataclass(frozen=True)
+class SleeveExtractionResult:
+    sleeve_index: int
+    display_id: str
+    rows: list[dict]
+    skipped_inactive_cells: int
+    outside_grid: bool
+    warning: str
+    log_message: str
+
+
+def _write_sleeve_result(
+    result: SleeveExtractionResult,
+    exporter,
+    stats: ExtractionStats,
+    log_callback: LogCallback | None,
+) -> None:
+    if result.outside_grid:
+        stats.sleeves_outside_grid += 1
+        stats.warnings.append(result.warning)
+        _log(log_callback, result.log_message)
+        return
+
+    stats.sleeves_inside_grid += 1
+    exporter.write_rows(result.rows)
+    stats.extracted_rows += len(result.rows)
+    stats.skipped_inactive_cells += result.skipped_inactive_cells
+    _log(log_callback, f"{result.display_id}: wrote {len(result.rows)} rows")
 
 
 def _load_model_column(context: ModelContext, x: float, y: float) -> LoadedColumn | None:
-    match = context.indexer.find_column(x, y)
-    if match is None:
-        return None
-    geometry = context.reader.get_cell_geometry_column(match.i, match.j)
-    if context.spec.depth_offset:
-        geometry = _offset_geometry(geometry, context.spec.depth_offset)
-    return LoadedColumn(
-        i=match.i,
-        j=match.j,
-        geometry=geometry,
-        active=context.reader.get_cell_active_column(match.i, match.j),
-        property_columns={
-            prop.uuid: context.reader.get_property_column_values(prop.uuid, match.i, match.j)
-            for prop in context.properties
-        },
-    )
+    with context.lock:
+        match = context.indexer.find_column(x, y)
+        if match is None:
+            return None
+        geometry = context.reader.get_cell_geometry_column(match.i, match.j)
+        if context.spec.depth_offset:
+            geometry = _offset_geometry(geometry, context.spec.depth_offset)
+        return LoadedColumn(
+            i=match.i,
+            j=match.j,
+            geometry=geometry,
+            active=context.reader.get_cell_active_column(match.i, match.j),
+            property_columns={
+                prop.uuid: context.reader.get_property_column_values(prop.uuid, match.i, match.j)
+                for prop in context.properties
+            },
+        )
 
 
 def _property_values_for_k(context: ModelContext, column: LoadedColumn, k: int) -> dict[str, object]:
@@ -348,9 +453,12 @@ def _property_values_for_interval(
     skip_inactive: bool,
     datum_z: float | str = "",
     allow_nearest: bool = True,
+    include_diagnostics: bool = True,
 ) -> dict[str, object]:
     samples: dict[str, list[tuple[object, float, int]]] = {prop.uuid: [] for prop in context.properties}
-    for k, weight in _overlapping_cells(column.geometry, target_top, target_base):
+    overlaps = _overlapping_cells(column, target_top, target_base)
+    total_overlap_weight = sum(float(weight) for _k, weight in overlaps)
+    for k, weight in overlaps:
         values = _property_values_for_k(context, column, k)
         if skip_inactive and not _is_active(column, k, values):
             continue
@@ -361,26 +469,34 @@ def _property_values_for_interval(
                 samples[prop.uuid].append((value, weight, k))
 
     if not any(samples.values()):
-        if not allow_nearest:
-            return _blank_values_with_diagnostics(context)
-        nearest_k = _find_depth_k(column.geometry, (min(target_top, target_base) + max(target_top, target_base)) / 2.0)
+        if overlaps or not allow_nearest:
+            return _blank_values_for_context(context, include_diagnostics=include_diagnostics)
+        nearest_k = _find_depth_k(column, (min(target_top, target_base) + max(target_top, target_base)) / 2.0)
         if nearest_k is None:
-            return _blank_values_with_diagnostics(context)
+            return _blank_values_for_context(context, include_diagnostics=include_diagnostics)
         values = _property_values_for_k(context, column, nearest_k)
         if skip_inactive and not _is_active(column, nearest_k, values):
-            return _blank_values_with_diagnostics(context)
-        values.update(_property_diagnostics_for_k(context, column, nearest_k, values, datum_z))
+            return _blank_values_for_context(context, include_diagnostics=include_diagnostics)
+        if include_diagnostics:
+            values.update(_property_diagnostics_for_k(context, column, nearest_k, values, datum_z))
         return values
 
     result: dict[str, object] = {}
     for prop in context.properties:
         output_name = context.output_names[prop.uuid]
         prop_samples = samples[prop.uuid]
+        valid_weight = sum(float(weight) for _value, weight, _k in prop_samples)
+        if total_overlap_weight > 0.0 and valid_weight < total_overlap_weight * MIN_PROPERTY_VALID_OVERLAP_FRACTION:
+            result[output_name] = ""
+            if include_diagnostics:
+                result.update(_blank_property_diagnostics_for_name(output_name))
+            continue
         result[output_name] = _aggregate_property_samples(
             prop,
             [(value, weight) for value, weight, _k in prop_samples],
         )
-        result.update(_property_diagnostics_for_samples(context, column, prop, prop_samples, datum_z))
+        if include_diagnostics:
+            result.update(_property_diagnostics_for_samples(context, column, prop, prop_samples, datum_z))
     return result
 
 
@@ -422,6 +538,10 @@ def _blank_values(context: ModelContext) -> dict[str, str]:
     return {name: "" for name in context.output_names.values()}
 
 
+def _blank_values_for_context(context: ModelContext, *, include_diagnostics: bool) -> dict[str, str]:
+    return _blank_values_with_diagnostics(context) if include_diagnostics else _blank_values(context)
+
+
 def _blank_values_with_diagnostics(context: ModelContext) -> dict[str, str]:
     values = _blank_values(context)
     values.update(_blank_property_diagnostics(context))
@@ -446,20 +566,21 @@ def _blank_property_diagnostics_for_name(output_name: str) -> dict[str, str]:
     }
 
 
-def _property_output_columns(context: ModelContext) -> list[str]:
+def _property_output_columns(context: ModelContext, *, include_diagnostics: bool) -> list[str]:
     columns: list[str] = []
     for output_name in context.output_names.values():
-        columns.extend(
-            [
-                output_name,
-                f"{output_name}_Model",
-                f"{output_name}_I",
-                f"{output_name}_J",
-                f"{output_name}_K",
-                f"{output_name}_TVD_center",
-                f"{output_name}_Depth_KB",
-            ]
-        )
+        columns.append(output_name)
+        if include_diagnostics:
+            columns.extend(
+                [
+                    f"{output_name}_Model",
+                    f"{output_name}_I",
+                    f"{output_name}_J",
+                    f"{output_name}_K",
+                    f"{output_name}_TVD_center",
+                    f"{output_name}_Depth_KB",
+                ]
+            )
     return columns
 
 
@@ -522,39 +643,82 @@ def _is_active(column: LoadedColumn, k: int, values: dict[str, object]) -> bool:
     return bool(column.active[k])
 
 
-def _find_depth_k(geometry: dict[str, list[float]], target_center: float) -> int | None:
-    containing: list[tuple[float, int]] = []
-    nearest: tuple[float, int] | None = None
-    for k, (top, base) in enumerate(zip(geometry["TVD_top"], geometry["TVD_base"], strict=False)):
-        low = min(float(top), float(base))
-        high = max(float(top), float(base))
-        center = (low + high) / 2.0
-        distance = abs(center - target_center)
-        if low <= target_center <= high:
-            containing.append((distance, k))
-        if nearest is None or distance < nearest[0]:
-            nearest = (distance, k)
-    if containing:
-        return min(containing)[1]
-    if nearest is None:
+def _find_depth_k(column_or_geometry: LoadedColumn | dict[str, list[float]], target_center: float) -> int | None:
+    if isinstance(column_or_geometry, LoadedColumn):
+        return _find_depth_k_indexed(column_or_geometry.depth_index, target_center)
+    return _find_depth_k_indexed(_build_depth_index(column_or_geometry), target_center)
+
+
+def _find_depth_k_indexed(index: DepthIndex, target_center: float) -> int | None:
+    if index.lows.size == 0:
         return None
-    median_height = _median_cell_height(geometry)
-    return nearest[1] if nearest[0] <= median_height / 2.0 else None
+    target = float(target_center)
+    pos = int(np.searchsorted(index.lows, target, side="right")) - 1
+    candidates = []
+    for candidate_pos in (pos - 1, pos, pos + 1):
+        if 0 <= candidate_pos < index.lows.size:
+            k = int(index.order[candidate_pos])
+            low = float(index.lows[candidate_pos])
+            high = float(index.highs[candidate_pos])
+            center = float(index.centers[candidate_pos])
+            distance = abs(center - target)
+            if low <= target <= high:
+                candidates.append((distance, k))
+    if candidates:
+        return min(candidates)[1]
+
+    nearest_positions = [candidate_pos for candidate_pos in (pos, pos + 1) if 0 <= candidate_pos < index.lows.size]
+    if not nearest_positions:
+        return None
+    nearest = min(
+        (abs(float(index.centers[candidate_pos]) - target), int(index.order[candidate_pos]))
+        for candidate_pos in nearest_positions
+    )
+    return nearest[1] if nearest[0] <= index.median_height / 2.0 else None
 
 
-def _overlapping_cells(geometry: dict[str, list[float]], target_top: float, target_base: float) -> list[tuple[int, float]]:
+def _overlapping_cells(column_or_geometry: LoadedColumn | dict[str, list[float]], target_top: float, target_base: float) -> list[tuple[int, float]]:
+    index = column_or_geometry.depth_index if isinstance(column_or_geometry, LoadedColumn) else _build_depth_index(column_or_geometry)
     target_low = min(float(target_top), float(target_base))
     target_high = max(float(target_top), float(target_base))
-    if target_high <= target_low:
+    if target_high <= target_low or index.lows.size == 0:
         return []
+
+    start = int(np.searchsorted(index.highs, target_low, side="right"))
+    end = int(np.searchsorted(index.lows, target_high, side="left"))
     overlaps: list[tuple[int, float]] = []
-    for k, (top, base) in enumerate(zip(geometry["TVD_top"], geometry["TVD_base"], strict=False)):
-        low = min(float(top), float(base))
-        high = max(float(top), float(base))
+    for candidate_pos in range(start, max(start, end)):
+        low = float(index.lows[candidate_pos])
+        high = float(index.highs[candidate_pos])
         overlap = max(0.0, min(target_high, high) - max(target_low, low))
         if overlap > 0.0:
-            overlaps.append((k, overlap))
+            overlaps.append((int(index.order[candidate_pos]), overlap))
     return overlaps
+
+
+def _build_depth_index(geometry: dict[str, list[float]]) -> DepthIndex:
+    intervals: list[tuple[float, float, int]] = []
+    for k, (top, base) in enumerate(zip(geometry["TVD_top"], geometry["TVD_base"], strict=False)):
+        try:
+            top_value = float(top)
+            base_value = float(base)
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(top_value) or pd.isna(base_value):
+            continue
+        intervals.append((min(top_value, base_value), max(top_value, base_value), k))
+    if not intervals:
+        empty = np.asarray([], dtype=float)
+        return DepthIndex(lows=empty, highs=empty, centers=empty, order=np.asarray([], dtype=int), median_height=0.0)
+
+    intervals.sort(key=lambda item: item[0])
+    lows = np.asarray([item[0] for item in intervals], dtype=float)
+    highs = np.asarray([item[1] for item in intervals], dtype=float)
+    centers = (lows + highs) / 2.0
+    order = np.asarray([item[2] for item in intervals], dtype=int)
+    heights = np.abs(highs - lows)
+    median_height = float(np.median(heights)) if heights.size else 0.0
+    return DepthIndex(lows=lows, highs=highs, centers=centers, order=order, median_height=median_height)
 
 
 def _union_depth_segments(columns: list[LoadedColumn]) -> list[tuple[float, float]]:
@@ -593,7 +757,7 @@ def _geometry_source_for_segment(
     for column in columns:
         if column is None:
             continue
-        k = _find_depth_k(column.geometry, center)
+        k = _find_depth_k(column, center)
         if k is None:
             continue
         return (

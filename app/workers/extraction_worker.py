@@ -14,7 +14,7 @@ from core.model_reader import open_model_reader
 from core.multi_model_extractor import ExtractionModelSpec, MultiModelPropertyExtractor
 from core.output_planner import choose_output_plan
 from core.property_extractor import ExtractionSettings, ExtractionStats, PropertyExtractor, write_extraction_log
-from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
+from core.sleeves_loader import filter_sleeves_by_wells, load_sleeves_table, validate_sleeves_table
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,10 @@ class ExtractionRequest:
     selected_property_uuids: list[str]
     skip_inactive: bool
     model_specs: list[ExtractionModelSpec] | None = None
+    selected_wells: list[str] | None = None
+    sleeves_column_mapping: dict[str, str] | None = None
+    write_diagnostics: bool = True
+    parallel_workers: int = 1
 
 
 @dataclass(frozen=True)
@@ -77,11 +81,7 @@ class ExtractionWorker(QObject):
                 "TVD cell geometry is decoded from Rescue Z interfaces."
             )
 
-        self.log.emit("Loading sleeves table...")
-        sleeves = load_sleeves_table(self.request.sleeves_path)
-        warnings = validate_sleeves_table(sleeves)
-        for warning in warnings:
-            self.log.emit(f"Warning: {warning}")
+        sleeves = self._load_sleeves()
 
         self.log.emit("Building fast grid index...")
         indexer = FastGridIndexer(reader, grid)
@@ -137,16 +137,17 @@ class ExtractionWorker(QObject):
         self.finished.emit(ExtractionResult(str(output_plan.path), str(log_path), stats))
 
     def _run_multi_model(self) -> None:
-        self.log.emit("Loading sleeves table...")
-        sleeves = load_sleeves_table(self.request.sleeves_path)
-        warnings = validate_sleeves_table(sleeves)
-        for warning in warnings:
-            self.log.emit(f"Warning: {warning}")
+        sleeves = self._load_sleeves()
 
         specs = self.request.model_specs or [
             ExtractionModelSpec(path=self.request.epc_path, selected_property_uuids=self.request.selected_property_uuids)
         ]
-        extractor = MultiModelPropertyExtractor(specs, skip_inactive=self.request.skip_inactive)
+        extractor = MultiModelPropertyExtractor(
+            specs,
+            skip_inactive=self.request.skip_inactive,
+            write_diagnostics=self.request.write_diagnostics,
+            parallel_workers=self.request.parallel_workers,
+        )
         extractor.open(log_callback=self.log.emit)
         metadata = extractor.metadata
         if metadata is None:
@@ -201,6 +202,21 @@ class ExtractionWorker(QObject):
         if len(specs) > 1:
             return True
         return any(abs(spec.depth_offset) > 0 for spec in specs)
+
+    def _load_sleeves(self):
+        self.log.emit("Loading sleeves table...")
+        sleeves = load_sleeves_table(self.request.sleeves_path, self.request.sleeves_column_mapping)
+        original_count = len(sleeves)
+        if self.request.selected_wells is not None:
+            sleeves = filter_sleeves_by_wells(sleeves, self.request.selected_wells)
+            selected_count = len(self.request.selected_wells)
+            self.log.emit(f"Well filter: selected {selected_count} well(s), sleeves {len(sleeves)} of {original_count}.")
+            if sleeves.empty:
+                raise ValueError("Well filter removed all sleeves. Select at least one well with sleeves.")
+        warnings = validate_sleeves_table(sleeves)
+        for warning in warnings:
+            self.log.emit(f"Warning: {warning}")
+        return sleeves
 
     @Slot()
     def cancel(self) -> None:

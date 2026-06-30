@@ -81,7 +81,7 @@ class CurvePlotWidget(QWidget):
     def _draw_axes(self, painter: QPainter, rect: QRectF, data: CurvePlotData) -> None:
         painter.setFont(QFont("Segoe UI", 9))
         painter.setPen(QColor("#334155"))
-        painter.drawText(QRectF(4, rect.top(), 84, rect.height()), Qt.AlignmentFlag.AlignVCenter, "TVD top")
+        painter.drawText(QRectF(4, rect.top(), 84, rect.height()), Qt.AlignmentFlag.AlignVCenter, "TVD")
         for tick in _ticks(data.depth_range, 6):
             y = _map_value(tick, data.depth_range, rect.top(), rect.bottom())
             painter.drawText(QRectF(8, y - 8, 80, 16), Qt.AlignmentFlag.AlignRight, _fmt(tick))

@@ -35,8 +35,24 @@ python main.py
 4. Click `Load models`.
 5. Check properties on the `Properties` tab.
 6. Load the sleeves table on `Sleeves`.
-7. Run extraction on `Run`.
-8. Use `Preview`, `Curves`, and `Metrics` for QC and interval calculations.
+7. Map frac-list columns in the dialog. The dialog is shown every time a sleeves table is loaded, even when column names are already recognized.
+8. Click `Выбор скважин` to choose wells in a checkbox dialog. All wells are selected by default and the selected names are shown in the long field on `Sleeves`.
+9. Run extraction on `Run`.
+10. Use `Preview`, `Curves`, and `Metrics` for QC and interval calculations.
+
+`Curves / QC` can draw channels in two depth modes. `Common grid` uses the
+shared output grid depth (`TVD_top`) for every channel. `Individual cell` uses
+the channel diagnostic depth (`<channel>_TVD_center`) when available, which is
+better for checking whether the original RESQML and Rescue cells match.
+
+`Run` has two performance controls for multi-model extraction:
+
+- `Write property diagnostics` writes `<channel>_Model`, `<channel>_I/J/K`,
+  `<channel>_TVD_center`, and `<channel>_Depth_KB`. Disable it for faster and
+  narrower production exports after QC is complete.
+- `Parallel workers` parallelizes sleeve/port row calculation. Final XLSX/CSV
+  writing remains single-threaded to keep output order stable and avoid writer
+  contention.
 
 The model loader now prints and displays a summary for each model: backend, grid shape, estimated cell sizes, well datum count, and available property cubes.
 
@@ -59,6 +75,14 @@ Coordinates are used to select the nearest model XY column. `TVDSS_PORT` is used
 - `Depth_KB_center`
 
 The app normalizes some well aliases, including Cyrillic/Latin lookalikes such as `6А031` vs `6A031`.
+
+The `Sleeves` tab always asks how source columns should map to the required
+fields. This handles frac lists where `Well`, `Port`, `X`, `Y`, or `TVDSS_PORT`
+are named differently. After loading, the `Выбор скважин` button opens a
+checkbox dialog populated from the normalized `Well` column. The selected wells
+are displayed in the long field on the tab, and the extraction worker filters
+the frac list to those wells before building the output plan and progress
+counters. Leaving all wells checked keeps the historical behavior.
 
 ## RESQML / EPC Storage
 
@@ -303,4 +327,3 @@ Large local model/export files are not meant to be committed. Keep source change
 - `core/`
 - `tests/`
 - scripts and docs
-

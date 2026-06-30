@@ -10,6 +10,7 @@ from core.multi_model_extractor import (
     _datum_for_well,
     _find_depth_k,
     _offset_geometry,
+    _property_values_for_interval,
     _union_depth_segments,
 )
 from core.resqml_reader import PropertyInfo
@@ -204,6 +205,105 @@ def test_multi_model_extractor_writes_property_source_diagnostics(tmp_path) -> N
     assert rows.loc[0, "YME_STA_K"] == 1
     assert rows.loc[0, "YME_STA_TVD_center"] == 105.0
     assert rows.loc[0, "YME_STA_Depth_KB"] == 190.0
+
+
+def test_multi_model_extractor_can_skip_property_source_diagnostics(tmp_path) -> None:
+    extractor = MultiModelPropertyExtractor([], skip_inactive=False, write_diagnostics=False)
+    prop = PropertyInfo(index=0, title="YME_STA", uuid="prop-1")
+    extractor.contexts = [
+        ModelContext(
+            spec=ExtractionModelSpec(path="fake"),
+            label="rescue",
+            reader=_FakeReader(),
+            indexer=_FakeIndexer(),
+            properties=[prop],
+            output_names={prop.uuid: "YME_STA"},
+        )
+    ]
+    sleeves = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "X": [10.0],
+            "Y": [20.0],
+            "TVDSS_PORT": [95.0],
+        }
+    )
+    output_path = tmp_path / "out.csv"
+
+    extractor.extract_to_csv(sleeves, output_path)
+    rows = pd.read_csv(output_path)
+
+    assert rows.loc[0, "YME_STA"] == 2.5
+    assert "YME_STA_K" not in rows.columns
+    assert "YME_STA_TVD_center" not in rows.columns
+
+
+def test_multi_model_parallel_workers_preserve_output_order(tmp_path) -> None:
+    prop = PropertyInfo(index=0, title="YME_STA", uuid="prop-1")
+    sleeves = pd.DataFrame(
+        {
+            "Well": ["A", "B"],
+            "Port": [1, 2],
+            "X": [10.0, 10.0],
+            "Y": [20.0, 20.0],
+            "TVDSS_PORT": [95.0, 95.0],
+        }
+    )
+    outputs = []
+    for workers in (1, 2):
+        extractor = MultiModelPropertyExtractor([], skip_inactive=False, parallel_workers=workers)
+        extractor.contexts = [
+            ModelContext(
+                spec=ExtractionModelSpec(path="fake"),
+                label="rescue",
+                reader=_FakeReader(),
+                indexer=_FakeIndexer(),
+                properties=[prop],
+                output_names={prop.uuid: "YME_STA"},
+            )
+        ]
+        output_path = tmp_path / f"out-{workers}.csv"
+        extractor.extract_to_csv(sleeves, output_path)
+        outputs.append(pd.read_csv(output_path))
+
+    pd.testing.assert_frame_equal(outputs[0], outputs[1])
+    assert outputs[1]["Well"].tolist() == ["A", "B"]
+
+
+def test_interval_sampling_does_not_fill_blank_cell_from_tiny_neighbor_overlap() -> None:
+    prop = PropertyInfo(index=0, title="YME_STA", uuid="prop-1")
+    context = ModelContext(
+        spec=ExtractionModelSpec(path="fake"),
+        label="rescue",
+        reader=_FakeReader(),
+        indexer=_FakeIndexer(),
+        properties=[prop],
+        output_names={prop.uuid: "YME_STA"},
+    )
+    column = LoadedColumn(
+        i=0,
+        j=0,
+        geometry={
+            "TVD_top": [100.0, 110.0],
+            "TVD_base": [110.0, 120.0],
+            "CellHeight": [10.0, 10.0],
+        },
+        active=None,
+        property_columns={prop.uuid: ["", 25.0]},
+    )
+
+    values = _property_values_for_interval(
+        context,
+        column,
+        109.0,
+        110.0001,
+        skip_inactive=False,
+        allow_nearest=False,
+    )
+
+    assert values["YME_STA"] == ""
+    assert values["YME_STA_K"] == ""
 
 
 def test_datum_matching_normalizes_cyrillic_a_and_well_suffix() -> None:

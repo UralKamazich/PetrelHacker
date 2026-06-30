@@ -62,7 +62,11 @@ class MetricsWorker(QObject):
                 metric_keys=self.request.metric_keys,
             )
             self.log.emit("Calculating interval metrics...")
-            result = calculate_interval_metrics(extracted, intervals, settings)
+            def metrics_progress(current: int, total: int) -> None:
+                value = 55 + int((current / total) * 25) if total else 80
+                self.progress.emit(min(80, max(55, value)))
+
+            result = calculate_interval_metrics(extracted, intervals, settings, progress_callback=metrics_progress)
             for warning in result.warnings:
                 self.log.emit(f"Warning: {warning}")
             self.progress.emit(80)

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import math
 import re
+from typing import Callable
 
 import pandas as pd
 
@@ -86,6 +87,7 @@ PROPERTY_METRIC_KEYS = (
     "delta",
 )
 DEFAULT_METRIC_KEYS = BASE_METRIC_KEYS + PROPERTY_METRIC_KEYS
+MetricProgressCallback = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,7 @@ def calculate_interval_metrics(
     extracted_df: pd.DataFrame,
     intervals_df: pd.DataFrame,
     settings: IntervalMetricSettings | None = None,
+    progress_callback: MetricProgressCallback | None = None,
 ) -> IntervalMetricResult:
     settings = settings or IntervalMetricSettings()
     extracted = _normalize_identity_columns(extracted_df.copy())
@@ -137,7 +140,8 @@ def calculate_interval_metrics(
     }
     xy_grouped = _xy_groups(extracted)
 
-    for _, interval in intervals.iterrows():
+    total_intervals = len(intervals)
+    for interval_index, (_index, interval) in enumerate(intervals.iterrows(), start=1):
         well = _normalize_value(interval["Well"])
         port = _normalize_value(interval["Port"])
         row: dict = _interval_base_row(interval)
@@ -176,6 +180,8 @@ def calculate_interval_metrics(
             _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns, metric_keys)
 
         rows.append(row)
+        if progress_callback:
+            progress_callback(interval_index, total_intervals)
 
     return IntervalMetricResult(rows=rows, warnings=warnings)
 

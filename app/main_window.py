@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QProgressBar,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.widgets.checklist_dialog import CheckListDialog
+from app.widgets.column_mapping_dialog import ColumnMappingDialog
 from app.widgets.curve_plot import CurvePlotData, CurvePlotWidget, CurveSpec
 from app.widgets.log_panel import LogPanel
 from app.workers.extraction_worker import ExtractionRequest, ExtractionResult, ExtractionWorker
@@ -42,7 +44,14 @@ from core.multi_model_extractor import ExtractionModelSpec
 from core.csv_preview import read_csv_preview
 from core.exporter import default_extraction_output_path
 from core.property_presets import normalize_property_title, should_select_property
-from core.sleeves_loader import load_sleeves_table, validate_sleeves_table
+from core.sleeves_loader import (
+    apply_sleeves_column_mapping,
+    guess_sleeves_column_mapping,
+    read_sleeves_table_raw,
+    unique_well_values,
+    validate_sleeves_table,
+    well_value_counts,
+)
 from core.table_io import read_table
 from core.xlsx_preview import read_xlsx_headers, read_xlsx_preview
 
@@ -117,11 +126,24 @@ class MainWindow(QMainWindow):
         self.sleeves_path_edit = QLineEdit()
         self.sleeves_path_edit.setPlaceholderText("Select CSV/XLSX sleeves table")
         self.sleeves_status_label = QLabel("-")
+        self.sleeves_well_status_label = QLabel("No sleeves loaded.")
+        self.sleeves_wells_edit = QLineEdit()
+        self.sleeves_wells_edit.setReadOnly(True)
+        self.sleeves_wells_button = QPushButton("Выбор скважин")
+        self._sleeves_column_mapping: dict[str, str] | None = None
+        self._sleeves_well_counts: dict[str, int] = {}
+        self._sleeves_wells: list[str] = []
+        self._selected_sleeves_well_values: list[str] = []
         self.sleeves_preview_table = self._table(["Well", "Port", "X", "Y"])
         self.output_path_edit = QLineEdit()
         self.output_path_edit.setPlaceholderText("Output XLSX is generated next to sleeves file")
         self.skip_inactive_checkbox = QCheckBox("Skip inactive cells")
         self.skip_inactive_checkbox.setChecked(True)
+        self.write_diagnostics_checkbox = QCheckBox("Write property diagnostics")
+        self.write_diagnostics_checkbox.setChecked(True)
+        self.parallel_workers_spin = QSpinBox()
+        self.parallel_workers_spin.setRange(1, 32)
+        self.parallel_workers_spin.setValue(1)
         self.run_button = QPushButton("Run extraction")
         self.cancel_button = QPushButton("Cancel")
         self.run_button.setEnabled(False)
@@ -161,6 +183,9 @@ class MainWindow(QMainWindow):
         self.curve_load_button = QPushButton("Load")
         self.curve_well_combo = self._combo()
         self.curve_port_combo = self._combo()
+        self.curve_depth_mode_combo = QComboBox()
+        self.curve_depth_mode_combo.addItem("Common grid", "common")
+        self.curve_depth_mode_combo.addItem("Individual cell", "individual")
         self.curve1_combo = self._combo()
         self.curve2_combo = self._combo()
         self.curve3_combo = self._combo()
@@ -203,12 +228,14 @@ class MainWindow(QMainWindow):
         self.metrics_intervals_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_output_path_edit.textChanged.connect(self._update_metrics_enabled)
         self.metrics_property_list.itemSelectionChanged.connect(self._sync_metrics_properties_from_list)
+        self.sleeves_wells_button.clicked.connect(self._open_sleeves_well_dialog)
         self.metrics_select_properties_button.clicked.connect(self._open_metrics_properties_dialog)
         self.metrics_select_metrics_button.clicked.connect(self._open_metrics_dialog)
         self.metrics_run_button.clicked.connect(self._run_metrics)
         self.curve_load_button.clicked.connect(self._load_curve_table)
         self.curve_well_combo.currentTextChanged.connect(self._on_curve_well_changed)
         self.curve_port_combo.currentTextChanged.connect(self._on_curve_control_changed)
+        self.curve_depth_mode_combo.currentIndexChanged.connect(self._on_curve_control_changed)
         self.curve1_combo.currentTextChanged.connect(self._on_curve_control_changed)
         self.curve2_combo.currentTextChanged.connect(self._on_curve_control_changed)
         self.curve3_combo.currentTextChanged.connect(self._on_curve_control_changed)
@@ -273,6 +300,12 @@ class MainWindow(QMainWindow):
         row.addWidget(browse)
         layout.addLayout(row)
         layout.addWidget(self.sleeves_status_label)
+        wells_row = QHBoxLayout()
+        wells_row.addWidget(QLabel("Wells"))
+        wells_row.addWidget(self.sleeves_well_status_label, 1)
+        wells_row.addWidget(self.sleeves_wells_button)
+        layout.addLayout(wells_row)
+        layout.addWidget(self.sleeves_wells_edit)
         layout.addWidget(self.sleeves_preview_table, 1)
         browse.clicked.connect(self._browse_sleeves)
         return tab
@@ -295,13 +328,13 @@ class MainWindow(QMainWindow):
     def _run_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        fast_mode = QCheckBox("Fast column mode")
-        fast_mode.setChecked(True)
-        strict_mode = QCheckBox("Strict vertical intersection mode")
-        strict_mode.setEnabled(False)
-        layout.addWidget(fast_mode)
-        layout.addWidget(strict_mode)
         layout.addWidget(self.skip_inactive_checkbox)
+        layout.addWidget(self.write_diagnostics_checkbox)
+        workers_row = QHBoxLayout()
+        workers_row.addWidget(QLabel("Parallel workers"))
+        workers_row.addWidget(self.parallel_workers_spin)
+        workers_row.addStretch(1)
+        layout.addLayout(workers_row)
 
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_path_edit, 1)
@@ -341,6 +374,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.curve_well_combo, 0, 1)
         grid.addWidget(QLabel("Port"), 0, 2)
         grid.addWidget(self.curve_port_combo, 0, 3)
+        grid.addWidget(QLabel("Depth mode"), 0, 4)
+        grid.addWidget(self.curve_depth_mode_combo, 0, 5)
         grid.addWidget(QLabel("Range"), 1, 0)
         grid.addWidget(QLabel("Channel"), 1, 1)
         grid.addWidget(QLabel("Min"), 1, 2)
@@ -594,15 +629,31 @@ class MainWindow(QMainWindow):
         self.properties_table.resizeColumnsToContents()
         self._update_run_enabled()
 
-    def _load_sleeves_preview(self, path: str) -> None:
+    def _load_sleeves_preview(self, path: str, *, interactive_mapping: bool = True) -> None:
         try:
-            df = load_sleeves_table(path)
+            raw_df = read_sleeves_table_raw(path)
+            mapping = self._sleeves_column_mapping_for_preview(raw_df, interactive=interactive_mapping)
+            if mapping is None:
+                if interactive_mapping:
+                    self.sleeves_status_label.setText("Sleeves loading cancelled.")
+                else:
+                    self.sleeves_status_label.setText("Sleeves path restored. Select the file again to map columns.")
+                self._sleeves_loaded = False
+                self._sleeves_column_mapping = None
+                self._populate_sleeves_wells(pd.DataFrame())
+                self._update_run_enabled()
+                return
+            df = apply_sleeves_column_mapping(raw_df, mapping).dropna(how="all").reset_index(drop=True)
             warnings = validate_sleeves_table(df)
         except Exception as exc:  # noqa: BLE001
             self.sleeves_status_label.setText(f"Failed to load sleeves: {exc}")
+            self._sleeves_loaded = False
+            self._sleeves_column_mapping = None
+            self._populate_sleeves_wells(pd.DataFrame())
             QMessageBox.critical(self, "Sleeves load failed", str(exc))
             return
 
+        self._sleeves_column_mapping = mapping
         preview = df.head(100)
         self.sleeves_preview_table.setColumnCount(len(preview.columns))
         self.sleeves_preview_table.setHorizontalHeaderLabels([str(column) for column in preview.columns])
@@ -611,6 +662,7 @@ class MainWindow(QMainWindow):
             for col_index, value in enumerate(row.tolist()):
                 self.sleeves_preview_table.setItem(row_index, col_index, QTableWidgetItem(str(value)))
         self.sleeves_preview_table.resizeColumnsToContents()
+        self._populate_sleeves_wells(df)
 
         status = f"Loaded sleeves: {len(df)} rows"
         if warnings:
@@ -620,6 +672,68 @@ class MainWindow(QMainWindow):
         self.output_path_edit.setText(str(default_extraction_output_path(path)))
         self._sleeves_loaded = True
         self._save_last_paths()
+        self._update_run_enabled()
+
+    def _sleeves_column_mapping_for_preview(
+        self,
+        df: pd.DataFrame,
+        *,
+        interactive: bool,
+    ) -> dict[str, str] | None:
+        columns = [str(column) for column in df.columns]
+        initial_mapping = guess_sleeves_column_mapping(columns)
+        if not interactive:
+            required = {"Well", "Port", "X", "Y"}
+            return initial_mapping if required.issubset(initial_mapping) else None
+        return self._open_sleeves_column_mapping_dialog(columns, initial_mapping)
+
+    def _open_sleeves_column_mapping_dialog(
+        self,
+        columns: list[str],
+        initial_mapping: dict[str, str],
+    ) -> dict[str, str] | None:
+        dialog = ColumnMappingDialog(
+            columns=columns,
+            initial_mapping=initial_mapping,
+            parent=self,
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return None
+        return dialog.mapping()
+
+    def _populate_sleeves_wells(self, df: pd.DataFrame) -> None:
+        self._sleeves_wells = unique_well_values(df)
+        self._sleeves_well_counts = well_value_counts(df)
+        self._selected_sleeves_well_values = list(self._sleeves_wells)
+        self._update_sleeves_well_status()
+
+    def _open_sleeves_well_dialog(self) -> None:
+        if not self._sleeves_wells:
+            QMessageBox.information(self, "No wells", "Load a sleeves table with a Well column first.")
+            return
+        dialog = CheckListDialog(
+            title="Выбор скважин",
+            items=[(f"{well} ({self._sleeves_well_counts.get(well, 0)})", well) for well in self._sleeves_wells],
+            selected_values=set(self._selected_sleeves_well_values),
+            parent=self,
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        self._selected_sleeves_well_values = dialog.selected_values()
+        self._update_sleeves_well_status()
+
+    def _selected_sleeves_wells(self) -> list[str]:
+        return list(self._selected_sleeves_well_values)
+
+    def _update_sleeves_well_status(self, *args) -> None:
+        total = len(self._sleeves_wells)
+        if total == 0:
+            self.sleeves_well_status_label.setText("No Well column.")
+            self.sleeves_wells_edit.setText("")
+        else:
+            selected = len(self._selected_sleeves_wells())
+            self.sleeves_well_status_label.setText(f"Selected {selected} of {total}")
+            self.sleeves_wells_edit.setText(", ".join(self._selected_sleeves_wells()))
         self._update_run_enabled()
 
     def _set_property_checks(self, checked: bool) -> None:
@@ -736,7 +850,7 @@ class MainWindow(QMainWindow):
         if sleeves_path:
             self.sleeves_path_edit.setText(sleeves_path)
             if Path(sleeves_path).exists():
-                self._load_sleeves_preview(sleeves_path)
+                self._load_sleeves_preview(sleeves_path, interactive_mapping=False)
         if extracted_path:
             self.metrics_extracted_path_edit.setText(extracted_path)
             if Path(extracted_path).exists():
@@ -768,6 +882,7 @@ class MainWindow(QMainWindow):
         can_run = (
             bool(self._model_results)
             and self._sleeves_loaded
+            and (not self._sleeves_wells or bool(self._selected_sleeves_wells()))
             and bool(self.output_path_edit.text().strip())
             and bool(self._selected_property_uuids())
             and self._extraction_thread is None
@@ -784,6 +899,10 @@ class MainWindow(QMainWindow):
         selected_uuids = self._selected_property_uuids()
         if not selected_uuids:
             QMessageBox.warning(self, "Missing properties", "Select at least one property.")
+            return
+        selected_wells = self._selected_sleeves_wells()
+        if self._sleeves_wells and not selected_wells:
+            QMessageBox.warning(self, "Missing wells", "Select at least one well from the sleeves table.")
             return
 
         output_path = self.output_path_edit.text().strip()
@@ -802,6 +921,10 @@ class MainWindow(QMainWindow):
             selected_property_uuids=selected_uuids,
             skip_inactive=self.skip_inactive_checkbox.isChecked(),
             model_specs=model_specs,
+            selected_wells=selected_wells if self._sleeves_wells else None,
+            sleeves_column_mapping=self._sleeves_column_mapping,
+            write_diagnostics=self.write_diagnostics_checkbox.isChecked(),
+            parallel_workers=self.parallel_workers_spin.value(),
         )
         self._save_last_paths()
         self._save_selected_properties()
@@ -1029,7 +1152,16 @@ class MainWindow(QMainWindow):
         selected = self._selected_curve_columns()
         if df.empty or not selected:
             return
-        self._set_spin_pair(self.curve_depth_min_spin, self.curve_depth_max_spin, _range_with_padding(_numeric_series(df["TVD_top"]), 0.0))
+        depth_mode = self._curve_depth_mode()
+        depth_series = []
+        for column, _min_spin, _max_spin, shift_spin in selected:
+            shift = shift_spin.value() if shift_spin is not None else 0.0
+            depth_series.append(_curve_depth_series(df, column, depth_mode=depth_mode) + shift)
+        self._set_spin_pair(
+            self.curve_depth_min_spin,
+            self.curve_depth_max_spin,
+            _range_with_padding(pd.concat(depth_series, ignore_index=True), 0.0),
+        )
         for column, min_spin, max_spin, _shift_spin in selected:
             self._set_spin_pair(min_spin, max_spin, _range_with_padding(_numeric_series(df[column]), 0.02))
         if save_settings:
@@ -1047,13 +1179,14 @@ class MainWindow(QMainWindow):
         if not selected:
             self.curve_plot.set_message("Select at least one numeric channel.")
             return
+        depth_mode = self._curve_depth_mode()
         curves: list[CurveSpec] = []
-        base_depth = _numeric_series(df["TVD_top"])
         for column, min_spin, max_spin, shift_spin in selected:
             shift = shift_spin.value() if shift_spin is not None else 0.0
+            depth = _curve_depth_series(df, column, depth_mode=depth_mode)
             curves.append(
                 CurveSpec(
-                    depth=base_depth + shift,
+                    depth=depth + shift,
                     values=_numeric_series(df[column]),
                     name=column,
                     value_range=(min_spin.value(), max_spin.value()),
@@ -1066,14 +1199,16 @@ class MainWindow(QMainWindow):
         )
         self.curve_plot.set_plot_data(data)
         names = ", ".join(curve.name for curve in curves)
+        mode_label = self.curve_depth_mode_combo.currentText()
         self.curve_status_label.setText(
-            f"Rows: {len(df)} | Curves: {names}"
+            f"Rows: {len(df)} | Depth: {mode_label} | Curves: {names}"
         )
 
     def _save_curve_settings(self) -> None:
         self.settings.setValue("paths/curve_extracted", self.curve_extracted_path_edit.text().strip())
         self.settings.setValue("curves/well", self.curve_well_combo.currentText().strip())
         self.settings.setValue("curves/port", self.curve_port_combo.currentText().strip())
+        self.settings.setValue("curves/depth_mode", self._curve_depth_mode())
         self.settings.setValue("curves/depth_min", self.curve_depth_min_spin.value())
         self.settings.setValue("curves/depth_max", self.curve_depth_max_spin.value())
         for index, (combo, min_spin, max_spin, shift_spin) in enumerate(self._curve_control_sets(), start=1):
@@ -1089,6 +1224,7 @@ class MainWindow(QMainWindow):
             self._select_combo_text(self.curve_well_combo, self.settings.value("curves/well", "", type=str))
             self._refresh_curve_port_options()
             self._select_combo_text(self.curve_port_combo, self.settings.value("curves/port", "", type=str))
+            self._select_curve_depth_mode(self.settings.value("curves/depth_mode", "individual", type=str))
             self.curve_depth_min_spin.setValue(_settings_float(self.settings, "curves/depth_min", self.curve_depth_min_spin.value()))
             self.curve_depth_max_spin.setValue(_settings_float(self.settings, "curves/depth_max", self.curve_depth_max_spin.value()))
             for index, (combo, min_spin, max_spin, shift_spin) in enumerate(self._curve_control_sets(), start=1):
@@ -1102,6 +1238,14 @@ class MainWindow(QMainWindow):
 
     def _curve_combos(self) -> tuple[QComboBox, QComboBox, QComboBox, QComboBox]:
         return self.curve1_combo, self.curve2_combo, self.curve3_combo, self.curve4_combo
+
+    def _curve_depth_mode(self) -> str:
+        mode = self.curve_depth_mode_combo.currentData()
+        return str(mode or "individual")
+
+    def _select_curve_depth_mode(self, mode: str) -> None:
+        index = self.curve_depth_mode_combo.findData(mode)
+        self.curve_depth_mode_combo.setCurrentIndex(index if index >= 0 else 1)
 
     def _curve_control_sets(
         self,
@@ -1452,6 +1596,22 @@ def _unique_text_values(series: pd.Series) -> list[str]:
 
 def _numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def _curve_depth_series(df: pd.DataFrame, column_name: str, *, depth_mode: str) -> pd.Series:
+    if depth_mode == "common":
+        if "TVD_top" in df.columns:
+            return _numeric_series(df["TVD_top"])
+        if "TVD_center" in df.columns:
+            return _numeric_series(df["TVD_center"])
+        return pd.Series(dtype=float)
+
+    diagnostic_depth = f"{column_name}_TVD_center"
+    if diagnostic_depth in df.columns:
+        return _numeric_series(df[diagnostic_depth])
+    if "TVD_center" in df.columns:
+        return _numeric_series(df["TVD_center"])
+    return _numeric_series(df["TVD_top"])
 
 
 def _is_source_diagnostic_column(column_name: str) -> bool:
