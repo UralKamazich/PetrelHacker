@@ -538,8 +538,21 @@ def _parse_epc_xml(data: bytes) -> ET.Element:
         return ET.fromstring(data)
     except ET.ParseError:
         # Some Petrel/fesapi exports declare UTF-8 but contain legacy-encoded
-        # bytes in free-text titles. Keep structural XML readable by replacing
-        # only those invalid text bytes.
+        # bytes in free-text titles. Petrel on Windows commonly writes CP1251
+        # Cyrillic titles into otherwise valid XML.
+        for encoding in ("cp1251", "latin1"):
+            try:
+                text = data.decode(encoding)
+                text = re.sub(
+                    r"(<\?xml[^>]*encoding=[\"']).*?([\"'][^>]*\?>)",
+                    r"\1UTF-8\2",
+                    text,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                return ET.fromstring(text.encode("utf-8"))
+            except (UnicodeDecodeError, ET.ParseError):
+                continue
         return ET.fromstring(data.decode("utf-8", errors="replace"))
 
 

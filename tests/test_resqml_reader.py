@@ -3,7 +3,7 @@ from __future__ import annotations
 from core.resqml_reader import _parse_epc_xml, _title
 
 
-def test_parse_epc_xml_tolerates_invalid_declared_utf8_title_bytes() -> None:
+def test_parse_epc_xml_tolerates_cp1251_title_bytes_declared_as_utf8() -> None:
     root = _parse_epc_xml(
         b'<?xml version="1.0" encoding="UTF-8"?>'
         b'<resqml2:IjkGridRepresentation '
@@ -18,4 +18,4 @@ def test_parse_epc_xml_tolerates_invalid_declared_utf8_title_bytes() -> None:
     )
 
     assert root.attrib["uuid"] == "grid-1"
-    assert _title(root) == "Bad \ufffd title"
+    assert _title(root) == "Bad я title"

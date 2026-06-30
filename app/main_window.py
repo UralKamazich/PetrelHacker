@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QProgressBar,
     QTableWidget,
@@ -106,6 +107,9 @@ class MainWindow(QMainWindow):
         self.model_browse_buttons = [QPushButton("Browse") for _ in range(3)]
         self.h5_path_label = QLabel("-")
         self.backend_label = QLabel("-")
+        self.model_summary_text = QPlainTextEdit()
+        self.model_summary_text.setReadOnly(True)
+        self.model_summary_text.setMinimumHeight(140)
         self.load_button = QPushButton("Load models")
         self.browse_epc_button = self.model_browse_buttons[0]
         self.grids_table = self._table(["Model", "Title", "UUID", "NI", "NJ", "NK", "Type"])
@@ -254,6 +258,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(info)
         form.addRow("Backend", self.backend_label)
         form.addRow("Detected H5", self.h5_path_label)
+        form.addRow("Summary", self.model_summary_text)
         layout.addWidget(info)
         layout.addWidget(QLabel("Grids"))
         layout.addWidget(self.grids_table, 1)
@@ -519,6 +524,7 @@ class MainWindow(QMainWindow):
         self._model_result = results[0] if results else None
         self.backend_label.setText("; ".join(f"{item.label}:{item.backend}" for item in results) or "-")
         self.h5_path_label.setText("; ".join(f"{item.label}:{item.h5_path or '-'}" for item in results) or "-")
+        self.model_summary_text.setPlainText("\n\n".join(item.summary for item in results if item.summary))
         self._fill_grids(results)
         self._fill_properties(results)
         self.progress_bar.setRange(0, 100)
