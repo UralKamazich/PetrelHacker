@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PetrelHacker</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">PH</div>
+          <div>
+            <h1>PetrelHacker</h1>
+            <p>RESQML / Rescue extractor</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="extract">Extraction</button>
+          <button class="nav-item" data-view="metrics">Metrics</button>
+          <button class="nav-item" data-view="curves">Curves / QC</button>
+          <button class="nav-item" data-view="logs">Logs</button>
+        </nav>
+        <div class="status-card">
+          <span class="status-dot"></span>
+          <div>
+            <strong id="status-title">Ready</strong>
+            <small id="status-subtitle">Python backend idle</small>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="view active" id="view-extract">
+          <header class="view-header">
+            <div>
+              <h2>Extraction setup</h2>
+              <p>Three-model workflow with per-model depth shifts and well filtering.</p>
+            </div>
+            <button class="primary-action" id="run-extraction">Run extraction</button>
+          </header>
+
+          <div class="layout-grid">
+            <section class="panel span-8">
+              <div class="panel-title">
+                <h3>Models</h3>
+                <button class="soft-button" id="load-models">Load models</button>
+              </div>
+              <div class="model-stack" id="model-stack"></div>
+            </section>
+
+            <section class="panel span-4">
+              <div class="panel-title">
+                <h3>Run options</h3>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="skip-inactive" checked>
+                <span>Skip inactive cells</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" id="write-diagnostics" checked>
+                <span>Write property diagnostics</span>
+              </label>
+              <label class="field">
+                <span>Parallel workers</span>
+                <input id="parallel-workers" type="number" min="1" max="32" value="1">
+              </label>
+              <label class="field">
+                <span>Output XLSX / CSV</span>
+                <div class="path-row">
+                  <input id="output-path" type="text" placeholder="extracted.xlsx">
+                  <button class="icon-button" id="browse-output">...</button>
+                </div>
+              </label>
+              <div class="progress-shell">
+                <div class="progress-bar" id="extraction-progress"></div>
+              </div>
+            </section>
+
+            <section class="panel span-5">
+              <div class="panel-title">
+                <h3>Sleeves</h3>
+                <button class="soft-button" id="load-sleeves">Load sleeves</button>
+              </div>
+              <label class="field">
+                <span>Frac-list XLSX / CSV</span>
+                <div class="path-row">
+                  <input id="sleeves-path" type="text" placeholder="Sleeves table">
+                  <button class="icon-button" id="browse-sleeves">...</button>
+                </div>
+              </label>
+              <div class="mapping-grid" id="mapping-grid"></div>
+              <div class="well-dropdown">
+                <button class="dropdown-button" id="well-dropdown-button" type="button">
+                  <span id="well-summary">No sleeves loaded</span>
+                  <span class="dropdown-chevron">▾</span>
+                </button>
+                <div class="dropdown-panel" id="well-dropdown-panel">
+                  <input class="dropdown-search" id="well-search" type="text" placeholder="Filter wells">
+                  <div class="dropdown-actions">
+                    <button class="soft-button compact" id="select-all-wells" type="button">All</button>
+                    <button class="soft-button compact" id="clear-wells" type="button">None</button>
+                  </div>
+                  <div class="well-list" id="well-list"></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel span-7">
+              <div class="panel-title">
+                <h3>Properties</h3>
+                <div class="segmented">
+                  <button id="select-all-properties">All</button>
+                  <button id="clear-properties">None</button>
+                </div>
+              </div>
+              <div class="property-table" id="property-table"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-metrics">
+          <header class="view-header">
+            <div>
+              <h2>Metrics</h2>
+              <p>Interval metrics with selected channels and metric families.</p>
+            </div>
+            <button class="primary-action" id="run-metrics">Calculate metrics</button>
+          </header>
+          <div class="layout-grid">
+            <section class="panel span-6">
+              <div class="panel-title"><h3>Inputs</h3></div>
+              <label class="field"><span>Extracted table</span><div class="path-row"><input id="metrics-extracted" type="text"><button class="icon-button" id="browse-metrics-extracted">...</button></div></label>
+              <label class="field"><span>Intervals table</span><div class="path-row"><input id="metrics-intervals" type="text"><button class="icon-button" id="browse-metrics-intervals">...</button></div></label>
+              <label class="field"><span>Output metrics XLSX</span><div class="path-row"><input id="metrics-output" type="text" placeholder="frac_list_metrics.xlsx"><button class="icon-button" id="browse-metrics-output">...</button></div></label>
+              <div class="progress-shell"><div class="progress-bar" id="metrics-progress"></div></div>
+            </section>
+            <section class="panel span-6">
+              <div class="panel-title"><h3>Channels</h3><button class="soft-button" id="load-metrics-table">Read headers</button></div>
+              <div class="form-grid">
+                <label class="field"><span>NTG</span><select id="metrics-ntg"></select></label>
+                <label class="field"><span>PORO</span><select id="metrics-poro"></select></label>
+                <label class="field"><span>PERM</span><select id="metrics-perm"></select></label>
+                <label class="field"><span>Lithology</span><select id="metrics-lithology"></select></label>
+              </div>
+              <label class="field"><span>Reservoir values</span><input id="reservoir-values" type="text" placeholder="1, 2"></label>
+            </section>
+            <section class="panel span-6">
+              <div class="panel-title"><h3>Additional channels</h3></div>
+              <div class="check-grid" id="metrics-properties"></div>
+            </section>
+            <section class="panel span-6">
+              <div class="panel-title"><h3>Metric set</h3></div>
+              <div class="check-grid" id="metric-keys"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-curves">
+          <header class="view-header">
+            <div>
+              <h2>Curves / QC</h2>
+              <p>Four overlaid channels with independent scales and depth shift.</p>
+            </div>
+            <button class="primary-action" id="draw-curves">Draw</button>
+          </header>
+          <div class="layout-grid">
+            <section class="panel span-3 curves-data-panel">
+              <div class="panel-title"><h3>Data</h3><button class="soft-button" id="load-curve-table">Load table</button></div>
+              <label class="field"><span>Extracted table</span><div class="path-row"><input id="curve-path" type="text"><button class="icon-button" id="browse-curve-path">...</button></div></label>
+              <div class="form-grid">
+                <label class="field"><span>Well</span><select id="curve-well"></select></label>
+                <label class="field"><span>Port</span><select id="curve-port"></select></label>
+              </div>
+              <label class="field"><span>Depth mode</span><select id="curve-depth-mode"><option value="common" selected>Common grid</option><option value="individual">Individual cell</option></select></label>
+              <div class="curve-control-grid">
+                <label class="field"><span>Depth min</span><input id="curve-depth-min" type="number" step="0.1"></label>
+                <label class="field"><span>Depth max</span><input id="curve-depth-max" type="number" step="0.1"></label>
+                <span></span>
+              </div>
+              <div id="curve-controls"></div>
+            </section>
+            <section class="panel span-9 plot-panel">
+              <div id="curve-plot"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-logs">
+          <header class="view-header">
+            <div>
+              <h2>Logs</h2>
+              <p>Backend progress and diagnostics.</p>
+            </div>
+            <button class="soft-button" id="clear-log">Clear</button>
+          </header>
+          <pre class="log-view" id="log-view"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="../../node_modules/plotly.js-dist-min/plotly.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

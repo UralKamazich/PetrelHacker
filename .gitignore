@@ -3,8 +3,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tools/
 .venv/
 venv/
+node_modules/
 build/
 dist/
 *.egg-info/
