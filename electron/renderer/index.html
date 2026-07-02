@@ -167,22 +167,21 @@
             <button class="primary-action" id="draw-curves">Draw</button>
           </header>
           <div class="layout-grid">
-            <section class="panel span-3 curves-data-panel">
+            <section class="panel span-6 curves-data-panel">
               <div class="panel-title"><h3>Data</h3><button class="soft-button" id="load-curve-table">Load table</button></div>
               <label class="field"><span>Extracted table</span><div class="path-row"><input id="curve-path" type="text"><button class="icon-button" id="browse-curve-path">...</button></div></label>
-              <div class="form-grid">
+              <div class="curve-top-grid">
                 <label class="field"><span>Well</span><select id="curve-well"></select></label>
                 <label class="field"><span>Port</span><select id="curve-port"></select></label>
+                <label class="field"><span>Depth mode</span><select id="curve-depth-mode"><option value="common" selected>Common grid</option><option value="individual">Individual cell</option></select></label>
               </div>
-              <label class="field"><span>Depth mode</span><select id="curve-depth-mode"><option value="common" selected>Common grid</option><option value="individual">Individual cell</option></select></label>
-              <div class="curve-control-grid">
+              <div class="curve-depth-grid">
                 <label class="field"><span>Depth min</span><input id="curve-depth-min" type="number" step="0.1"></label>
                 <label class="field"><span>Depth max</span><input id="curve-depth-max" type="number" step="0.1"></label>
-                <span></span>
               </div>
               <div id="curve-controls"></div>
             </section>
-            <section class="panel span-9 plot-panel">
+            <section class="panel span-6 plot-panel">
               <div id="curve-plot"></div>
             </section>
           </div>

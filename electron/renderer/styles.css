@@ -34,7 +34,7 @@ select {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: 186px 1fr;
   min-height: 100vh;
 }
 
@@ -42,7 +42,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 18px;
+  padding: 14px;
   background: #111827;
   color: #f9fafb;
 }
@@ -543,22 +543,33 @@ select {
   appearance: textfield;
 }
 
+.curve-top-grid,
+.curve-depth-grid,
 .curve-control {
-  padding: 7px;
-  margin-bottom: 7px;
+  display: grid;
+  gap: 6px;
+}
+
+.curve-top-grid {
+  grid-template-columns: minmax(0, 1fr) 110px minmax(0, 1fr);
+}
+
+.curve-depth-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.curve-control {
+  grid-template-columns: minmax(190px, 2fr) minmax(76px, 1fr) minmax(76px, 1fr) minmax(76px, 1fr);
+  align-items: end;
+  padding: 6px;
+  margin-bottom: 6px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel-2);
 }
 
-.curve-control-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 6px;
-}
-
 #curve-controls {
-  max-height: calc(100vh - 386px);
+  max-height: calc(100vh - 322px);
   overflow: auto;
   padding-right: 2px;
 }

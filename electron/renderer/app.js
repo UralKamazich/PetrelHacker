@@ -431,11 +431,9 @@ function renderCurveControls(autoSelect) {
     control.className = 'curve-control';
     control.innerHTML = `
       <label class="field"><span>Channel ${index}</span><select id="curve-channel-${index}"></select></label>
-      <div class="curve-control-grid">
-        <label class="field"><span>Min</span><input id="curve-min-${index}" type="number" step="0.01"></label>
-        <label class="field"><span>Max</span><input id="curve-max-${index}" type="number" step="0.01"></label>
-        <label class="field"><span>Shift m</span><input id="curve-shift-${index}" type="number" step="0.1" value="0"></label>
-      </div>
+      <label class="field"><span>Min</span><input id="curve-min-${index}" type="number" step="0.01"></label>
+      <label class="field"><span>Max</span><input id="curve-max-${index}" type="number" step="0.01"></label>
+      <label class="field"><span>Shift m</span><input id="curve-shift-${index}" type="number" step="0.1" value="0"></label>
     `;
     root.appendChild(control);
     fillSelect(`curve-channel-${index}`, columns, autoSelect ? columns[index - 1] : undefined);
