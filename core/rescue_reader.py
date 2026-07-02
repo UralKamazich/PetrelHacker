@@ -749,13 +749,41 @@ def _property_metadata_from_model(main_bytes: bytes, file_id: int) -> tuple[str 
                 segment_start = span_end
         segment_strings = [text for text, span_start, _span_end in spans if span_start >= segment_start]
         candidates = [value for value in segment_strings if _is_property_metadata_candidate(value)]
-        title_candidates = [value for value in candidates if value not in {"General", "SegmentID"} and len(value) > 1]
-        if title_candidates:
-            title = title_candidates[0]
-            kind = candidates[1] if len(candidates) > 1 else None
+        title, kind = _select_property_metadata(candidates)
+        if title:
             uom = next((value for value in segment_strings if "Unit" in value), None)
             return title, kind, uom
     return None, None, None
+
+
+def _select_property_metadata(candidates: list[str]) -> tuple[str | None, str | None]:
+    values = [_clean_property_metadata(value) for value in candidates]
+    values = [value for value in values if value and value not in {"General", "SegmentID"}]
+    if not values:
+        return None, None
+
+    visible_values = [value for value in values if not _is_internal_property_token(value)]
+    if not visible_values:
+        visible_values = values
+
+    code_like = [value for value in visible_values if _is_property_code_like(value)]
+    title = code_like[0] if code_like else visible_values[0]
+    kind = next((value for value in visible_values if value != title), None)
+    return title, kind
+
+
+def _clean_property_metadata(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    cleaned = re.sub(r"\s*\($", "", cleaned).strip()
+    return cleaned
+
+
+def _is_internal_property_token(value: str) -> bool:
+    return bool(re.fullmatch(r"t.", value))
+
+
+def _is_property_code_like(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9_]*", value))
 
 
 def _is_property_metadata_candidate(value: str) -> bool:
