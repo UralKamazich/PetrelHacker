@@ -26,6 +26,14 @@ function pythonPath() {
   return 'python';
 }
 
+function backendExecutablePath() {
+  const candidates = [
+    path.join(process.resourcesPath || '', 'backend', 'petrelhacker-backend.exe'),
+    path.join(projectRoot(), 'build-electron', 'backend', 'petrelhacker-backend', 'petrelhacker-backend.exe')
+  ];
+  return candidates.find(candidate => candidate && fs.existsSync(candidate)) || null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -92,8 +100,11 @@ ipcMain.handle('backend:run', async (_event, command, payload) => {
 
 function runBackend(command, payload) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonPath(), ['-m', 'web_backend.cli', command], {
-      cwd: projectRoot(),
+    const backendExe = backendExecutablePath();
+    const executable = backendExe || pythonPath();
+    const args = backendExe ? [command] : ['-m', 'web_backend.cli', command];
+    const child = spawn(executable, args, {
+      cwd: backendExe ? path.dirname(backendExe) : projectRoot(),
       env: Object.assign({}, process.env, {
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1'

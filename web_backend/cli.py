@@ -336,7 +336,8 @@ def curve_data(payload: JsonDict) -> None:
 
 
 def _read_payload() -> JsonDict:
-    text = sys.stdin.read().lstrip("\ufeff")
+    data = sys.stdin.buffer.read()
+    text = data.decode("utf-8-sig") if data else ""
     if not text.strip():
         return {}
     return json.loads(text)
@@ -446,7 +447,7 @@ def _json_value(value: Any) -> Any:
 
 def _emit(event: str, **payload: Any) -> None:
     message = {"event": event, **_dataclass_dict(payload)}
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    print(json.dumps(message, ensure_ascii=True), flush=True)
 
 
 def _to_float(value: Any, default: float) -> float:

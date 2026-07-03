@@ -6,13 +6,45 @@
   "main": "electron/main.js",
   "scripts": {
     "electron:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/run-electron.ps1",
-    "electron": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/run-electron.ps1"
+    "electron": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/run-electron.ps1",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-backend.ps1",
+    "dist:web": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-web.ps1"
   },
   "devDependencies": {
     "electron": "^43.0.0",
+    "electron-builder": "^26.0.12",
     "playwright-core": "^1.61.1"
   },
   "dependencies": {
     "plotly.js-dist-min": "^3.6.0"
+  },
+  "build": {
+    "appId": "ru.petrelhacker.web",
+    "productName": "PetrelHacker Web",
+    "directories": {
+      "output": "dist-electron-web"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "node_modules/plotly.js-dist-min/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build-electron/backend/petrelhacker-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
   }
 }
