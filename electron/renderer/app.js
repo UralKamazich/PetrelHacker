@@ -109,10 +109,10 @@ function bindActions() {
   ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', clearSectionAutoBounds);
   });
-  ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-axis', 'section-display', 'section-skip-inactive'].forEach(id => {
+  ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-axis', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
-  ['section-axis', 'section-display', 'section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
+  ['section-axis', 'section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).addEventListener('change', () => {
       if (state.sectionResult) paintSection(state.sectionResult);
     });
@@ -122,7 +122,7 @@ function bindActions() {
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
   ['curve-well', 'curve-port'].forEach(id => $(id).addEventListener('change', drawCurves));
   window.addEventListener('resize', () => {
-    if (state.sectionResult && sectionDisplayMode() !== 'points') paintSection(state.sectionResult);
+    if (state.sectionResult) paintSection(state.sectionResult);
   });
   document.addEventListener('click', event => {
     const dropdown = document.querySelector('.well-dropdown');
@@ -802,11 +802,31 @@ async function loadSectionWells() {
 }
 
 function fillSectionWells(trajectories) {
-  const options = trajectories.map(item => ({
+  const nameCounts = new Map();
+  trajectories.forEach(item => {
+    const name = sectionTrajectoryName(item);
+    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+  });
+  const sorted = trajectories.slice().sort((left, right) => {
+    const leftName = sectionTrajectoryName(left);
+    const rightName = sectionTrajectoryName(right);
+    const byName = leftName.localeCompare(rightName, undefined, { numeric: true, sensitivity: 'base' });
+    if (byName !== 0) return byName;
+    return Number(left.point_count || 0) - Number(right.point_count || 0);
+  });
+  const options = sorted.map(item => {
+    const name = sectionTrajectoryName(item);
+    const hasDuplicates = (nameCounts.get(name) || 0) > 1;
+    return {
     value: item.uuid,
-    label: `${item.well_name || item.title} (${item.point_count || '?'} pts)`
-  }));
+      label: hasDuplicates ? `${name} (${item.point_count || '?'} pts)` : name
+    };
+  });
   fillSelectOptions('section-well', options, options[0] && options[0].value);
+}
+
+function sectionTrajectoryName(item) {
+  return String((item && (item.well_name || item.title)) || '').trim() || 'Unnamed well';
 }
 
 function clearSectionAutoBounds() {
@@ -896,20 +916,7 @@ function paintSection(result) {
     propertyDepthInterval,
     validRows
   };
-  if (sectionDisplayMode() !== 'points') {
-    renderSectionLayerMesh(common, result);
-    $('section-summary').textContent = `${result.well_name}: ${result.station_count} stations, ${result.cell_count} cells`;
-    return;
-  }
-  state.sectionMesh = null;
-  const trajectoryTrace = sectionTrajectoryTrace(result.rows || [], common);
-  const traces = [sectionPointTrace(common, result)].concat(trajectoryTrace ? [trajectoryTrace] : []);
-  $('section-plot').innerHTML = '';
-  Plotly.react('section-plot', traces, sectionLayout(result, axis, depthMin, depthMax, common.xMin, common.xMax), {
-    responsive: true,
-    displaylogo: false,
-    scrollZoom: true
-  });
+  renderSectionLayerMesh(common, result);
   $('section-summary').textContent = `${result.well_name}: ${result.station_count} stations, ${result.cell_count} cells`;
 }
 
@@ -1214,13 +1221,17 @@ function drawSectionLayerMesh(canvas, mesh, common, result) {
 }
 
 function sectionMeshFrame(width, height) {
+  const left = 86;
+  const rightMargin = 138;
+  const top = 56;
+  const bottomMargin = 72;
   return {
-    left: 86,
-    top: 56,
-    right: width - 86,
-    bottom: height - 72,
-    width: Math.max(1, width - 172),
-    height: Math.max(1, height - 128)
+    left,
+    top,
+    right: width - rightMargin,
+    bottom: height - bottomMargin,
+    width: Math.max(1, width - left - rightMargin),
+    height: Math.max(1, height - top - bottomMargin)
   };
 }
 
@@ -1298,7 +1309,7 @@ function drawSectionMeshColorbar(ctx, frame, mesh, result) {
     ctx.fillText(formatAxisTick(tick), barLeft + barWidth + 8, y);
   }
   ctx.save();
-  ctx.translate(barLeft + 46, barTop - 8);
+  ctx.translate(barLeft + 40, barTop - 8);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
   ctx.fillText(result.property_title || 'Value', 0, 0);
@@ -1611,10 +1622,6 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-function sectionDisplayMode() {
-  return $('section-display').value === 'points' ? 'points' : 'curtain';
-}
-
 function sectionXAxisMode() {
   const value = $('section-axis').value;
   if (value === 'md' || value === 'distance' || value === 'horizontal_distance') return value;
@@ -1837,7 +1844,6 @@ function saveState() {
     sectionStep: $('section-step').value,
     sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
-    sectionDisplay: $('section-display').value,
     sectionSkipInactive: $('section-skip-inactive').checked
   };
   localStorage.setItem('petrelhacker.state', JSON.stringify(data));
@@ -1859,7 +1865,6 @@ function restoreState() {
     if (data.sectionStep) $('section-step').value = data.sectionStep;
     if (data.sectionMaxStations) $('section-max-stations').value = data.sectionMaxStations;
     if (data.sectionAxis) $('section-axis').value = data.sectionAxis;
-    if (data.sectionDisplay) $('section-display').value = data.sectionDisplay;
     if (data.sectionSkipInactive !== undefined) $('section-skip-inactive').checked = Boolean(data.sectionSkipInactive);
   } catch (error) {
     appendLog(`State restore failed: ${error.message}`);

@@ -607,6 +607,15 @@ select {
   padding: 10px;
 }
 
+#view-sections .layout-grid {
+  grid-template-columns: minmax(292px, 320px) minmax(0, 1fr);
+}
+
+#view-sections .section-data-panel,
+#view-sections .section-plot-panel {
+  grid-column: auto;
+}
+
 .section-data-panel .field {
   gap: 4px;
 }
