@@ -332,6 +332,35 @@ select {
   gap: 8px;
 }
 
+.mapping-card {
+  margin: 8px 0 10px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.mapping-card-title {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.mapping-card-title strong {
+  font-size: 13px;
+}
+
+.mapping-card-title small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mapping-field {
+  margin-bottom: 0;
+}
+
 .well-list,
 .check-grid,
 .property-table {
@@ -572,6 +601,76 @@ select {
   max-height: calc(100vh - 322px);
   overflow: auto;
   padding-right: 2px;
+}
+
+.section-data-panel {
+  padding: 10px;
+}
+
+.section-data-panel .field {
+  gap: 4px;
+}
+
+.section-data-panel .field span {
+  font-size: 11px;
+}
+
+.section-data-panel input,
+.section-data-panel select {
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+.section-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.section-summary {
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.section-plot-panel {
+  padding: 8px;
+}
+
+#section-plot {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 146px);
+  min-height: 650px;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.section-mesh-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.section-mesh-tooltip {
+  position: absolute;
+  z-index: 5;
+  min-width: 170px;
+  max-width: 260px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.88);
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.22);
 }
 
 .log-view {

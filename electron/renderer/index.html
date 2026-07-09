@@ -21,6 +21,7 @@
           <button class="nav-item active" data-view="extract">Extraction</button>
           <button class="nav-item" data-view="metrics">Metrics</button>
           <button class="nav-item" data-view="curves">Curves / QC</button>
+          <button class="nav-item" data-view="sections">Sections</button>
           <button class="nav-item" data-view="logs">Logs</button>
         </nav>
         <div class="status-card">
@@ -91,7 +92,13 @@
                   <button class="icon-button" id="browse-sleeves">...</button>
                 </div>
               </label>
-              <div class="mapping-grid" id="mapping-grid"></div>
+              <div class="mapping-card">
+                <div class="mapping-card-title">
+                  <strong>Required column mapping</strong>
+                  <small>Target field -> column in file</small>
+                </div>
+                <div class="mapping-grid" id="mapping-grid"></div>
+              </div>
               <div class="well-dropdown">
                 <button class="dropdown-button" id="well-dropdown-button" type="button">
                   <span id="well-summary">No sleeves loaded</span>
@@ -183,6 +190,47 @@
             </section>
             <section class="panel span-6 plot-panel">
               <div id="curve-plot"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-sections">
+          <header class="view-header">
+            <div>
+              <h2>Sections</h2>
+              <p>Model slice from top to base along a selected well trajectory.</p>
+            </div>
+            <button class="primary-action" id="draw-section">Draw section</button>
+          </header>
+          <div class="layout-grid">
+            <section class="panel span-4 section-data-panel">
+              <div class="panel-title"><h3>Data</h3><button class="soft-button" id="load-section-wells">Load wells</button></div>
+              <label class="field"><span>Model</span><select id="section-model"></select></label>
+              <label class="field"><span>Well trajectory</span><select id="section-well"></select></label>
+              <label class="field"><span>Property</span><select id="section-property"></select></label>
+              <div class="section-grid-2">
+                <label class="field"><span>Sample step, m</span><input id="section-step" type="number" min="1" step="1" value="25"></label>
+                <label class="field"><span>Max stations</span><input id="section-max-stations" type="number" min="50" step="50" value="1200"></label>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="section-skip-inactive" checked>
+                <span>Skip inactive cells</span>
+              </label>
+              <div class="section-grid-2">
+                <label class="field"><span>Depth min</span><input id="section-depth-min" type="number" step="0.1"></label>
+                <label class="field"><span>Depth max</span><input id="section-depth-max" type="number" step="0.1"></label>
+              </div>
+              <div class="section-grid-2">
+                <label class="field"><span>Value min</span><input id="section-value-min" type="number" step="0.01"></label>
+                <label class="field"><span>Value max</span><input id="section-value-max" type="number" step="0.01"></label>
+              </div>
+              <label class="field"><span>X axis</span><select id="section-axis"><option value="horizontal_distance" selected>Horizontal distance</option><option value="distance">3D distance along well</option><option value="md">MD</option></select></label>
+              <label class="field"><span>Display</span><select id="section-display"><option value="curtain" selected>Layer mesh</option><option value="points">Cell points</option></select></label>
+              <div class="progress-shell"><div class="progress-bar" id="section-progress"></div></div>
+              <div class="section-summary" id="section-summary">Load models, then load wells.</div>
+            </section>
+            <section class="panel span-8 section-plot-panel">
+              <div id="section-plot"></div>
             </section>
           </div>
         </section>

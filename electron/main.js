@@ -27,6 +27,9 @@ function pythonPath() {
 }
 
 function backendExecutablePath() {
+  if (!app.isPackaged && process.env.PETRELHACKER_USE_BUILT_BACKEND !== '1') {
+    return null;
+  }
   const candidates = [
     path.join(process.resourcesPath || '', 'backend', 'petrelhacker-backend.exe'),
     path.join(projectRoot(), 'build-electron', 'backend', 'petrelhacker-backend', 'petrelhacker-backend.exe')

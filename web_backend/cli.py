@@ -20,10 +20,12 @@ from core.interval_metrics import (
     calculate_interval_metrics,
     write_interval_metrics_xlsx,
 )
-from core.model_reader import open_model_reader
+from core.model_section import extract_well_section
+from core.model_reader import open_model_reader, resolve_model_path
 from core.multi_model_extractor import ExtractionModelSpec, MultiModelPropertyExtractor
 from core.output_planner import choose_output_plan
 from core.property_extractor import ExtractionSettings, write_extraction_log
+from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import (
     apply_sleeves_column_mapping,
     filter_sleeves_by_wells,
@@ -52,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
             "table-info",
             "metrics",
             "curve-data",
+            "well-trajectories",
+            "model-section",
         ),
     )
     args = parser.parse_args(argv)
@@ -66,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             "table-info": table_info,
             "metrics": metrics,
             "curve-data": curve_data,
+            "well-trajectories": well_trajectories,
+            "model-section": model_section,
         }
         handlers[args.command](payload)
         return 0
@@ -333,6 +339,73 @@ def curve_data(payload: JsonDict) -> None:
         columns=columns,
         rows=_records(df.head(int(payload.get("limit") or 20000))),
     )
+
+
+def well_trajectories(payload: JsonDict) -> None:
+    path = str(payload.get("path", "")).strip()
+    include_points = bool(payload.get("includePoints", False))
+    point_limit = int(payload.get("pointLimit") or 100_000)
+    if not path:
+        raise ValueError("Model path is empty.")
+
+    model_path = resolve_model_path(path)
+    if Path(model_path).suffix.lower() == ".epc":
+        reader = ResqmlReader(model_path)
+        reader.open(include_properties=False)
+    else:
+        reader = open_model_reader(model_path)
+    if not hasattr(reader, "list_well_trajectories"):
+        _emit("result", trajectories=[], points=[])
+        return
+
+    trajectories = reader.list_well_trajectories()
+    points = []
+    if include_points:
+        for trajectory in trajectories:
+            if len(points) >= point_limit:
+                break
+            try:
+                trajectory_points = reader.get_well_trajectory_points(trajectory.uuid)
+            except Exception as exc:  # noqa: BLE001
+                _emit("log", message=f"Warning: cannot read trajectory points for {trajectory.title}: {exc}")
+                continue
+            remaining = point_limit - len(points)
+            points.extend(_dataclass_dict(point) for point in trajectory_points[:remaining])
+
+    _emit(
+        "result",
+        backend=getattr(reader, "backend", ""),
+        trajectories=[_dataclass_dict(trajectory) for trajectory in trajectories],
+        points=points,
+    )
+
+
+def model_section(payload: JsonDict) -> None:
+    path = str(payload.get("path", "")).strip()
+    property_uuid = str(payload.get("propertyUuid", "")).strip()
+    if not path:
+        raise ValueError("Model path is empty.")
+    if not property_uuid:
+        raise ValueError("Property is not selected.")
+
+    def progress(current: int, total: int) -> None:
+        value = int((current / total) * 100) if total else 0
+        _emit("progress", value=value, current=current, total=total)
+
+    _emit("log", message="Building section along well trajectory...")
+    result = extract_well_section(
+        path,
+        property_uuid,
+        well_name=_empty_to_none(payload.get("wellName")),
+        trajectory_uuid=_empty_to_none(payload.get("trajectoryUuid")),
+        sample_step=_to_float(payload.get("sampleStep"), 25.0),
+        depth_offset=_to_float(payload.get("depthOffset"), 0.0),
+        skip_inactive=bool(payload.get("skipInactive", True)),
+        max_stations=max(50, int(payload.get("maxStations") or 1200)),
+        progress_callback=progress,
+    )
+    _emit("progress", value=100)
+    _emit("result", **_dataclass_dict(result))
 
 
 def _read_payload() -> JsonDict:

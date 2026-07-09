@@ -57,6 +57,35 @@ class MdDatumInfo:
     md_reference: str | None = None
 
 
+@dataclass(frozen=True)
+class WellTrajectoryInfo:
+    index: int
+    title: str
+    uuid: str
+    well_name: str
+    trajectory_type: str | None = None
+    md_datum_uuid: str | None = None
+    hdf_paths: tuple[str, ...] = ()
+    xyz_hdf_path: str | None = None
+    md_hdf_path: str | None = None
+    point_count: int | None = None
+
+
+@dataclass(frozen=True)
+class WellTrajectoryPoint:
+    trajectory_uuid: str
+    trajectory_title: str
+    well_name: str
+    point_index: int
+    x: float
+    y: float
+    z: float
+    tvd: float
+    md: float | None
+    distance_along: float
+    horizontal_distance: float
+
+
 def _strip_namespace(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
@@ -138,6 +167,25 @@ def _first_data_reference(root: ET.Element, content_type_fragment: str) -> tuple
     return None, None
 
 
+def _data_references(root: ET.Element) -> list[tuple[str | None, str | None, str | None]]:
+    references: list[tuple[str | None, str | None, str | None]] = []
+    for ref in root.iter():
+        content = None
+        title = None
+        uuid = None
+        for child in ref.iter():
+            name = _local_name(child)
+            if name == "ContentType" and child.text:
+                content = child.text.strip()
+            elif name == "Title" and child.text:
+                title = child.text.strip()
+            elif name == "UUID" and child.text:
+                uuid = child.text.strip().lower()
+        if content or title or uuid:
+            references.append((uuid, title, content))
+    return references
+
+
 class ResqmlReader:
     """Small metadata reader for EPC packages.
 
@@ -160,7 +208,7 @@ class ResqmlReader:
         candidate = self.epc_path.with_suffix(".h5")
         return candidate if candidate.exists() else None
 
-    def open(self) -> None:
+    def open(self, *, include_properties: bool = True) -> None:
         if not self.epc_path.exists():
             raise FileNotFoundError(f"EPC file does not exist: {self.epc_path}")
         if not zipfile.is_zipfile(self.epc_path):
@@ -169,7 +217,7 @@ class ResqmlReader:
         self._try_open_with_resqpy()
         self._load_xml_objects()
         self._grids = self._parse_grids()
-        self._properties = self._parse_properties()
+        self._properties = self._parse_properties() if include_properties else []
 
     def list_grids(self) -> list[GridInfo]:
         return list(self._grids)
@@ -207,6 +255,84 @@ class ResqmlReader:
                 )
             )
         return datums
+
+    def list_well_trajectories(self) -> list[WellTrajectoryInfo]:
+        trajectories: list[WellTrajectoryInfo] = []
+        object_titles = self._object_titles_by_uuid()
+        all_hdf_paths: list[str] = []
+        for name, kind, root in self._objects:
+            if "WellboreTrajectoryRepresentation" not in kind and "WellboreTrajectory" not in kind:
+                continue
+            all_hdf_paths.extend(_children_text(root, "PathInHdfFile"))
+        hdf_infos = _read_hdf_infos(self.h5_path, tuple(dict.fromkeys(all_hdf_paths)))
+        for name, kind, root in self._objects:
+            if "WellboreTrajectoryRepresentation" not in kind and "WellboreTrajectory" not in kind:
+                continue
+            uuid = (root.attrib.get("uuid") or _uuid_from_name(name) or "").lower()
+            hdf_paths = tuple(_children_text(root, "PathInHdfFile"))
+            hdf_info = {path: hdf_infos.get(path, (None, None)) for path in hdf_paths}
+            xyz_path, md_path, point_count = _pick_trajectory_hdf_paths(hdf_info)
+            md_datum_uuid, _datum_title = _first_data_reference(root, "obj_MdDatum")
+            title = _title(root)
+            trajectories.append(
+                WellTrajectoryInfo(
+                    index=len(trajectories),
+                    title=title,
+                    uuid=uuid,
+                    well_name=_well_name_from_trajectory(root, title, object_titles),
+                    trajectory_type=kind,
+                    md_datum_uuid=md_datum_uuid,
+                    hdf_paths=hdf_paths,
+                    xyz_hdf_path=xyz_path,
+                    md_hdf_path=md_path,
+                    point_count=point_count,
+                )
+            )
+        return trajectories
+
+    def get_well_trajectory_points(self, trajectory_uuid: str) -> list[WellTrajectoryPoint]:
+        info = self._trajectory_by_uuid(trajectory_uuid)
+        if self.h5_path is None:
+            raise ValueError("H5 file was not found next to EPC.")
+        if not info.xyz_hdf_path:
+            raise ValueError(f"Trajectory has no readable XYZ HDF dataset: {info.title}")
+
+        try:
+            import h5py  # type: ignore[import-not-found]
+            import numpy as np
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("h5py and numpy are required for trajectory reads.") from exc
+
+        with h5py.File(self.h5_path, "r") as h5:
+            if info.xyz_hdf_path not in h5:
+                raise ValueError(f"Trajectory XYZ dataset path not found in H5: {info.xyz_hdf_path}")
+            xyz = _as_xyz_array(np.asarray(h5[info.xyz_hdf_path]))
+            md = None
+            if info.md_hdf_path and info.md_hdf_path in h5:
+                md = _as_md_array(np.asarray(h5[info.md_hdf_path]))
+
+        tvd_values = _z_to_depth(xyz[:, 2])
+        distances = _trajectory_distances(xyz)
+        horizontal_distances = _trajectory_horizontal_distances(xyz)
+        points: list[WellTrajectoryPoint] = []
+        for index, values in enumerate(xyz):
+            md_value = float(md[index]) if md is not None and len(md) == len(xyz) else None
+            points.append(
+                WellTrajectoryPoint(
+                    trajectory_uuid=info.uuid,
+                    trajectory_title=info.title,
+                    well_name=info.well_name,
+                    point_index=index,
+                    x=float(values[0]),
+                    y=float(values[1]),
+                    z=float(values[2]),
+                    tvd=float(tvd_values[index]),
+                    md=md_value,
+                    distance_along=float(distances[index]),
+                    horizontal_distance=float(horizontal_distances[index]),
+                )
+            )
+        return points
 
     def get_grid_shape(self) -> tuple[int | None, int | None, int | None]:
         if self._selected_grid_uuid is None:
@@ -417,6 +543,21 @@ class ResqmlReader:
                 return prop
         raise ValueError(f"Property UUID not found: {property_uuid}")
 
+    def _trajectory_by_uuid(self, trajectory_uuid: str) -> WellTrajectoryInfo:
+        normalized = trajectory_uuid.lower()
+        for trajectory in self.list_well_trajectories():
+            if trajectory.uuid == normalized:
+                return trajectory
+        raise ValueError(f"Well trajectory UUID not found: {trajectory_uuid}")
+
+    def _object_titles_by_uuid(self) -> dict[str, tuple[str, str]]:
+        result: dict[str, tuple[str, str]] = {}
+        for name, kind, root in self._objects:
+            uuid = (root.attrib.get("uuid") or _uuid_from_name(name) or "").lower()
+            if uuid:
+                result[uuid] = (kind, _title(root))
+        return result
+
     def _cell_geometry_path(self) -> str | None:
         if self._selected_grid_uuid is None:
             return None
@@ -533,6 +674,49 @@ def _read_first_hdf_info(
     return None, None
 
 
+def _read_hdf_info(h5_path: Path | None, hdf_path: str) -> tuple[tuple[int, ...] | None, str | None]:
+    if h5_path is None or not hdf_path:
+        return None, None
+    try:
+        import h5py  # type: ignore[import-not-found]
+    except Exception:
+        return None, None
+
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            if hdf_path not in h5:
+                return None, None
+            dataset = h5[hdf_path]
+            return tuple(int(dim) for dim in dataset.shape), str(dataset.dtype)
+    except Exception:
+        return None, None
+
+
+def _read_hdf_infos(
+    h5_path: Path | None,
+    hdf_paths: tuple[str, ...],
+) -> dict[str, tuple[tuple[int, ...] | None, str | None]]:
+    if h5_path is None or not hdf_paths:
+        return {}
+    try:
+        import h5py  # type: ignore[import-not-found]
+    except Exception:
+        return {}
+
+    result: dict[str, tuple[tuple[int, ...] | None, str | None]] = {}
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            for path in hdf_paths:
+                if path not in h5:
+                    result[path] = (None, None)
+                    continue
+                dataset = h5[path]
+                result[path] = (tuple(int(dim) for dim in dataset.shape), str(dataset.dtype))
+    except Exception:
+        return result
+    return result
+
+
 def _parse_epc_xml(data: bytes) -> ET.Element:
     try:
         return ET.fromstring(data)
@@ -579,6 +763,118 @@ def _float_tokens(text: str) -> list[float]:
 def _well_name_from_md_datum_title(title: str) -> str:
     match = re.search(r"\bwell\s+(.+)$", title, flags=re.IGNORECASE)
     return match.group(1).strip() if match else title.strip()
+
+
+def _well_name_from_trajectory(
+    root: ET.Element,
+    title: str,
+    object_titles: dict[str, tuple[str, str]],
+) -> str:
+    for uuid, ref_title, content in _data_references(root):
+        content_text = content or ""
+        if uuid and uuid in object_titles:
+            kind, object_title = object_titles[uuid]
+            if "WellboreFeature" in kind or "WellboreInterpretation" in kind:
+                return object_title
+            if "MdDatum" in kind:
+                return _well_name_from_md_datum_title(object_title)
+        if "obj_WellboreFeature" in content_text or "obj_WellboreInterpretation" in content_text:
+            if ref_title:
+                return ref_title.strip()
+        if "obj_MdDatum" in content_text and ref_title:
+            return _well_name_from_md_datum_title(ref_title)
+    return _well_name_from_trajectory_title(title)
+
+
+def _well_name_from_trajectory_title(title: str) -> str:
+    text = title.strip()
+    text = re.sub(r"\bwellbore\b", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\btrajectory\b", "", text, flags=re.IGNORECASE).strip()
+    return text or title.strip()
+
+
+def _pick_trajectory_hdf_paths(
+    hdf_info: dict[str, tuple[tuple[int, ...] | None, str | None]],
+) -> tuple[str | None, str | None, int | None]:
+    xyz_path = None
+    md_path = None
+    point_count = None
+
+    for path, (shape, _dtype) in hdf_info.items():
+        if not shape:
+            continue
+        if len(shape) >= 2 and shape[-1] >= 3:
+            xyz_path = path
+            point_count = int(_shape_product(shape[:-1]))
+            break
+        if len(shape) == 1 and shape[0] % 3 == 0 and path.lower().endswith(("points", "coordinates")):
+            xyz_path = path
+            point_count = int(shape[0] // 3)
+            break
+
+    for path, (shape, _dtype) in hdf_info.items():
+        if not shape or path == xyz_path:
+            continue
+        flat_count = int(_shape_product(shape))
+        if point_count is not None and flat_count == point_count:
+            md_path = path
+            break
+        path_lower = path.lower()
+        if len(shape) == 1 and any(token in path_lower for token in ("md", "measured", "param")):
+            md_path = path
+            break
+
+    return xyz_path, md_path, point_count
+
+
+def _shape_product(shape: tuple[int, ...]) -> int:
+    total = 1
+    for value in shape:
+        total *= int(value)
+    return total
+
+
+def _as_xyz_array(values):
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim >= 2 and arr.shape[-1] >= 3:
+        return arr.reshape(-1, arr.shape[-1])[:, :3]
+    if arr.ndim == 1 and arr.size % 3 == 0:
+        return arr.reshape(-1, 3)
+    raise ValueError(f"Unsupported trajectory XYZ dataset shape: {arr.shape}")
+
+
+def _as_md_array(values):
+    import numpy as np
+
+    return np.asarray(values, dtype=float).reshape(-1)
+
+
+def _trajectory_distances(xyz):
+    import numpy as np
+
+    arr = np.asarray(xyz, dtype=float)
+    if len(arr) == 0:
+        return np.asarray([], dtype=float)
+    if len(arr) == 1:
+        return np.asarray([0.0], dtype=float)
+    deltas = np.diff(arr[:, :3], axis=0)
+    increments = np.sqrt(np.einsum("ij,ij->i", deltas, deltas))
+    return np.concatenate([np.asarray([0.0], dtype=float), np.cumsum(increments)])
+
+
+def _trajectory_horizontal_distances(xyz):
+    import numpy as np
+
+    arr = np.asarray(xyz, dtype=float)
+    if len(arr) == 0:
+        return np.asarray([], dtype=float)
+    if len(arr) == 1:
+        return np.asarray([0.0], dtype=float)
+    deltas = np.diff(arr[:, :2], axis=0)
+    increments = np.sqrt(np.einsum("ij,ij->i", deltas, deltas))
+    return np.concatenate([np.asarray([0.0], dtype=float), np.cumsum(increments)])
 
 
 def _z_to_depth(values):
