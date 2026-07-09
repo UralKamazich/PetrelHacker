@@ -24,7 +24,7 @@ const metricOptions = [
 ];
 
 const metadataColumns = new Set([
-  'Well', 'Port', 'X', 'Y', 'TVDSS_PORT', 'Datum_Z', 'Depth_KB_PORT',
+  'Well', 'Port', 'X', 'Y', 'TVDSS_PORT', 'MD', 'Datum_Z', 'Depth_KB_PORT',
   'I', 'J', 'K', 'IsActive', 'TVDSS_top', 'TVDSS_base', 'TVDSS_center',
   'TVD_top', 'TVD_base', 'TVD_center', 'Depth_KB_top', 'Depth_KB_base',
   'Depth_KB_center', 'Rel_TVD_top', 'Rel_TVD_base', 'Rel_TVD_center',
@@ -37,7 +37,8 @@ const sleeveMappingTargets = [
   ['Port', true],
   ['X', true],
   ['Y', true],
-  ['TVDSS_PORT', false]
+  ['TVDSS_PORT', false],
+  ['MD', false]
 ];
 
 const state = {
@@ -51,7 +52,8 @@ const state = {
   sectionTrajectories: [],
   sectionResult: null,
   sectionRows: [],
-  sectionMesh: null
+  sectionMesh: null,
+  sectionWellNameMap: {}
 };
 
 const $ = id => document.getElementById(id);
@@ -83,7 +85,7 @@ function bindActions() {
   $('load-sleeves').addEventListener('click', loadSleeves);
   $('run-extraction').addEventListener('click', runExtraction);
   $('browse-sleeves').addEventListener('click', browseSleeves);
-  $('sleeves-path').addEventListener('change', loadSleeves);
+  $('sleeves-path').addEventListener('change', loadSleevesHeaders);
   $('browse-output').addEventListener('click', browseExtractionOutput);
   $('well-dropdown-button').addEventListener('click', toggleWellDropdown);
   $('select-all-wells').addEventListener('click', () => setAllWells(true));
@@ -192,7 +194,7 @@ async function loadSleeves() {
   if (!path) return fail(new Error('Select sleeves table first.'));
   setBusy('Loading sleeves', 'Reading frac-list and wells');
   try {
-    const result = await window.petrel.run('preview-sleeves', { path });
+    const result = await window.petrel.run('preview-sleeves', { path, columnMapping: currentColumnMapping() });
     state.sleeves = result;
     state.selectedWells = selectedWellsForLoadedSleeves(result.wells || []);
     renderMapping(result);
@@ -209,6 +211,27 @@ async function loadSleeves() {
   }
 }
 
+async function loadSleevesHeaders() {
+  const path = $('sleeves-path').value.trim();
+  if (!path) return fail(new Error('Select sleeves table first.'));
+  setBusy('Loading sleeves', 'Reading frac-list headers');
+  try {
+    const result = await window.petrel.run('preview-sleeves', { path, headersOnly: true });
+    state.sleeves = { ...(state.sleeves || {}), ...result, wells: state.sleeves ? state.sleeves.wells || [] : [] };
+    renderMapping(result);
+    renderWells();
+    if (!$('output-path').value.trim()) {
+      const suggested = await window.petrel.run('suggest-output', { sleevesPath: path });
+      $('output-path').value = basename(suggested.outputPath || '');
+    }
+    applyMetricsDefaultsFromSleeves(path);
+    saveState();
+    setReady(`Sleeves headers: ${result.columns.length} columns`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
 async function browseSleeves() {
   const selected = await pickTable();
   if (!selected) return;
@@ -217,7 +240,7 @@ async function browseSleeves() {
   if (selected !== previous) {
     clearSleevesDependentState();
   }
-  await loadSleeves();
+  await loadSleevesHeaders();
 }
 
 function clearSleevesDependentState() {
@@ -853,14 +876,60 @@ async function drawSection() {
       depthOffset: Number(model.depthOffset || 0),
       skipInactive: $('section-skip-inactive').checked
     });
+    result.sleeveMarkers = await loadSectionSleeveMarkers(result.well_name);
     state.sectionResult = result;
     state.sectionRows = result.rows || [];
     paintSection(result);
     setProgress('section-progress', 100);
-    setReady(`Section cells: ${result.cell_count || state.sectionRows.length}`);
+    setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
   } catch (error) {
     fail(error);
   }
+}
+
+async function loadSectionSleeveMarkers(wellName) {
+  const path = $('sleeves-path').value.trim();
+  if (!path || !wellName) return [];
+  const mappedName = state.sectionWellNameMap[wellName] || wellName;
+  try {
+    const result = await window.petrel.run('sleeve-markers', {
+      path,
+      wellName: mappedName,
+      columnMapping: currentColumnMapping()
+    });
+    if ((result.markers || []).length) return result.markers || [];
+    if (result.warning) appendLog(`Warning: ${result.warning}`);
+    if (result.availableWells && result.availableWells.length && !state.sectionWellNameMap[wellName]) {
+      const selectedName = requestWellNameMapping(wellName, result.availableWells);
+      if (selectedName) {
+        state.sectionWellNameMap[wellName] = selectedName;
+        saveState();
+        return loadSectionSleeveMarkers(wellName);
+      }
+    }
+    return [];
+  } catch (error) {
+    appendLog(`Warning: sleeve markers were not loaded: ${error.message}`);
+    return [];
+  }
+}
+
+function requestWellNameMapping(modelWellName, availableWells) {
+  const examples = availableWells.slice(0, 30).join('\n');
+  const message = `No exact frac-list match for well "${modelWellName}". Enter matching frac-list well name:\n\n${examples}`;
+  const selected = window.prompt(message, availableWells[0] || '');
+  if (!selected) return '';
+  const normalized = normalizeLookupText(selected);
+  const exact = availableWells.find(well => normalizeLookupText(well) === normalized);
+  return exact || selected.trim();
+}
+
+function normalizeLookupText(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[АВЕКМНОРСТХ]/g, char => ({ А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', Х: 'X' }[char] || char))
+    .replace(/[^A-Z0-9]/g, '');
 }
 
 function paintSection(result) {
@@ -917,7 +986,7 @@ function paintSection(result) {
     validRows
   };
   renderSectionLayerMesh(common, result);
-  $('section-summary').textContent = `${result.well_name}: ${result.station_count} stations, ${result.cell_count} cells`;
+  $('section-summary').textContent = `${result.well_name}: ${result.station_count} stations, ${result.cell_count} cells, ${(result.sleeveMarkers || []).length} sleeves`;
 }
 
 function sectionPointTrace(common, result) {
@@ -1012,8 +1081,9 @@ function sectionStationTrajectoryPoints(rows, axis) {
     const station = Number(row.station_index);
     const x = numericCell(row[axis]);
     const depth = sectionTrajectoryDepth(row.z);
+    const md = numericCell(row.md);
     if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(depth)) return;
-    if (!byStation.has(station)) byStation.set(station, { station, x, depth });
+    if (!byStation.has(station)) byStation.set(station, { station, x, depth, md });
   });
   return Array.from(byStation.values()).sort((a, b) => a.x - b.x || a.station - b.station);
 }
@@ -1094,6 +1164,45 @@ function sectionTrajectoryDepth(zValue) {
   return z < 0 ? -z : z;
 }
 
+function sectionSleevePoints(rows, common, markers) {
+  if (!markers || !markers.length) return [];
+  const trajectory = sectionStationTrajectoryPoints(rows, common.axis)
+    .filter(point => Number.isFinite(point.md))
+    .sort((a, b) => a.md - b.md);
+  if (trajectory.length < 2) return [];
+  return markers
+    .map(marker => {
+      const md = numericCell(marker.md);
+      if (!Number.isFinite(md)) return null;
+      const point = interpolateTrajectoryByMd(trajectory, md);
+      if (!point) return null;
+      return {
+        port: marker.port,
+        md,
+        x: point.x,
+        depth: point.depth
+      };
+    })
+    .filter(Boolean);
+}
+
+function interpolateTrajectoryByMd(points, md) {
+  if (md < points[0].md || md > points[points.length - 1].md) return null;
+  for (let index = 1; index < points.length; index += 1) {
+    const left = points[index - 1];
+    const right = points[index];
+    if (md > right.md) continue;
+    const span = right.md - left.md;
+    const fraction = Math.abs(span) < 1e-9 ? 0 : (md - left.md) / span;
+    return {
+      x: left.x + (right.x - left.x) * fraction,
+      depth: left.depth + (right.depth - left.depth) * fraction
+    };
+  }
+  const last = points[points.length - 1];
+  return { x: last.x, depth: last.depth };
+}
+
 function renderSectionLayerMesh(common, result) {
   const target = $('section-plot');
   if (!target) return;
@@ -1106,6 +1215,7 @@ function renderSectionLayerMesh(common, result) {
   const tooltip = target.querySelector('.section-mesh-tooltip');
   const mesh = buildSectionLayerMesh(common.validRows, common.axis, common.depthMin, common.depthMax, common.valueMin, common.valueMax, common.xMin, common.xMax);
   mesh.trajectory = sectionTrajectoryPoints(result.rows || [], common);
+  mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || []);
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
   canvas.addEventListener('mousemove', event => showSectionMeshTooltip(event, canvas, tooltip, mesh, common));
@@ -1216,6 +1326,7 @@ function drawSectionLayerMesh(canvas, mesh, common, result) {
   ctx.restore();
 
   drawSectionMeshTrajectory(ctx, frame, mesh);
+  drawSectionMeshSleeves(ctx, frame, mesh);
   drawSectionMeshAxes(ctx, frame, mesh, common, result);
   drawSectionMeshColorbar(ctx, frame, mesh, result);
 }
@@ -1328,6 +1439,45 @@ function drawSectionMeshTrajectory(ctx, frame, mesh) {
   ctx.clip();
   drawPolyline(ctx, points, '#ffffff', 8, 0.92);
   drawPolyline(ctx, points, '#ef4444', 4, 1);
+  ctx.restore();
+}
+
+function drawSectionMeshSleeves(ctx, frame, mesh) {
+  const sleeves = (mesh.sleeves || [])
+    .filter(item => item.depth >= mesh.yMin && item.depth <= mesh.yMax && item.x >= mesh.xMin && item.x <= mesh.xMax)
+    .map(item => ({ ...item, screen: sectionMeshToScreen(item.x, item.depth, frame, mesh) }))
+    .filter(item => Number.isFinite(item.screen.x) && Number.isFinite(item.screen.y));
+  if (!sleeves.length) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(frame.left, frame.top, frame.width, frame.height);
+  ctx.clip();
+  ctx.font = '11px Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  for (const sleeve of sleeves) {
+    const x = sleeve.screen.x;
+    const y = sleeve.screen.y;
+    ctx.beginPath();
+    ctx.arc(x, y, 4.2, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#b91c1c';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+    const label = sleeve.port == null ? '' : String(sleeve.port);
+    if (label) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#ffffff';
+      ctx.strokeText(label, x + 7, y - 1);
+      ctx.fillStyle = '#7f1d1d';
+      ctx.fillText(label, x + 7, y - 1);
+    }
+  }
   ctx.restore();
 }
 
@@ -1841,6 +1991,7 @@ function saveState() {
     metricsOutput: $('metrics-output').value,
     curvePath: $('curve-path').value,
     sectionModel: $('section-model').value,
+    sectionWellNameMap: state.sectionWellNameMap,
     sectionStep: $('section-step').value,
     sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
@@ -1854,6 +2005,7 @@ function restoreState() {
     const data = JSON.parse(localStorage.getItem('petrelhacker.state') || '{}');
     if (data.models) state.models = data.models;
     if (Array.isArray(data.selectedWells)) state.selectedWells = data.selectedWells;
+    if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
     $('sleeves-path').value = data.sleevesPath || '';

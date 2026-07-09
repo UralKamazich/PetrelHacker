@@ -31,6 +31,7 @@ from core.sleeves_loader import (
     filter_sleeves_by_wells,
     guess_sleeves_column_mapping,
     load_sleeves_table,
+    read_sleeves_table_headers,
     read_sleeves_table_raw,
     unique_well_values,
     validate_sleeves_table,
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             "curve-data",
             "well-trajectories",
             "model-section",
+            "sleeve-markers",
         ),
     )
     args = parser.parse_args(argv)
@@ -72,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             "curve-data": curve_data,
             "well-trajectories": well_trajectories,
             "model-section": model_section,
+            "sleeve-markers": sleeve_markers,
         }
         handlers[args.command](payload)
         return 0
@@ -126,6 +129,21 @@ def preview_sleeves(payload: JsonDict) -> None:
     path = str(payload.get("path", "")).strip()
     if not path:
         raise ValueError("Sleeves path is empty.")
+    if bool(payload.get("headersOnly", False)):
+        columns = read_sleeves_table_headers(path)
+        guessed_mapping = guess_sleeves_column_mapping(columns)
+        _emit(
+            "result",
+            columns=columns,
+            guessedMapping=guessed_mapping,
+            columnMapping=payload.get("columnMapping") or guessed_mapping,
+            warnings=[],
+            rows=0,
+            wells=[],
+            preview=[],
+            headersOnly=True,
+        )
+        return
     raw = read_sleeves_table_raw(path)
     guessed_mapping = guess_sleeves_column_mapping(list(raw.columns))
     requested_mapping = payload.get("columnMapping") or guessed_mapping
@@ -408,12 +426,114 @@ def model_section(payload: JsonDict) -> None:
     _emit("result", **_dataclass_dict(result))
 
 
+def sleeve_markers(payload: JsonDict) -> None:
+    path = str(payload.get("path", "")).strip()
+    well_name = str(payload.get("wellName", "")).strip()
+    if not path:
+        _emit("result", markers=[])
+        return
+    if not well_name:
+        _emit("result", markers=[])
+        return
+    sleeves = load_sleeves_table(path, payload.get("columnMapping") or None)
+    if "MD" not in sleeves.columns:
+        md_column = _find_md_column(sleeves.columns)
+        if md_column:
+            sleeves["MD"] = sleeves[md_column]
+        else:
+            _emit(
+                "result",
+                markers=[],
+                warning=f"MD column is not mapped in the Extraction sleeves table. Columns: {', '.join(map(str, sleeves.columns[:12]))}",
+            )
+            return
+    if "Well" not in sleeves.columns or "Port" not in sleeves.columns:
+        _emit("result", markers=[], warning="Well or Port column is not mapped in the Extraction sleeves table.")
+        return
+    well_key = _normalize_text(well_name)
+    well_keys = sleeves["Well"].map(_normalize_text)
+    filtered = sleeves[well_keys == well_key].copy()
+    if filtered.empty:
+        loose_mask = well_keys.map(lambda value: bool(value) and (value in well_key or well_key in value))
+        filtered = sleeves[loose_mask].copy()
+    if filtered.empty:
+        available_all = sorted({str(value) for value in sleeves["Well"] if not pd.isna(value)})
+        available = sorted({value for value in well_keys if value})[:10]
+        _emit(
+            "result",
+            markers=[],
+            availableWells=available_all,
+            warning=f"No sleeves found for well '{well_name}' in Extraction table. Available examples: {', '.join(available)}",
+        )
+        return
+    filtered["MD"] = pd.to_numeric(filtered["MD"], errors="coerce")
+    filtered = filtered[pd.notna(filtered["MD"])].copy()
+    if filtered.empty:
+        _emit("result", markers=[], warning=f"Sleeves for well '{well_name}' have no numeric MD values.")
+        return
+    filtered = filtered.sort_values("MD")
+    markers = [
+        {
+            "well": str(row["Well"]),
+            "port": _json_value(row["Port"]),
+            "md": float(row["MD"]),
+        }
+        for _, row in filtered.iterrows()
+    ]
+    _emit("result", markers=markers)
+
+
+def _find_md_column(columns: object) -> str | None:
+    for column in columns:
+        text = _normalize_text(column)
+        if text == "MD" or text.endswith("MD") or "MEASUREDDEPTH" in text:
+            return str(column)
+    return None
+
+
 def _read_payload() -> JsonDict:
     data = sys.stdin.buffer.read()
     text = data.decode("utf-8-sig") if data else ""
     if not text.strip():
         return {}
     return json.loads(text)
+
+
+def _normalize_text(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        head = text[:-2]
+        if head.isdigit():
+            return head
+    translation = str.maketrans(
+        {
+            "А": "A",
+            "В": "B",
+            "Е": "E",
+            "К": "K",
+            "М": "M",
+            "Н": "H",
+            "О": "O",
+            "Р": "P",
+            "С": "C",
+            "Т": "T",
+            "Х": "X",
+            "а": "A",
+            "в": "B",
+            "е": "E",
+            "к": "K",
+            "м": "M",
+            "н": "H",
+            "о": "O",
+            "р": "P",
+            "с": "C",
+            "т": "T",
+            "х": "X",
+        }
+    )
+    return "".join(ch for ch in text.translate(translation).upper() if ch.isalnum())
 
 
 def _models(payload: JsonDict) -> list[JsonDict]:

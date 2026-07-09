@@ -29,8 +29,17 @@ COLUMN_ALIASES = {
     "coordinate_y": "Y",
     "tvdss_port": "TVDSS_PORT",
     "tvd_port": "TVDSS_PORT",
+    "md": "MD",
+    "md_port": "MD",
+    "port_md": "MD",
+    "sleeve_md": "MD",
+    "md_sleeve": "MD",
+    "measured_depth": "MD",
+    "measured_depth_port": "MD",
+    "depth_md": "MD",
+    "depth_port_md": "MD",
 }
-OPTIONAL_NUMERIC_COLUMNS = ("TVDSS_PORT",)
+OPTIONAL_NUMERIC_COLUMNS = ("TVDSS_PORT", "MD")
 
 
 def load_sleeves_table(path: str | Path, column_mapping: dict[str, str] | None = None) -> pd.DataFrame:
@@ -59,6 +68,24 @@ def read_sleeves_table_raw(path: str | Path) -> pd.DataFrame:
     return df.dropna(how="all").reset_index(drop=True)
 
 
+def read_sleeves_table_headers(path: str | Path) -> list[str]:
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(f"Sleeves table does not exist: {source}")
+
+    suffix = source.suffix.lower()
+    if suffix == ".csv":
+        return [str(column) for column in pd.read_csv(source, nrows=0).columns]
+    if suffix in {".xlsx", ".xlsm"}:
+        try:
+            return [str(column) for column in pd.read_excel(source, nrows=0).columns]
+        except Exception:  # noqa: BLE001
+            return [str(column) for column in _read_simple_xlsx(source).columns]
+    if suffix == ".xls":
+        return [str(column) for column in pd.read_excel(source, nrows=0).columns]
+    raise ValueError(f"Unsupported sleeves table format: {source.suffix}")
+
+
 def guess_sleeves_column_mapping(columns: list[object]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     used: set[str] = set()
@@ -72,7 +99,7 @@ def guess_sleeves_column_mapping(columns: list[object]) -> dict[str, str]:
 
 
 def apply_sleeves_column_mapping(df: pd.DataFrame, column_mapping: dict[str, str]) -> pd.DataFrame:
-    out = df.copy()
+    out = normalize_sleeves_columns(df)
     for target, source in column_mapping.items():
         if not source or source not in df.columns:
             continue
