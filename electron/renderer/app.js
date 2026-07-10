@@ -56,6 +56,7 @@ const state = {
   sectionResult: null,
   sectionRows: [],
   sectionMesh: null,
+  sectionViewXRange: null,
   sectionWellNameMap: {},
   sectionUseExtractionSelection: false,
   sectionBoundaries: [],
@@ -123,6 +124,7 @@ function bindActions() {
   });
   ['section-axis', 'section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).addEventListener('change', () => {
+      if (id === 'section-axis') state.sectionViewXRange = null;
       if (state.sectionResult) paintSection(state.sectionResult);
     });
   });
@@ -1264,6 +1266,7 @@ function clearSectionAutoBounds() {
     $(id).value = '';
   });
   state.sectionBoundaries = [];
+  state.sectionViewXRange = null;
 }
 
 async function drawSection() {
@@ -1395,12 +1398,15 @@ function paintSection(result) {
   const sleeveDepthInterval = sectionSleeveDepthInterval(rows, axis, result.sleeveMarkers || [], 50, result);
   const propertyDepthCoreInterval = sleeveDepthInterval || propertyDepthCoreIntervalRaw;
   const propertyDepthInterval = sleeveDepthInterval || sectionPropertyDepthInterval(validRows, 30);
-  const displayXInterval = sectionXDisplayInterval(rows, axis, propertyDepthCoreInterval, finiteX);
+  const autoXInterval = sectionXDisplayInterval(rows, axis, propertyDepthCoreInterval, finiteX);
+  const displayXInterval = state.sectionViewXRange && Number.isFinite(state.sectionViewXRange.min) && Number.isFinite(state.sectionViewXRange.max)
+    ? state.sectionViewXRange
+    : autoXInterval;
   let depthMin = numericInput('section-depth-min');
   let depthMax = numericInput('section-depth-max');
   if (sleeveDepthInterval) {
-    if (!Number.isFinite(depthMin) || depthMin < sleeveDepthInterval.min || depthMin > sleeveDepthInterval.max) depthMin = sleeveDepthInterval.min;
-    if (!Number.isFinite(depthMax) || depthMax > sleeveDepthInterval.max || depthMax < sleeveDepthInterval.min) depthMax = sleeveDepthInterval.max;
+    if (!Number.isFinite(depthMin)) depthMin = sleeveDepthInterval.min;
+    if (!Number.isFinite(depthMax)) depthMax = sleeveDepthInterval.max;
     if (depthMax <= depthMin) {
       depthMin = sleeveDepthInterval.min;
       depthMax = sleeveDepthInterval.max;
@@ -1744,6 +1750,7 @@ function renderSectionLayerMesh(common, result) {
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
   canvas.addEventListener('mousedown', event => startSectionBoundaryDrag(event, canvas, mesh));
+  canvas.addEventListener('wheel', event => zoomSectionMesh(event, canvas, mesh), { passive: false });
   canvas.addEventListener('mousemove', event => {
     if (state.sectionBoundaryDrag) {
       dragSectionBoundary(event, canvas);
@@ -2313,6 +2320,46 @@ function sectionMeshToScreen(x, y, frame, mesh) {
   return {
     x: frame.left + ((x - mesh.xMin) / xSpan) * frame.width,
     y: frame.top + ((y - mesh.yMin) / ySpan) * frame.height
+  };
+}
+
+function sectionMeshPointFromScreen(x, y, frame, mesh) {
+  const xFraction = (x - frame.left) / (frame.width || 1);
+  const yFraction = (y - frame.top) / (frame.height || 1);
+  return {
+    x: mesh.xMin + xFraction * (mesh.xMax - mesh.xMin),
+    y: mesh.yMin + yFraction * (mesh.yMax - mesh.yMin),
+    xFraction,
+    yFraction
+  };
+}
+
+function zoomSectionMesh(event, canvas, mesh) {
+  if (!state.sectionResult || !mesh || !mesh.frame) return;
+  event.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const screenX = event.clientX - rect.left;
+  const screenY = event.clientY - rect.top;
+  const frame = mesh.frame;
+  if (screenX < frame.left || screenX > frame.right || screenY < frame.top || screenY > frame.bottom) return;
+  const point = sectionMeshPointFromScreen(screenX, screenY, frame, mesh);
+  const factor = event.deltaY < 0 ? 0.82 : 1.22;
+  const xRange = sectionZoomRange(mesh.xMin, mesh.xMax, point.x, point.xFraction, factor, 5);
+  const yRange = sectionZoomRange(mesh.yMin, mesh.yMax, point.y, point.yFraction, factor, 1);
+  state.sectionViewXRange = xRange;
+  $('section-depth-min').value = formatInputNumber(yRange.min, 1);
+  $('section-depth-max').value = formatInputNumber(yRange.max, 1);
+  paintSection(state.sectionResult);
+}
+
+function sectionZoomRange(minValue, maxValue, centerValue, fraction, factor, minSpan) {
+  const currentSpan = maxValue - minValue;
+  if (!Number.isFinite(currentSpan) || currentSpan <= 0) return { min: minValue, max: maxValue };
+  const span = Math.max(minSpan, currentSpan * factor);
+  const clampedFraction = Math.max(0.02, Math.min(0.98, fraction));
+  return {
+    min: centerValue - span * clampedFraction,
+    max: centerValue + span * (1 - clampedFraction)
   };
 }
 
