@@ -351,7 +351,7 @@ def curve_data(payload: JsonDict) -> None:
     keep = _unique_list(
         [
             column
-            for column in ["Well", "Port", depth_col, *channel_depth_columns.values(), *columns]
+            for column in ["Well", "Port", "TVDSS_PORT", "Depth_KB_PORT", depth_col, *channel_depth_columns.values(), *columns]
             if column in df.columns
         ]
     )

@@ -1041,6 +1041,10 @@ function curveSleeveDepth(rows) {
     const depth = numericCell(row.TVDSS_PORT);
     if (Number.isFinite(depth)) return depth;
   }
+  for (const row of rows || []) {
+    const depth = numericCell(row.Depth_KB_PORT);
+    if (Number.isFinite(depth)) return depth;
+  }
   return NaN;
 }
 
