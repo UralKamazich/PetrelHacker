@@ -97,6 +97,17 @@ ipcMain.handle('dialog:save-file', async (_event, options) => {
   return result.filePath;
 });
 
+ipcMain.handle('file:read-text', async (_event, filePath) => {
+  if (!filePath) return '';
+  return fs.promises.readFile(filePath, 'utf8');
+});
+
+ipcMain.handle('file:write-text', async (_event, filePath, content) => {
+  if (!filePath) return false;
+  await fs.promises.writeFile(filePath, String(content == null ? '' : content), 'utf8');
+  return true;
+});
+
 ipcMain.handle('backend:run', async (_event, command, payload) => {
   return runBackend(command, payload || {});
 });

@@ -53,7 +53,8 @@ const state = {
   sectionResult: null,
   sectionRows: [],
   sectionMesh: null,
-  sectionWellNameMap: {}
+  sectionWellNameMap: {},
+  sectionUseExtractionSelection: false
 };
 
 const $ = id => document.getElementById(id);
@@ -83,6 +84,7 @@ function bindNavigation() {
 function bindActions() {
   $('load-models').addEventListener('click', loadModels);
   $('load-sleeves').addEventListener('click', loadSleeves);
+  $('match-wells').addEventListener('click', openWellMatchingModal);
   $('run-extraction').addEventListener('click', runExtraction);
   $('browse-sleeves').addEventListener('click', browseSleeves);
   $('sleeves-path').addEventListener('change', loadSleevesHeaders);
@@ -119,6 +121,7 @@ function bindActions() {
       if (state.sectionResult) paintSection(state.sectionResult);
     });
   });
+  $('load-section-from-extraction').addEventListener('click', loadSectionFromExtraction);
   $('load-section-wells').addEventListener('click', loadSectionWells);
   $('draw-section').addEventListener('click', drawSection);
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
@@ -330,6 +333,173 @@ function renderWells() {
   });
 }
 
+async function openWellMatchingModal() {
+  try {
+    await ensureExtractionWellsLoaded();
+    const fracWells = state.sleeves && (state.sleeves.wells || []).length ? state.sleeves.wells.map(well => well.name) : [];
+    if (!fracWells.length) return fail(new Error('Load sleeves first to match wells.'));
+    const models = state.loadedModels || [];
+    if (!models.length) return fail(new Error('Load models first to match wells.'));
+    showWellMatchingModal(fracWells, models);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function showWellMatchingModal(fracWells, models) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const modelOptions = models.map(model => `<option value="${escapeHtml(model.label)}">${escapeHtml(model.label)}</option>`).join('');
+  overlay.innerHTML = `
+    <div class="modal-card well-match-modal">
+      <div class="modal-title-row">
+        <div>
+          <div class="modal-title">Match wells</div>
+          <p class="modal-text">Frac-list wells are on the left. Select the matching model trajectory on the right.</p>
+        </div>
+        <button class="icon-button" id="well-match-close" type="button">x</button>
+      </div>
+      <div class="well-match-toolbar">
+        <label class="field"><span>Model</span><select id="well-match-model">${modelOptions}</select></label>
+        <div class="well-match-actions">
+          <button class="soft-button compact" id="well-match-load-json" type="button">Load JSON</button>
+          <button class="soft-button compact" id="well-match-save-json" type="button">Save JSON</button>
+        </div>
+      </div>
+      <div class="well-match-table" id="well-match-table"></div>
+      <div class="modal-actions">
+        <button class="soft-button" id="well-match-cancel" type="button">Close</button>
+        <button class="primary-action compact-action" id="well-match-apply" type="button">Apply</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const modelSelect = overlay.querySelector('#well-match-model');
+  modelSelect.value = currentSectionModel() ? currentSectionModel().label : models[0].label;
+  let currentTrajectories = [];
+
+  const render = async () => {
+    const model = models.find(item => item.label === modelSelect.value) || models[0];
+    currentTrajectories = await loadSectionTrajectories(model);
+    renderWellMatchingRows(overlay, fracWells, currentTrajectories);
+  };
+  const close = () => overlay.remove();
+
+  overlay.querySelector('#well-match-close').addEventListener('click', close);
+  overlay.querySelector('#well-match-cancel').addEventListener('click', close);
+  overlay.querySelector('#well-match-apply').addEventListener('click', () => {
+    saveState();
+    setReady(`Well matches: ${Object.keys(state.sectionWellNameMap || {}).length}`);
+    close();
+  });
+  overlay.querySelector('#well-match-load-json').addEventListener('click', async () => {
+    await loadWellMatchingJson();
+    renderWellMatchingRows(overlay, fracWells, currentTrajectories);
+  });
+  overlay.querySelector('#well-match-save-json').addEventListener('click', saveWellMatchingJson);
+  modelSelect.addEventListener('change', () => {
+    render().catch(fail);
+  });
+  render().catch(fail);
+}
+
+function renderWellMatchingRows(overlay, fracWells, trajectories) {
+  const root = overlay.querySelector('#well-match-table');
+  const trajectoryOptions = modelTrajectoryOptions(trajectories);
+  const rows = fracWells
+    .slice()
+    .sort((left, right) => String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' }))
+    .map(fracWell => {
+      const selected = modelWellNameForFracWell(fracWell, trajectories);
+      const options = ['<option value="">-</option>'].concat(trajectoryOptions.map(option => {
+        const selectedAttr = option.value === selected ? 'selected' : '';
+        return `<option value="${escapeHtml(option.value)}" ${selectedAttr}>${escapeHtml(option.label)}</option>`;
+      })).join('');
+      return `
+        <div class="well-match-row">
+          <div class="well-match-frac">${escapeHtml(fracWell)}</div>
+          <select data-frac-well="${escapeHtml(fracWell)}">${options}</select>
+        </div>
+      `;
+    }).join('');
+  root.innerHTML = `
+    <div class="well-match-head"><span>Frac-list well</span><span>Model trajectory</span></div>
+    ${rows}
+  `;
+  root.querySelectorAll('[data-frac-well]').forEach(select => {
+    select.addEventListener('change', () => {
+      setWellNameMatch(select.value, select.dataset.fracWell);
+      saveState();
+    });
+  });
+}
+
+function modelTrajectoryOptions(trajectories) {
+  const nameCounts = new Map();
+  (trajectories || []).forEach(item => {
+    const name = sectionTrajectoryName(item);
+    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+  });
+  return (trajectories || [])
+    .slice()
+    .sort((left, right) => sectionTrajectoryName(left).localeCompare(sectionTrajectoryName(right), undefined, { numeric: true, sensitivity: 'base' }))
+    .map(item => {
+      const name = sectionTrajectoryName(item);
+      return {
+        value: name,
+        label: (nameCounts.get(name) || 0) > 1 ? `${name} (${item.point_count || '?'} pts)` : name
+      };
+    });
+}
+
+function modelWellNameForFracWell(fracWell, trajectories) {
+  const explicit = Object.entries(state.sectionWellNameMap || {})
+    .find(([_modelName, mappedFrac]) => normalizeLookupTextSafe(mappedFrac) === normalizeLookupTextSafe(fracWell));
+  if (explicit) return explicit[0];
+  const exact = (trajectories || []).find(item => normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(fracWell));
+  return exact ? sectionTrajectoryName(exact) : '';
+}
+
+function setWellNameMatch(modelWellName, fracWellName) {
+  const map = state.sectionWellNameMap || {};
+  Object.keys(map).forEach(key => {
+    if (key === modelWellName || normalizeLookupTextSafe(map[key]) === normalizeLookupTextSafe(fracWellName)) {
+      delete map[key];
+    }
+  });
+  if (modelWellName && fracWellName) map[modelWellName] = fracWellName;
+  state.sectionWellNameMap = map;
+}
+
+async function loadWellMatchingJson() {
+  const path = await window.petrel.openFile({ filters: [{ name: 'Well matching JSON', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }] });
+  if (!path) return;
+  const text = await window.petrel.readTextFile(path);
+  const data = JSON.parse(text);
+  const mappings = data.mappings || data.sectionWellNameMap || data;
+  if (!mappings || typeof mappings !== 'object' || Array.isArray(mappings)) {
+    throw new Error('Invalid well matching JSON.');
+  }
+  state.sectionWellNameMap = Object.fromEntries(Object.entries(mappings).map(([modelWell, fracWell]) => [String(modelWell), String(fracWell)]));
+  saveState();
+  setReady(`Loaded well matches: ${Object.keys(state.sectionWellNameMap).length}`);
+}
+
+async function saveWellMatchingJson() {
+  const path = await window.petrel.saveFile({
+    defaultPath: 'well_matching.json',
+    filters: [{ name: 'Well matching JSON', extensions: ['json'] }]
+  });
+  if (!path) return;
+  const payload = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    mappings: state.sectionWellNameMap || {}
+  };
+  await window.petrel.writeTextFile(path, JSON.stringify(payload, null, 2));
+  setReady(`Saved well matches: ${Object.keys(payload.mappings).length}`);
+}
+
 function setAllWells(checked) {
   const wells = state.sleeves ? state.sleeves.wells || [] : [];
   state.selectedWells = checked ? wells.map(well => well.name) : [];
@@ -392,13 +562,35 @@ function renderSectionModels() {
 
 function renderSectionProperties() {
   const model = currentSectionModel();
-  const properties = model ? model.properties || [] : [];
+  const properties = sectionPropertiesForModel(model);
   const selected = $('section-property').value;
   const options = properties.map(prop => ({
     value: prop.uuid,
     label: prop.title
   }));
   fillSelectOptions('section-property', options, options.some(option => option.value === selected) ? selected : (options[0] && options[0].value));
+}
+
+function sectionPropertiesForModel(model) {
+  if (!model) return [];
+  const properties = model.properties || [];
+  if (!state.sectionUseExtractionSelection) return properties;
+  const selected = new Set(sectionSelectedPropertyUuids(model));
+  if (!selected.size) {
+    appendLog(`Warning: no Extraction properties are selected for ${model.label}; showing all section properties.`);
+    return properties;
+  }
+  const filtered = properties.filter(prop => selected.has(prop.uuid));
+  if (!filtered.length) {
+    appendLog(`Warning: selected Extraction properties were not found in ${model.label}; showing all section properties.`);
+    return properties;
+  }
+  return filtered;
+}
+
+function sectionSelectedPropertyUuids(model) {
+  const selectedModel = selectedModelsWithProperties().find(item => item.label === model.label || item.path === model.path);
+  return selectedModel ? selectedModel.selectedPropertyUuids || [] : [];
 }
 
 function currentSectionModel() {
@@ -814,14 +1006,92 @@ async function loadSectionWells() {
   if (!model || !model.path) return fail(new Error('Load models first and select a RESQML model.'));
   setBusy('Loading wells', 'Reading RESQML trajectories');
   try {
-    const result = await window.petrel.run('well-trajectories', { path: model.path, includePoints: false });
-    state.sectionTrajectories = result.trajectories || [];
+    state.sectionUseExtractionSelection = false;
+    renderSectionProperties();
+    state.sectionTrajectories = await loadSectionTrajectories(model);
     fillSectionWells(state.sectionTrajectories);
     $('section-summary').textContent = `Trajectories: ${state.sectionTrajectories.length}`;
     setReady(`Well trajectories: ${state.sectionTrajectories.length}`);
   } catch (error) {
     fail(error);
   }
+}
+
+async function loadSectionFromExtraction() {
+  const model = currentSectionModel();
+  if (!model || !model.path) return fail(new Error('Load models first and select a RESQML model.'));
+  setBusy('Loading section context', 'Reading Extraction selection');
+  try {
+    state.sectionUseExtractionSelection = true;
+    renderSectionProperties();
+    await ensureExtractionWellsLoaded();
+    const trajectories = await loadSectionTrajectories(model);
+    const extractionWells = sectionExtractionWellNames();
+    state.sectionTrajectories = await resolveSectionTrajectoriesFromExtraction(trajectories, extractionWells);
+    fillSectionWells(state.sectionTrajectories);
+    if (!extractionWells.length) {
+      appendLog('Warning: no Extraction wells are selected or loaded; section well list is empty.');
+    } else if (!state.sectionTrajectories.length) {
+      appendLog('Warning: no model trajectories were matched to selected Extraction wells. Use Match wells on the Extraction page.');
+    }
+    $('section-summary').textContent = `Extraction wells: ${state.sectionTrajectories.length}`;
+    setReady(`Section context from Extraction: ${state.sectionTrajectories.length} well(s)`);
+    saveState();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function ensureExtractionWellsLoaded() {
+  const path = $('sleeves-path').value.trim();
+  if (!path || (state.sleeves && (state.sleeves.wells || []).length)) return;
+  const result = await window.petrel.run('preview-sleeves', { path, columnMapping: currentColumnMapping() });
+  state.sleeves = result;
+  state.selectedWells = selectedWellsForLoadedSleeves(result.wells || []);
+  renderMapping(result);
+  renderWells();
+}
+
+async function loadSectionTrajectories(model) {
+  const result = await window.petrel.run('well-trajectories', { path: model.path, includePoints: false });
+  return result.trajectories || [];
+}
+
+function sectionExtractionWellNames() {
+  if (state.selectedWells && state.selectedWells.length) return state.selectedWells;
+  if (state.sleeves && (state.sleeves.wells || []).length) return state.sleeves.wells.map(well => well.name);
+  return [];
+}
+
+async function resolveSectionTrajectoriesFromExtraction(trajectories, wells) {
+  const selected = [];
+  const used = new Set();
+  for (const well of wells || []) {
+    const matched = findSectionTrajectoryForExtractionWell(trajectories, well, used);
+    if (matched) {
+      addSectionTrajectoryMatch(selected, used, matched, well);
+    }
+  }
+  return selected;
+}
+
+function findSectionTrajectoryForExtractionWell(trajectories, well, used) {
+  const key = normalizeLookupTextSafe(well);
+  if (!key) return null;
+  const mappedName = Object.entries(state.sectionWellNameMap || {})
+    .find(([_modelName, fracName]) => normalizeLookupTextSafe(fracName) === key);
+  if (mappedName) {
+    const mapped = trajectories.find(item => !used.has(item.uuid) && normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(mappedName[0]));
+    if (mapped) return mapped;
+  }
+  return trajectories.find(item => !used.has(item.uuid) && normalizeLookupTextSafe(sectionTrajectoryName(item)) === key) || null;
+}
+
+function addSectionTrajectoryMatch(selected, used, trajectory, extractionWell) {
+  if (!trajectory || used.has(trajectory.uuid)) return;
+  selected.push(trajectory);
+  used.add(trajectory.uuid);
+  state.sectionWellNameMap[sectionTrajectoryName(trajectory)] = extractionWell;
 }
 
 function fillSectionWells(trajectories) {
@@ -865,6 +1135,7 @@ async function drawSection() {
   if (!trajectoryUuid) return fail(new Error('Load wells and select a trajectory.'));
   const propertyUuid = $('section-property').value;
   if (!propertyUuid) return fail(new Error('Select section property.'));
+  await ensureSectionWellNameMapped(trajectoryUuid);
   setBusy('Drawing section', 'Sampling model along trajectory');
   try {
     const result = await window.petrel.run('model-section', {
@@ -887,6 +1158,19 @@ async function drawSection() {
   }
 }
 
+async function ensureSectionWellNameMapped(trajectoryUuid) {
+  const trajectory = state.sectionTrajectories.find(item => item.uuid === trajectoryUuid);
+  const modelWellName = sectionTrajectoryName(trajectory);
+  if (!modelWellName || state.sectionWellNameMap[modelWellName]) return;
+  const fracWells = state.sleeves && state.sleeves.wells ? state.sleeves.wells.map(well => well.name) : [];
+  if (!fracWells.length) return;
+  const exact = fracWells.find(well => normalizeLookupTextSafe(well) === normalizeLookupTextSafe(modelWellName));
+  if (exact) {
+    state.sectionWellNameMap[modelWellName] = exact;
+    saveState();
+  }
+}
+
 async function loadSectionSleeveMarkers(wellName) {
   const path = $('sleeves-path').value.trim();
   if (!path || !wellName) return [];
@@ -900,12 +1184,7 @@ async function loadSectionSleeveMarkers(wellName) {
     if ((result.markers || []).length) return result.markers || [];
     if (result.warning) appendLog(`Warning: ${result.warning}`);
     if (result.availableWells && result.availableWells.length && !state.sectionWellNameMap[wellName]) {
-      const selectedName = requestWellNameMapping(wellName, result.availableWells);
-      if (selectedName) {
-        state.sectionWellNameMap[wellName] = selectedName;
-        saveState();
-        return loadSectionSleeveMarkers(wellName);
-      }
+      appendLog(`Warning: no well match for "${wellName}". Use Match wells on the Extraction page.`);
     }
     return [];
   } catch (error) {
@@ -914,21 +1193,32 @@ async function loadSectionSleeveMarkers(wellName) {
   }
 }
 
-function requestWellNameMapping(modelWellName, availableWells) {
-  const examples = availableWells.slice(0, 30).join('\n');
-  const message = `No exact frac-list match for well "${modelWellName}". Enter matching frac-list well name:\n\n${examples}`;
-  const selected = window.prompt(message, availableWells[0] || '');
-  if (!selected) return '';
-  const normalized = normalizeLookupText(selected);
-  const exact = availableWells.find(well => normalizeLookupText(well) === normalized);
-  return exact || selected.trim();
-}
-
 function normalizeLookupText(value) {
   return String(value || '')
     .trim()
     .toUpperCase()
     .replace(/[АВЕКМНОРСТХ]/g, char => ({ А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', Х: 'X' }[char] || char))
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeLookupTextSafe(value) {
+  const cyrMap = {
+    '\u0410': 'A',
+    '\u0412': 'B',
+    '\u0415': 'E',
+    '\u041A': 'K',
+    '\u041C': 'M',
+    '\u041D': 'H',
+    '\u041E': 'O',
+    '\u0420': 'P',
+    '\u0421': 'C',
+    '\u0422': 'T',
+    '\u0425': 'X'
+  };
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0425]/g, char => cyrMap[char] || char)
     .replace(/[^A-Z0-9]/g, '');
 }
 
@@ -1355,6 +1645,7 @@ function drawSectionMeshGrid(ctx, frame, mesh, common, result) {
   ctx.lineWidth = 1;
   for (const tick of sectionTicks(mesh.xMin, mesh.xMax, 7)) {
     const x = sectionMeshToScreen(tick, mesh.yMin, frame, mesh).x;
+    if (x < frame.left - 0.5 || x > frame.right + 0.5) continue;
     ctx.beginPath();
     ctx.moveTo(x, frame.top);
     ctx.lineTo(x, frame.bottom);
@@ -1362,6 +1653,7 @@ function drawSectionMeshGrid(ctx, frame, mesh, common, result) {
   }
   for (const tick of sectionTicks(mesh.yMin, mesh.yMax, 8)) {
     const y = sectionMeshToScreen(mesh.xMin, tick, frame, mesh).y;
+    if (y < frame.top - 0.5 || y > frame.bottom + 0.5) continue;
     ctx.beginPath();
     ctx.moveTo(frame.left, y);
     ctx.lineTo(frame.right, y);
@@ -1379,6 +1671,7 @@ function drawSectionMeshAxes(ctx, frame, mesh, common) {
   ctx.textBaseline = 'top';
   for (const tick of sectionTicks(mesh.xMin, mesh.xMax, 7)) {
     const x = sectionMeshToScreen(tick, mesh.yMin, frame, mesh).x;
+    if (x < frame.left - 0.5 || x > frame.right + 0.5) continue;
     ctx.fillText(formatAxisTick(tick), x, frame.bottom + 10);
   }
   ctx.fillText(sectionXAxisTitle(common.axis), frame.left + frame.width / 2, frame.bottom + 42);
@@ -1386,6 +1679,7 @@ function drawSectionMeshAxes(ctx, frame, mesh, common) {
   ctx.textBaseline = 'middle';
   for (const tick of sectionTicks(mesh.yMin, mesh.yMax, 8)) {
     const y = sectionMeshToScreen(mesh.xMin, tick, frame, mesh).y;
+    if (y < frame.top - 0.5 || y > frame.bottom + 0.5) continue;
     ctx.fillText(formatAxisTick(tick), frame.left - 10, y);
   }
   ctx.save();
@@ -1562,7 +1856,7 @@ function sectionTicks(minValue, maxValue, count) {
   const ticks = [];
   const step = niceTickStep((maxValue - minValue) / Math.max(1, count - 1));
   const start = Math.ceil(minValue / step) * step;
-  for (let value = start; value <= maxValue + step * 0.5; value += step) {
+  for (let value = start; value <= maxValue + Math.abs(step) * 1e-9; value += step) {
     ticks.push(value);
   }
   return ticks;

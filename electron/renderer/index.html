@@ -83,7 +83,10 @@
             <section class="panel span-5">
               <div class="panel-title">
                 <h3>Sleeves</h3>
-                <button class="soft-button" id="load-sleeves">Load sleeves</button>
+                <div class="segmented">
+                  <button class="soft-button" id="match-wells" type="button">Match wells</button>
+                  <button class="soft-button" id="load-sleeves" type="button">Load sleeves</button>
+                </div>
               </div>
               <label class="field">
                 <span>Frac-list XLSX / CSV</span>
@@ -204,7 +207,13 @@
           </header>
           <div class="layout-grid">
             <section class="panel span-4 section-data-panel">
-              <div class="panel-title"><h3>Data</h3><button class="soft-button" id="load-section-wells">Load wells</button></div>
+              <div class="panel-title section-panel-title">
+                <h3>Data</h3>
+                <div class="section-title-actions">
+                  <button class="soft-button" id="load-section-from-extraction">Load from Extraction</button>
+                  <button class="soft-button" id="load-section-wells">Load wells</button>
+                </div>
+              </div>
               <label class="field"><span>Model</span><select id="section-model"></select></label>
               <label class="field"><span>Well trajectory</span><select id="section-well"></select></label>
               <label class="field"><span>Property</span><select id="section-property"></select></label>

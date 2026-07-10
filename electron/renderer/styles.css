@@ -215,6 +215,24 @@ select {
   font-size: 16px;
 }
 
+.section-panel-title {
+  align-items: flex-start;
+}
+
+.section-title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.section-title-actions .soft-button {
+  min-height: 30px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+
 .primary-action,
 .soft-button,
 .icon-button,
@@ -680,6 +698,121 @@ select {
   line-height: 1.35;
   pointer-events: none;
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.22);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.modal-card {
+  width: min(460px, 100%);
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.modal-title {
+  margin-bottom: 8px;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.modal-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.modal-text {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.compact-action {
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+.well-match-modal {
+  width: min(920px, 100%);
+}
+
+.well-match-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin: 10px 0;
+}
+
+.well-match-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.well-match-table {
+  max-height: min(560px, calc(100vh - 270px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.well-match-head,
+.well-match-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.4fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.well-match-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.well-match-row {
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.well-match-frac {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.well-match-row select {
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 13px;
 }
 
 .log-view {
