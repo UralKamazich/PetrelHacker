@@ -30,6 +30,16 @@ class SectionCell:
 
 
 @dataclass(frozen=True)
+class SectionTrajectoryPoint:
+    md: float | None
+    distance: float
+    horizontal_distance: float
+    x: float
+    y: float
+    z: float
+
+
+@dataclass(frozen=True)
 class SectionResult:
     model_path: str
     well_name: str
@@ -39,6 +49,7 @@ class SectionResult:
     station_count: int
     cell_count: int
     rows: list[SectionCell]
+    trajectory_points: list[SectionTrajectoryPoint]
 
 
 def extract_well_section(
@@ -52,6 +63,7 @@ def extract_well_section(
     depth_offset: float = 0.0,
     skip_inactive: bool = True,
     max_stations: int = 1200,
+    extra_md_values: list[float] | tuple[float, ...] | None = None,
     progress_callback=None,
 ) -> SectionResult:
     resolved_path = resolve_model_path(model_path)
@@ -75,7 +87,7 @@ def extract_well_section(
     if len(points) < 2:
         raise ValueError(f"Trajectory has fewer than two points: {trajectory.well_name}")
 
-    stations = _sample_trajectory(points, sample_step, max_stations)
+    stations = _sample_trajectory(points, sample_step, max_stations, extra_md_values=extra_md_values)
     indexer = FastGridIndexer(reader, grids[0])
     indexer.build_column_index()
     matched_stations: list[tuple[dict[str, float | None], object | None]] = []
@@ -135,6 +147,17 @@ def extract_well_section(
         station_count=len(stations),
         cell_count=len(rows),
         rows=rows,
+        trajectory_points=[
+            SectionTrajectoryPoint(
+                md=point.md,
+                distance=point.distance_along,
+                horizontal_distance=point.horizontal_distance,
+                x=point.x,
+                y=point.y,
+                z=point.z,
+            )
+            for point in points
+        ],
     )
 
 
@@ -335,7 +358,13 @@ def _select_property(properties, property_uuid: str):
     raise ValueError(f"Property UUID not found: {property_uuid}")
 
 
-def _sample_trajectory(points, sample_step: float, max_stations: int) -> list[dict[str, float | None]]:
+def _sample_trajectory(
+    points,
+    sample_step: float,
+    max_stations: int,
+    *,
+    extra_md_values: list[float] | tuple[float, ...] | None = None,
+) -> list[dict[str, float | None]]:
     md_values = np.asarray([np.nan if point.md is None else point.md for point in points], dtype=float)
     distance_values = np.asarray([point.distance_along for point in points], dtype=float)
     horizontal_distance_values = np.asarray([point.horizontal_distance for point in points], dtype=float)
@@ -378,8 +407,19 @@ def _sample_trajectory(points, sample_step: float, max_stations: int) -> list[di
             samples = np.concatenate([samples, np.asarray([stop], dtype=float)])
     else:
         samples = axis
+    if axis_name == "md" and extra_md_values:
+        extra = np.asarray([value for value in extra_md_values if np.isfinite(value) and start <= value <= stop], dtype=float)
+        if len(extra):
+            samples = np.concatenate([samples, extra])
+            samples = np.unique(samples)
     if len(samples) > max_stations:
-        samples = np.linspace(start, stop, max_stations)
+        required = np.asarray([], dtype=float)
+        if axis_name == "md" and extra_md_values:
+            required = np.asarray([value for value in extra_md_values if np.isfinite(value) and start <= value <= stop], dtype=float)
+            required = np.unique(required)
+        regular_count = max(2, int(max_stations) - len(required))
+        samples = np.concatenate([np.linspace(start, stop, regular_count), required])
+        samples = np.unique(samples)
 
     stations: list[dict[str, float | None]] = []
     for value in samples:

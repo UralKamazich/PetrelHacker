@@ -51,6 +51,7 @@ const state = {
   hasSavedWellSelection: false,
   tableColumns: [],
   curveRows: [],
+  curveSettings: {},
   sectionTrajectories: [],
   sectionResult: null,
   sectionRows: [],
@@ -135,7 +136,15 @@ function bindActions() {
     saveState();
   });
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
-  ['curve-well', 'curve-port'].forEach(id => $(id).addEventListener('change', drawCurves));
+  ['curve-well', 'curve-port'].forEach(id => {
+    $(id).addEventListener('change', () => {
+      saveState();
+      drawCurves();
+    });
+  });
+  ['curve-depth-mode', 'curve-depth-min', 'curve-depth-max'].forEach(id => {
+    $(id).addEventListener('change', saveState);
+  });
   window.addEventListener('resize', () => {
     if (state.sectionResult) paintSection(state.sectionResult);
   });
@@ -740,6 +749,10 @@ function renderMetricKeys() {
 async function runMetrics() {
   setBusy('Calculating metrics', 'Processing intervals');
   try {
+    const metricKeys = checkedValues('metric-key');
+    if (!metricKeys.length) {
+      throw new Error('Select at least one metric.');
+    }
     const result = await window.petrel.run('metrics', {
       extractedPath: $('metrics-extracted').value.trim(),
       intervalsPath: $('metrics-intervals').value.trim(),
@@ -750,7 +763,7 @@ async function runMetrics() {
       lithologyColumn: valueOrNull('metrics-lithology'),
       reservoirValues: splitCsv($('reservoir-values').value),
       propertyColumns: checkedValues('metrics-property'),
-      metricKeys: checkedValues('metric-key')
+      metricKeys
     });
     setProgress('metrics-progress', 100);
     setReady(`Metrics rows: ${result.rowsWritten || 0}`);
@@ -768,11 +781,13 @@ async function loadCurveTable() {
     state.tableColumns = result.columns || [];
     const wells = result.wells || [];
     const ports = result.ports || [];
-    fillSelect('curve-well', wells, wells[0]);
-    fillSelect('curve-port', ports, ports[0]);
-    $('curve-depth-mode').value = 'common';
+    const saved = state.curveSettings || {};
+    fillSelect('curve-well', wells, wells.includes(saved.well) ? saved.well : wells[0]);
+    fillSelect('curve-port', ports, ports.includes(saved.port) ? saved.port : ports[0]);
+    $('curve-depth-mode').value = saved.depthMode || 'common';
     renderCurveControls(true);
     await autoFitAndDrawCurves();
+    applySavedCurveRanges();
     setReady(`Curve table: ${result.rows} rows`);
   } catch (error) {
     fail(error);
@@ -783,6 +798,7 @@ function renderCurveControls(autoSelect) {
   const root = $('curve-controls');
   root.innerHTML = '';
   const columns = curveChannelColumns();
+  const saved = state.curveSettings || {};
   for (let index = 1; index <= 4; index += 1) {
     const control = document.createElement('div');
     control.className = 'curve-control';
@@ -793,8 +809,16 @@ function renderCurveControls(autoSelect) {
       <label class="field"><span>Shift m</span><input id="curve-shift-${index}" type="number" step="0.1" value="0"></label>
     `;
     root.appendChild(control);
-    fillSelect(`curve-channel-${index}`, columns, autoSelect ? columns[index - 1] : undefined);
+    const savedChannel = saved.channels && saved.channels[index - 1];
+    const selected = savedChannel && columns.includes(savedChannel)
+      ? savedChannel
+      : (autoSelect ? columns[index - 1] : undefined);
+    fillSelect(`curve-channel-${index}`, columns, selected);
+    if (saved.mins && saved.mins[index - 1] !== undefined) $(`curve-min-${index}`).value = saved.mins[index - 1];
+    if (saved.maxs && saved.maxs[index - 1] !== undefined) $(`curve-max-${index}`).value = saved.maxs[index - 1];
+    if (saved.shifts && saved.shifts[index - 1] !== undefined) $(`curve-shift-${index}`).value = saved.shifts[index - 1];
   }
+  root.querySelectorAll('select,input').forEach(element => element.addEventListener('change', saveState));
 }
 
 function curveChannelColumns() {
@@ -833,7 +857,19 @@ async function autoFitAndDrawCurves() {
   setBusy('Drawing curves', 'Auto-fitting selected well/port');
   const result = await loadCurveRows(columns);
   autoFitCurveRanges(result.depthColumn, result.channelDepthColumns || {}, columns, result.rows || []);
+  applySavedCurveRanges();
   paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, result.rows || []);
+}
+
+function applySavedCurveRanges() {
+  const saved = state.curveSettings || {};
+  if (saved.depthMin !== undefined) $('curve-depth-min').value = saved.depthMin;
+  if (saved.depthMax !== undefined) $('curve-depth-max').value = saved.depthMax;
+  for (let index = 1; index <= 4; index += 1) {
+    if (saved.mins && saved.mins[index - 1] !== undefined) $(`curve-min-${index}`).value = saved.mins[index - 1];
+    if (saved.maxs && saved.maxs[index - 1] !== undefined) $(`curve-max-${index}`).value = saved.maxs[index - 1];
+    if (saved.shifts && saved.shifts[index - 1] !== undefined) $(`curve-shift-${index}`).value = saved.shifts[index - 1];
+  }
 }
 
 async function loadCurveRows(columns) {
@@ -887,6 +923,7 @@ function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, ro
 
 function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
   const depths = [];
+  const sleeveDepth = curveSleeveDepth(rows);
   columns.forEach((column, index) => {
     const depthColumn = channelDepthColumns[column] || defaultDepthColumn;
     const shift = Number($(`curve-shift-${index + 1}`).value || 0);
@@ -915,6 +952,7 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     hovermode: 'closest',
     legend: { orientation: 'h', x: 0, y: 1.18, font: { size: 11 } },
     annotations: [],
+    shapes: [],
     yaxis: {
       title: 'TVD top',
       range: [depthMax, depthMin],
@@ -962,6 +1000,31 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     layout[axisKey] = plotlyXAxis(column, min, max, color, index);
     layout.annotations.push(plotlyAxisTitle(column, color, index));
   });
+  if (Number.isFinite(sleeveDepth)) {
+    layout.shapes.push({
+      type: 'line',
+      xref: 'paper',
+      yref: 'y',
+      x0: 0,
+      x1: 1,
+      y0: sleeveDepth,
+      y1: sleeveDepth,
+      line: { color: '#ef4444', width: 2, dash: 'dash' }
+    });
+    layout.annotations.push({
+      text: `Port ${escapeHtml($('curve-port').value || '')}`,
+      x: 1,
+      y: sleeveDepth,
+      xref: 'paper',
+      yref: 'y',
+      showarrow: false,
+      xanchor: 'right',
+      yanchor: 'bottom',
+      font: { color: '#b91c1c', size: 11 },
+      bgcolor: 'rgba(255,255,255,0.75)',
+      borderpad: 2
+    });
+  }
   if (!traces.length) {
     plotEmpty('No curve data');
     return;
@@ -971,6 +1034,14 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     displaylogo: false,
     scrollZoom: true
   });
+}
+
+function curveSleeveDepth(rows) {
+  for (const row of rows || []) {
+    const depth = numericCell(row.TVDSS_PORT);
+    if (Number.isFinite(depth)) return depth;
+  }
+  return NaN;
 }
 
 function plotlyXAxis(title, min, max, color, index) {
@@ -1204,6 +1275,7 @@ async function drawSection() {
   const trajectoryUuid = trajectory.uuid;
   const propertyUuid = propertySelection.property.uuid;
   await ensureSectionWellNameMapped(trajectoryValue);
+  const sleeveMarkers = await loadSectionSleeveMarkers(sectionTrajectoryName(trajectory));
   setBusy('Drawing section', 'Sampling model along trajectory');
   try {
     const result = await window.petrel.run('model-section', {
@@ -1214,9 +1286,10 @@ async function drawSection() {
       sampleStep: Number($('section-step').value || 25),
       maxStations: Number($('section-max-stations').value || 1200),
       depthOffset: Number(model.depthOffset || 0),
-      skipInactive: $('section-skip-inactive').checked
+      skipInactive: $('section-skip-inactive').checked,
+      extraMds: sleeveMarkers.map(marker => numericCell(marker.md)).filter(Number.isFinite)
     });
-    result.sleeveMarkers = await loadSectionSleeveMarkers(result.well_name);
+    result.sleeveMarkers = sleeveMarkers;
     state.sectionResult = result;
     state.sectionRows = result.rows || [];
     state.sectionBoundaries = [];
@@ -1315,7 +1388,7 @@ function paintSection(result) {
   const finiteY = yValues.filter(Number.isFinite);
   const finiteValues = values.filter(Number.isFinite);
   const propertyDepthCoreIntervalRaw = sectionPropertyDepthInterval(validRows, 0);
-  const sleeveDepthInterval = sectionSleeveDepthInterval(rows, axis, result.sleeveMarkers || [], 50);
+  const sleeveDepthInterval = sectionSleeveDepthInterval(rows, axis, result.sleeveMarkers || [], 50, result);
   const propertyDepthCoreInterval = sleeveDepthInterval || propertyDepthCoreIntervalRaw;
   const propertyDepthInterval = sleeveDepthInterval || sectionPropertyDepthInterval(validRows, 30);
   const displayXInterval = sectionXDisplayInterval(rows, axis, propertyDepthCoreInterval, finiteX);
@@ -1554,9 +1627,9 @@ function sectionTrajectoryDepth(zValue) {
   return z < 0 ? -z : z;
 }
 
-function sectionSleeveDepthInterval(rows, axis, markers, padding) {
+function sectionSleeveDepthInterval(rows, axis, markers, padding, result) {
   if (!markers || !markers.length) return null;
-  const trajectory = sectionStationTrajectoryPoints(rows, axis)
+  const trajectory = sectionTrajectoryForSleeves(result, rows, axis)
     .filter(point => Number.isFinite(point.md))
     .sort((a, b) => a.md - b.md);
   if (trajectory.length < 2) return null;
@@ -1576,9 +1649,9 @@ function sectionSleeveDepthInterval(rows, axis, markers, padding) {
   };
 }
 
-function sectionSleevePoints(rows, common, markers) {
+function sectionSleevePoints(rows, common, markers, result) {
   if (!markers || !markers.length) return [];
-  const trajectory = sectionStationTrajectoryPoints(rows, common.axis)
+  const trajectory = sectionTrajectoryForSleeves(result, rows, common.axis)
     .filter(point => Number.isFinite(point.md))
     .sort((a, b) => a.md - b.md);
   if (trajectory.length < 2) return [];
@@ -1599,6 +1672,32 @@ function sectionSleevePoints(rows, common, markers) {
       };
     })
     .filter(Boolean);
+}
+
+function sectionTrajectoryForSleeves(result, rows, axis) {
+  const rawPoints = result && Array.isArray(result.trajectory_points) ? result.trajectory_points : [];
+  const points = rawPoints
+    .map(point => {
+      const md = numericCell(point.md);
+      const x = numericCell(point[axis]);
+      const depth = sectionTrajectoryDepth(point.z);
+      const worldX = numericCell(point.x);
+      const worldY = numericCell(point.y);
+      if (!Number.isFinite(md) || !Number.isFinite(x) || !Number.isFinite(depth)) return null;
+      return {
+        station: NaN,
+        x,
+        depth,
+        md,
+        distance: numericCell(point.distance),
+        horizontal_distance: numericCell(point.horizontal_distance),
+        worldX,
+        worldY
+      };
+    })
+    .filter(Boolean);
+  if (points.length >= 2) return points;
+  return sectionStationTrajectoryPoints(rows, axis);
 }
 
 function interpolateTrajectoryByMd(points, md) {
@@ -1637,7 +1736,7 @@ function renderSectionLayerMesh(common, result) {
   const tooltip = target.querySelector('.section-mesh-tooltip');
   const mesh = buildSectionLayerMesh(common.validRows, common.axis, common.depthMin, common.depthMax, common.valueMin, common.valueMax, common.xMin, common.xMax);
   mesh.trajectory = sectionTrajectoryPoints(result.rows || [], common);
-  mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || []);
+  mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || [], result);
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
   canvas.addEventListener('mousedown', event => startSectionBoundaryDrag(event, canvas, mesh));
@@ -1979,8 +2078,9 @@ function autoPlaceSectionBoundaries() {
   const boundaries = [];
   for (const sleeve of mesh.sleeves) {
     const cells = sectionBoundaryCellsAtSleeve(common.validRows || [], common.axis, sleeve, valueRange);
-    const intervals = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), settings.gap)
+    const continuousBodies = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), 1e-6)
       .filter(interval => sectionIntervalThickness(interval) >= settings.minLayer);
+    const intervals = sectionMergeIntervals(continuousBodies, settings.gap);
     if (!intervals.length) continue;
     const local = sectionNearestInterval(intervals, sleeve.depth);
     const totalRange = numericRange(intervals.flatMap(interval => [interval.top, interval.base]));
@@ -2158,12 +2258,20 @@ async function saveSectionBoundaries() {
       columnMapping: currentColumnMapping(),
       records
     });
+    const savedPath = result.outputPath || outputPath;
+    if (result.rowsUpdated > 0 && savedPath) {
+      $('sleeves-path').value = savedPath;
+      $('metrics-intervals').value = savedPath;
+      state.columnMapping = currentColumnMapping();
+    }
     const selected = $('section-well').value;
     if (selected) state.sectionSavedWells[selected] = true;
     fillSectionWells(state.sectionTrajectories);
     saveState();
-    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows`);
-    appendLog(`Section boundaries saved: ${result.outputPath || outputPath}`);
+    const skipped = Number(result.rowsSkipped || 0);
+    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}`);
+    appendLog(`Section boundaries saved: ${savedPath}`);
+    if (skipped) appendLog(`Warning: ${skipped} sleeve row(s) were not matched and were not updated.`);
   } catch (error) {
     fail(error);
   }
@@ -2172,7 +2280,10 @@ async function saveSectionBoundaries() {
 function sectionBoundaryOutputPath(path) {
   const dir = dirname(path);
   const name = stripExtension(basename(path));
-  const filename = name ? `${name}_boundaries.xlsx` : 'frac_list_boundaries.xlsx';
+  const normalized = name.toLowerCase();
+  const filename = name
+    ? `${normalized.endsWith('_boundaries') ? name : `${name}_boundaries`}.xlsx`
+    : 'frac_list_boundaries.xlsx';
   return dir ? joinPath(dir, filename) : filename;
 }
 
@@ -2677,9 +2788,34 @@ function appendLog(message) {
   log.scrollTop = log.scrollHeight;
 }
 
+function currentCurveSettings() {
+  const channels = [];
+  const mins = [];
+  const maxs = [];
+  const shifts = [];
+  for (let index = 1; index <= 4; index += 1) {
+    channels.push($(`curve-channel-${index}`) ? $(`curve-channel-${index}`).value : '');
+    mins.push($(`curve-min-${index}`) ? $(`curve-min-${index}`).value : '');
+    maxs.push($(`curve-max-${index}`) ? $(`curve-max-${index}`).value : '');
+    shifts.push($(`curve-shift-${index}`) ? $(`curve-shift-${index}`).value : '');
+  }
+  return {
+    well: $('curve-well') ? $('curve-well').value : '',
+    port: $('curve-port') ? $('curve-port').value : '',
+    depthMode: $('curve-depth-mode') ? $('curve-depth-mode').value : 'common',
+    depthMin: $('curve-depth-min') ? $('curve-depth-min').value : '',
+    depthMax: $('curve-depth-max') ? $('curve-depth-max').value : '',
+    channels,
+    mins,
+    maxs,
+    shifts
+  };
+}
+
 function saveState() {
   state.extractionSelectedProperties = currentExtractionSelectedProperties();
   state.columnMapping = currentColumnMapping();
+  state.curveSettings = currentCurveSettings();
   const data = {
     models: state.models,
     sleevesPath: $('sleeves-path').value,
@@ -2695,6 +2831,7 @@ function saveState() {
     metricsIntervals: $('metrics-intervals').value,
     metricsOutput: $('metrics-output').value,
     curvePath: $('curve-path').value,
+    curveSettings: state.curveSettings,
     sectionWellNameMap: state.sectionWellNameMap,
     sectionSavedWells: state.sectionSavedWells,
     sectionStep: $('section-step').value,
@@ -2719,6 +2856,7 @@ function restoreState() {
     if (data.columnMapping && typeof data.columnMapping === 'object') state.columnMapping = data.columnMapping;
     if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
     if (data.sectionSavedWells && typeof data.sectionSavedWells === 'object') state.sectionSavedWells = data.sectionSavedWells;
+    if (data.curveSettings && typeof data.curveSettings === 'object') state.curveSettings = data.curveSettings;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
     $('sleeves-path').value = data.sleevesPath || '';
@@ -2730,6 +2868,7 @@ function restoreState() {
     $('metrics-intervals').value = data.metricsIntervals || '';
     $('metrics-output').value = basename(data.metricsOutput || '');
     $('curve-path').value = data.curvePath || '';
+    applySavedCurveRanges();
     if (data.sectionStep) $('section-step').value = data.sectionStep;
     if (data.sectionMaxStations) $('section-max-stations').value = data.sectionMaxStations;
     if (data.sectionAxis) $('section-axis').value = data.sectionAxis;

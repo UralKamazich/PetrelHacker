@@ -189,8 +189,14 @@ def extract(payload: JsonDict) -> None:
         _emit("log", message=f"Well filter: sleeves {len(sleeves)} of {original_count}.")
         if sleeves.empty:
             raise ValueError("Well filter removed all sleeves.")
-    for warning in validate_sleeves_table(sleeves):
+    sleeve_warnings = validate_sleeves_table(sleeves)
+    for warning in sleeve_warnings:
         _emit("log", message=f"Warning: {warning}")
+    missing_xy = [warning for warning in sleeve_warnings if warning in {"Missing required column: X", "Missing required column: Y"}]
+    if missing_xy:
+        raise ValueError(
+            "Sleeves table has no X/Y coordinates. Generate them on the Sections page and use the saved *_boundaries.xlsx file."
+        )
 
     specs = []
     for index, model in enumerate(_models(payload), start=1):
@@ -423,6 +429,7 @@ def model_section(payload: JsonDict) -> None:
         depth_offset=_to_float(payload.get("depthOffset"), 0.0),
         skip_inactive=bool(payload.get("skipInactive", True)),
         max_stations=max(50, int(payload.get("maxStations") or 1200)),
+        extra_md_values=_float_list(payload.get("extraMds")),
         progress_callback=progress,
     )
     _emit("progress", value=100)
@@ -503,17 +510,21 @@ def save_section_boundaries(payload: JsonDict) -> None:
     normalized = apply_sleeves_column_mapping(raw, mapping)
     column_targets = _boundary_output_columns(raw, mapping)
     updated = 0
+    skipped: list[JsonDict] = []
 
     if Path(source_path).suffix.lower() in {".xlsx", ".xlsm"} and Path(output_path).suffix.lower() in {".xlsx", ".xlsm"}:
-        updated = _save_boundaries_openpyxl(source_path, output_path, normalized, column_targets, records)
+        updated, skipped = _save_boundaries_openpyxl(source_path, output_path, normalized, column_targets, records)
     else:
         out = raw.copy()
         for column in column_targets.values():
             if column not in out.columns:
                 out[column] = None
         for record in records:
+            if not isinstance(record, dict):
+                continue
             index = _find_boundary_row(normalized, record)
             if index is None:
+                skipped.append(_boundary_record_label(record))
                 continue
             for key, column in column_targets.items():
                 if key in record:
@@ -524,7 +535,9 @@ def save_section_boundaries(payload: JsonDict) -> None:
         else:
             out.to_excel(output_path, index=False)
 
-    _emit("result", outputPath=output_path, rowsUpdated=updated, rowsRequested=len(records))
+    if skipped:
+        _emit("log", message=f"Warning: boundary rows were not matched and were skipped: {len(skipped)}.")
+    _emit("result", outputPath=output_path, rowsUpdated=updated, rowsRequested=len(records), rowsSkipped=len(skipped), skipped=skipped[:20])
 
 
 def _boundary_output_columns(raw: pd.DataFrame, mapping: dict[str, str]) -> dict[str, str]:
@@ -550,14 +563,14 @@ def _save_boundaries_openpyxl(
     normalized: pd.DataFrame,
     column_targets: dict[str, str],
     records: list[object],
-) -> int:
+) -> tuple[int, list[JsonDict]]:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("openpyxl is required to save augmented XLSX frac-list files.") from exc
 
     workbook = load_workbook(input_path)
-    sheet = workbook.active
+    sheet = workbook.worksheets[0]
     headers = [str(cell.value) if cell.value is not None else "" for cell in sheet[1]]
     column_indices = {header: index + 1 for index, header in enumerate(headers) if header}
     for column in column_targets.values():
@@ -568,11 +581,13 @@ def _save_boundaries_openpyxl(
         sheet.cell(row=1, column=len(headers), value=column)
 
     updated = 0
+    skipped: list[JsonDict] = []
     for record in records:
         if not isinstance(record, dict):
             continue
         index = _find_boundary_row(normalized, record)
         if index is None:
+            skipped.append(_boundary_record_label(record))
             continue
         excel_row = int(index) + 2
         for key, column in column_targets.items():
@@ -580,7 +595,7 @@ def _save_boundaries_openpyxl(
                 sheet.cell(row=excel_row, column=column_indices[column], value=_json_value(record.get(key)))
         updated += 1
     workbook.save(output_path)
-    return updated
+    return updated, skipped
 
 
 def _find_boundary_row(df: pd.DataFrame, record: dict[str, Any]) -> int | None:
@@ -592,11 +607,14 @@ def _find_boundary_row(df: pd.DataFrame, record: dict[str, Any]) -> int | None:
         return None
 
     port_value = record.get("port")
+    port_matched = False
     if "Port" in candidates.columns and port_value is not None:
         port_key = _normalize_value(port_value)
         by_port = candidates[candidates["Port"].map(_normalize_value) == port_key]
-        if not by_port.empty:
-            candidates = by_port
+        if by_port.empty:
+            return None
+        candidates = by_port
+        port_matched = True
 
     md_value = _to_float(record.get("md"), math.nan)
     if math.isfinite(md_value) and "MD" in candidates.columns:
@@ -604,10 +622,22 @@ def _find_boundary_row(df: pd.DataFrame, record: dict[str, Any]) -> int | None:
         if md_values.notna().any():
             distances = (md_values - md_value).abs()
             nearest_index = distances.idxmin()
-            if math.isfinite(float(distances.loc[nearest_index])) and float(distances.loc[nearest_index]) <= 0.05:
+            if math.isfinite(float(distances.loc[nearest_index])) and float(distances.loc[nearest_index]) <= 0.5:
                 return int(nearest_index)
+            if not port_matched or len(candidates) > 1:
+                return None
 
-    return int(candidates.index[0])
+    if len(candidates) == 1:
+        return int(candidates.index[0])
+    return None
+
+
+def _boundary_record_label(record: dict[str, Any]) -> JsonDict:
+    return {
+        "well": _json_value(record.get("well")),
+        "port": _json_value(record.get("port")),
+        "md": _json_value(record.get("md")),
+    }
 
 
 def _find_md_column(columns: object) -> str | None:
@@ -777,6 +807,17 @@ def _to_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_list(values: Any) -> list[float]:
+    if not isinstance(values, list):
+        return []
+    result: list[float] = []
+    for value in values:
+        number = _to_float(value, math.nan)
+        if math.isfinite(number):
+            result.append(number)
+    return result
 
 
 def _empty_to_none(value: Any) -> str | None:
