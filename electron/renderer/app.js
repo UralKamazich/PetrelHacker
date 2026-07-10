@@ -117,6 +117,9 @@ function bindActions() {
   ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-axis', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
+  ['section-boundary-gap', 'section-min-layer'].forEach(id => {
+    $(id).addEventListener('change', saveState);
+  });
   ['section-axis', 'section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).addEventListener('change', () => {
       if (state.sectionResult) paintSection(state.sectionResult);
@@ -1972,10 +1975,12 @@ function autoPlaceSectionBoundaries() {
   const { common, mesh } = state.sectionMesh;
   if (!mesh.sleeves || !mesh.sleeves.length) return fail(new Error('No sleeve markers were loaded for this well.'));
   const valueRange = numericRange((common.validRows || []).map(row => numericCell(row.value)));
+  const settings = sectionBoundarySettings();
   const boundaries = [];
   for (const sleeve of mesh.sleeves) {
     const cells = sectionBoundaryCellsAtSleeve(common.validRows || [], common.axis, sleeve, valueRange);
-    const intervals = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), 2);
+    const intervals = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), settings.gap)
+      .filter(interval => sectionIntervalThickness(interval) >= settings.minLayer);
     if (!intervals.length) continue;
     const local = sectionNearestInterval(intervals, sleeve.depth);
     const totalRange = numericRange(intervals.flatMap(interval => [interval.top, interval.base]));
@@ -1996,7 +2001,16 @@ function autoPlaceSectionBoundaries() {
   }
   state.sectionBoundaries = boundaries;
   redrawCurrentSectionMesh();
-  setReady(`Auto boundaries: ${boundaries.length} sleeves`);
+  setReady(`Auto boundaries: ${boundaries.length} sleeves, gap ${settings.gap} m, min layer ${settings.minLayer} m`);
+}
+
+function sectionBoundarySettings() {
+  const gap = numericInput('section-boundary-gap');
+  const minLayer = numericInput('section-min-layer');
+  return {
+    gap: Number.isFinite(gap) ? Math.max(0, gap) : 2,
+    minLayer: Number.isFinite(minLayer) ? Math.max(0, minLayer) : 0
+  };
 }
 
 function sectionBoundaryCellsAtSleeve(rows, axis, sleeve, valueRange) {
@@ -2037,6 +2051,14 @@ function sectionMergeIntervals(intervals, gap) {
     }
   }
   return merged;
+}
+
+function sectionIntervalThickness(interval) {
+  if (!interval) return 0;
+  const top = Number(interval.top);
+  const base = Number(interval.base);
+  if (!Number.isFinite(top) || !Number.isFinite(base)) return 0;
+  return Math.abs(base - top);
 }
 
 function sectionNearestInterval(intervals, depth) {
@@ -2679,6 +2701,8 @@ function saveState() {
     sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
     sectionSkipInactive: $('section-skip-inactive').checked,
+    sectionBoundaryGap: $('section-boundary-gap').value,
+    sectionMinLayer: $('section-min-layer').value,
     sectionShowBoundaries: $('section-show-boundaries').checked
   };
   localStorage.setItem('petrelhacker.state', JSON.stringify(data));
@@ -2710,6 +2734,8 @@ function restoreState() {
     if (data.sectionMaxStations) $('section-max-stations').value = data.sectionMaxStations;
     if (data.sectionAxis) $('section-axis').value = data.sectionAxis;
     if (data.sectionSkipInactive !== undefined) $('section-skip-inactive').checked = Boolean(data.sectionSkipInactive);
+    if (data.sectionBoundaryGap !== undefined) $('section-boundary-gap').value = data.sectionBoundaryGap;
+    if (data.sectionMinLayer !== undefined) $('section-min-layer').value = data.sectionMinLayer;
     if (data.sectionShowBoundaries !== undefined) $('section-show-boundaries').checked = Boolean(data.sectionShowBoundaries);
   } catch (error) {
     appendLog(`State restore failed: ${error.message}`);
