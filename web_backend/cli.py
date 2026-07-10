@@ -549,6 +549,10 @@ def _boundary_output_columns(raw: pd.DataFrame, mapping: dict[str, str]) -> dict
         "TVDSS_BOT_TOTAL": "TVDSS_BOT_TOTAL",
         "TVDSS_TOP_LOCAL": "TVDSS_TOP_LOCAL",
         "TVDSS_BOT_LOCAL": "TVDSS_BOT_LOCAL",
+        "TVDSS_TOP_BARRIER_LOCAL": "TVDSS_TOP_BARRIER_LOCAL",
+        "TVDSS_BOT_BARRIER_LOCAL": "TVDSS_BOT_BARRIER_LOCAL",
+        "BARRIER_TOP_LOCAL": "BARRIER_TOP_LOCAL",
+        "BARRIER_BOT_LOCAL": "BARRIER_BOT_LOCAL",
     }
     result = {}
     for key, default in defaults.items():

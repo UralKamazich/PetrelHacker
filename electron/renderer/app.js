@@ -137,6 +137,7 @@ function bindActions() {
     if (state.sectionMesh) redrawCurrentSectionMesh();
     saveState();
   });
+  $('section-barrier-thickness').addEventListener('change', saveState);
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
   ['curve-well', 'curve-port'].forEach(id => {
     $(id).addEventListener('change', () => {
@@ -2035,7 +2036,9 @@ function drawSectionMeshBoundaries(ctx, frame, mesh) {
     TVDSS_TOP_TOTAL: { color: '#f59e0b', label: 'TT' },
     TVDSS_BOT_TOTAL: { color: '#f97316', label: 'BT' },
     TVDSS_TOP_LOCAL: { color: '#2563eb', label: 'TL' },
-    TVDSS_BOT_LOCAL: { color: '#7c3aed', label: 'BL' }
+    TVDSS_BOT_LOCAL: { color: '#7c3aed', label: 'BL' },
+    TVDSS_TOP_BARRIER_LOCAL: { color: '#dc2626', label: 'TB' },
+    TVDSS_BOT_BARRIER_LOCAL: { color: '#991b1b', label: 'BB' }
   };
   ctx.save();
   ctx.beginPath();
@@ -2094,6 +2097,9 @@ function autoPlaceSectionBoundaries() {
     const intervals = sectionMergeIntervals(continuousBodies, settings.gap);
     if (!intervals.length) continue;
     const local = sectionNearestInterval(intervals, sleeve.depth);
+    const barriers = $('section-barrier-thickness').checked
+      ? sectionLocalBarrierBounds(continuousBodies, local)
+      : { topPoint: NaN, botPoint: NaN, topThickness: NaN, botThickness: NaN };
     const totalRange = numericRange(intervals.flatMap(interval => [interval.top, interval.base]));
     boundaries.push({
       well: sleeve.well || (state.sectionResult && state.sectionResult.well_name) || '',
@@ -2107,7 +2113,11 @@ function autoPlaceSectionBoundaries() {
       TVDSS_TOP_TOTAL: totalRange.min,
       TVDSS_BOT_TOTAL: totalRange.max,
       TVDSS_TOP_LOCAL: local ? local.top : totalRange.min,
-      TVDSS_BOT_LOCAL: local ? local.base : totalRange.max
+      TVDSS_BOT_LOCAL: local ? local.base : totalRange.max,
+      TVDSS_TOP_BARRIER_LOCAL: barriers.topPoint,
+      TVDSS_BOT_BARRIER_LOCAL: barriers.botPoint,
+      BARRIER_TOP_LOCAL: barriers.topThickness,
+      BARRIER_BOT_LOCAL: barriers.botThickness
     });
   }
   state.sectionBoundaries = boundaries;
@@ -2172,6 +2182,25 @@ function sectionIntervalThickness(interval) {
   return Math.abs(base - top);
 }
 
+function sectionLocalBarrierBounds(bodies, local) {
+  if (!local) return { topPoint: NaN, botPoint: NaN, topThickness: NaN, botThickness: NaN };
+  const sorted = (bodies || []).slice().sort((left, right) => left.top - right.top);
+  const previous = sorted
+    .filter(item => item.base <= local.top + 1e-6)
+    .sort((left, right) => right.base - left.base)[0] || null;
+  const next = sorted
+    .filter(item => item.top >= local.base - 1e-6)
+    .sort((left, right) => left.top - right.top)[0] || null;
+  const topPoint = previous ? previous.base : local.top;
+  const botPoint = next ? next.top : local.base;
+  return {
+    topPoint,
+    botPoint,
+    topThickness: Number.isFinite(topPoint) ? Math.max(0, local.top - topPoint) : NaN,
+    botThickness: Number.isFinite(botPoint) ? Math.max(0, botPoint - local.base) : NaN
+  };
+}
+
 function sectionNearestInterval(intervals, depth) {
   if (!intervals.length || !Number.isFinite(depth)) return intervals[0] || null;
   let best = intervals[0];
@@ -2230,6 +2259,22 @@ function normalizeBoundaryOrder(boundary) {
   if (Number.isFinite(boundary.TVDSS_TOP_LOCAL) && Number.isFinite(boundary.TVDSS_BOT_LOCAL) && boundary.TVDSS_TOP_LOCAL > boundary.TVDSS_BOT_LOCAL) {
     [boundary.TVDSS_TOP_LOCAL, boundary.TVDSS_BOT_LOCAL] = [boundary.TVDSS_BOT_LOCAL, boundary.TVDSS_TOP_LOCAL];
   }
+  if (Number.isFinite(boundary.TVDSS_TOP_BARRIER_LOCAL) && Number.isFinite(boundary.TVDSS_TOP_LOCAL)) {
+    boundary.TVDSS_TOP_BARRIER_LOCAL = Math.min(boundary.TVDSS_TOP_BARRIER_LOCAL, boundary.TVDSS_TOP_LOCAL);
+  }
+  if (Number.isFinite(boundary.TVDSS_BOT_BARRIER_LOCAL) && Number.isFinite(boundary.TVDSS_BOT_LOCAL)) {
+    boundary.TVDSS_BOT_BARRIER_LOCAL = Math.max(boundary.TVDSS_BOT_BARRIER_LOCAL, boundary.TVDSS_BOT_LOCAL);
+  }
+  updateBoundaryBarrierThickness(boundary);
+}
+
+function updateBoundaryBarrierThickness(boundary) {
+  boundary.BARRIER_TOP_LOCAL = Number.isFinite(boundary.TVDSS_TOP_LOCAL) && Number.isFinite(boundary.TVDSS_TOP_BARRIER_LOCAL)
+    ? Math.max(0, boundary.TVDSS_TOP_LOCAL - boundary.TVDSS_TOP_BARRIER_LOCAL)
+    : NaN;
+  boundary.BARRIER_BOT_LOCAL = Number.isFinite(boundary.TVDSS_BOT_LOCAL) && Number.isFinite(boundary.TVDSS_BOT_BARRIER_LOCAL)
+    ? Math.max(0, boundary.TVDSS_BOT_BARRIER_LOCAL - boundary.TVDSS_BOT_LOCAL)
+    : NaN;
 }
 
 function sectionMeshDepthFromScreen(y, frame, mesh) {
@@ -2261,7 +2306,11 @@ async function saveSectionBoundaries() {
       TVDSS_TOP_TOTAL: boundary.TVDSS_TOP_TOTAL,
       TVDSS_BOT_TOTAL: boundary.TVDSS_BOT_TOTAL,
       TVDSS_TOP_LOCAL: boundary.TVDSS_TOP_LOCAL,
-      TVDSS_BOT_LOCAL: boundary.TVDSS_BOT_LOCAL
+      TVDSS_BOT_LOCAL: boundary.TVDSS_BOT_LOCAL,
+      TVDSS_TOP_BARRIER_LOCAL: boundary.TVDSS_TOP_BARRIER_LOCAL,
+      TVDSS_BOT_BARRIER_LOCAL: boundary.TVDSS_BOT_BARRIER_LOCAL,
+      BARRIER_TOP_LOCAL: boundary.BARRIER_TOP_LOCAL,
+      BARRIER_BOT_LOCAL: boundary.BARRIER_BOT_LOCAL
     }));
     const result = await window.petrel.run('save-section-boundaries', {
       path,
@@ -2891,7 +2940,8 @@ function saveState() {
     sectionSkipInactive: $('section-skip-inactive').checked,
     sectionBoundaryGap: $('section-boundary-gap').value,
     sectionMinLayer: $('section-min-layer').value,
-    sectionShowBoundaries: $('section-show-boundaries').checked
+    sectionShowBoundaries: $('section-show-boundaries').checked,
+    sectionBarrierThickness: $('section-barrier-thickness').checked
   };
   localStorage.setItem('petrelhacker.state', JSON.stringify(data));
 }
@@ -2927,6 +2977,7 @@ function restoreState() {
     if (data.sectionBoundaryGap !== undefined) $('section-boundary-gap').value = data.sectionBoundaryGap;
     if (data.sectionMinLayer !== undefined) $('section-min-layer').value = data.sectionMinLayer;
     if (data.sectionShowBoundaries !== undefined) $('section-show-boundaries').checked = Boolean(data.sectionShowBoundaries);
+    if (data.sectionBarrierThickness !== undefined) $('section-barrier-thickness').checked = Boolean(data.sectionBarrierThickness);
   } catch (error) {
     appendLog(`State restore failed: ${error.message}`);
   }
