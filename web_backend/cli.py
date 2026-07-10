@@ -414,6 +414,7 @@ def model_section(payload: JsonDict) -> None:
     result = extract_well_section(
         path,
         property_uuid,
+        trajectory_model_path=_empty_to_none(payload.get("trajectoryPath")),
         well_name=_empty_to_none(payload.get("wellName")),
         trajectory_uuid=_empty_to_none(payload.get("trajectoryUuid")),
         sample_step=_to_float(payload.get("sampleStep"), 25.0),

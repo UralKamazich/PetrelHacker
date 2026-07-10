@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from core.grid_indexer import FastGridIndexer
-from core.model_reader import resolve_model_path
+from core.model_reader import open_model_reader, resolve_model_path
 from core.resqml_reader import ResqmlReader, WellTrajectoryInfo
 
 
@@ -45,6 +45,7 @@ def extract_well_section(
     model_path: str | Path,
     property_uuid: str,
     *,
+    trajectory_model_path: str | Path | None = None,
     well_name: str | None = None,
     trajectory_uuid: str | None = None,
     sample_step: float = 25.0,
@@ -54,19 +55,23 @@ def extract_well_section(
     progress_callback=None,
 ) -> SectionResult:
     resolved_path = resolve_model_path(model_path)
-    if resolved_path.suffix.lower() != ".epc":
-        raise ValueError("Well trajectory sections require a RESQML .epc model.")
+    resolved_trajectory_path = resolve_model_path(trajectory_model_path) if trajectory_model_path else resolved_path
+    if resolved_trajectory_path.suffix.lower() != ".epc":
+        raise ValueError("Well trajectory source requires a RESQML .epc model.")
 
-    reader = ResqmlReader(resolved_path)
-    reader.open(include_properties=True)
+    reader = open_model_reader(resolved_path)
     grids = reader.list_grids()
     if not grids:
         raise ValueError("No grids found in model.")
     reader.select_grid(grids[0].uuid)
 
-    trajectory = _select_trajectory(reader.list_well_trajectories(), well_name, trajectory_uuid)
+    trajectory_reader = reader if isinstance(reader, ResqmlReader) and resolved_trajectory_path == resolved_path else ResqmlReader(resolved_trajectory_path)
+    if trajectory_reader is not reader:
+        trajectory_reader.open(include_properties=False)
+
+    trajectory = _select_trajectory(trajectory_reader.list_well_trajectories(), well_name, trajectory_uuid)
     prop = _select_property(reader.list_properties(), property_uuid)
-    points = reader.get_well_trajectory_points(trajectory.uuid)
+    points = trajectory_reader.get_well_trajectory_points(trajectory.uuid)
     if len(points) < 2:
         raise ValueError(f"Trajectory has fewer than two points: {trajectory.well_name}")
 
@@ -134,6 +139,11 @@ def extract_well_section(
 
 
 def _read_section_columns(reader, prop, grid, columns: set[tuple[int, int]]):
+    if not isinstance(reader, ResqmlReader) and all(
+        hasattr(reader, name) for name in ("get_property_column_values", "get_cell_geometry_column", "get_cell_active_column")
+    ):
+        return _read_section_columns_via_reader(reader, prop, columns)
+
     if reader.h5_path is None:
         raise ValueError("H5 file was not found next to EPC.")
     if not prop.hdf_paths:
@@ -165,6 +175,36 @@ def _read_section_columns(reader, prop, grid, columns: set[tuple[int, int]]):
             active = _active_column_from_dataset(active_dataset, i, j, ni, nj, nk)
             cache[(i, j)] = (values, geometry, active)
     return cache
+
+
+def _read_section_columns_via_reader(reader, prop, columns: set[tuple[int, int]]):
+    cache = {}
+    for i, j in columns:
+        values = _safe_float_array(reader.get_property_column_values(prop.uuid, i, j))
+        geometry = reader.get_cell_geometry_column(i, j)
+        active = reader.get_cell_active_column(i, j)
+        active_values = np.asarray(active, dtype=bool).reshape(-1) if active is not None else None
+        cache[(i, j)] = (values.reshape(-1), geometry, active_values)
+    return cache
+
+
+def _safe_float_array(values) -> np.ndarray:
+    converted = []
+    for value in np.asarray(values, dtype=object).reshape(-1):
+        if value is None:
+            converted.append(np.nan)
+            continue
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() in {"nan", "none", "null", "undefined"}:
+                converted.append(np.nan)
+                continue
+            value = text.replace(",", ".")
+        try:
+            converted.append(float(value))
+        except (TypeError, ValueError):
+            converted.append(np.nan)
+    return np.asarray(converted, dtype=float)
 
 
 def _property_column_from_dataset(dataset, i: int, j: int, ni: int, nj: int, nk: int) -> np.ndarray:
@@ -214,6 +254,11 @@ def _geometry_column_from_dataset(dataset, i: int, j: int, ni: int, nj: int, nk:
 
 
 def _geometry_column_depths_at_xy(geometry: dict[str, np.ndarray], x: float, y: float) -> dict[str, list[float]]:
+    if "points" not in geometry:
+        return {
+            "TVD_top": [float(value) for value in geometry.get("TVD_top", [])],
+            "TVD_base": [float(value) for value in geometry.get("TVD_base", [])],
+        }
     points = np.asarray(geometry["points"], dtype=float)
     interface_z = np.asarray([_plane_z_at_xy(interface_points, x, y) for interface_points in points], dtype=float)
     interface_depth = _z_to_depth(interface_z)

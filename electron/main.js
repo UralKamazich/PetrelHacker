@@ -143,7 +143,7 @@ function runBackend(command, payload) {
           if (message.event === 'result') {
             lastResult = message;
           }
-          if (mainWindow) {
+          if (mainWindow && message.event !== 'result') {
             mainWindow.webContents.send('backend:event', Object.assign({ command }, message));
           }
         } catch (error) {

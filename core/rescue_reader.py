@@ -192,10 +192,13 @@ class RescueReader:
             tvd_top = [math.nan] * nk
             tvd_base = [math.nan] * nk
             cell_height = [math.nan] * nk
+            points = None
         else:
-            interfaces = np.nanmean(np.stack(pillar_values), axis=0)
+            pillar_stack = np.stack(pillar_values)
+            interfaces = np.nanmean(pillar_stack, axis=0)
             tvd_top, tvd_base, cell_height = _geometry_from_z_interfaces(interfaces)
-        return {
+            points = self._cell_corner_points(i, j, pillar_stack) if self._xy_bounds is not None else None
+        result = {
             "TVD_top": tvd_top,
             "TVD_base": tvd_base,
             "CellHeight": cell_height,
@@ -203,6 +206,9 @@ class RescueReader:
             "CellSizeJ": [size_j] * nk,
             "CellAreaXY": [size_i * size_j] * nk,
         }
+        if points is not None:
+            result["points"] = points
+        return result
 
     def get_column_centers_xy(self) -> np.ndarray:
         ni, nj, _nk = self._require_shape()
@@ -314,6 +320,26 @@ class RescueReader:
         size_i = abs(xmax - xmin) / max(ni, 1)
         size_j = abs(ymax - ymin) / max(nj, 1)
         return float(size_i), float(size_j)
+
+    def _cell_corner_points(self, i: int, j: int, pillar_z: np.ndarray) -> np.ndarray:
+        ni, nj, _nk = self._require_shape()
+        assert self._xy_bounds is not None
+        xmin, xmax, ymin, ymax = self._xy_bounds
+        x_nodes = np.linspace(xmin, xmax, ni + 1, dtype=float)
+        y_nodes = np.linspace(ymin, ymax, nj + 1, dtype=float)
+        xy = np.asarray(
+            [
+                [x_nodes[i], y_nodes[j]],
+                [x_nodes[i + 1], y_nodes[j]],
+                [x_nodes[i], y_nodes[j + 1]],
+                [x_nodes[i + 1], y_nodes[j + 1]],
+            ],
+            dtype=float,
+        )
+        points = np.empty((pillar_z.shape[1], 4, 3), dtype=float)
+        points[:, :, :2] = xy[None, :, :]
+        points[:, :, 2] = pillar_z[:, ::-1].T
+        return points
 
     def _decoded_property_values(self, property_uuid: str) -> np.ndarray:
         cached = self._decoded_properties.get(property_uuid)
@@ -615,6 +641,8 @@ def _invalid_abs_value_limit(prop: PropertyInfo) -> np.float32:
         return np.float32(360.0)
     if "strain" in text or "eigenvector" in title:
         return np.float32(10.0)
+    if "shmin" in text or "shmax" in text:
+        return np.float32(100000.0)
     return np.float32(1e6)
 
 
@@ -628,6 +656,8 @@ def _valid_value_range(prop: PropertyInfo) -> tuple[np.float32, np.float32] | No
         return np.float32(0.01), np.float32(0.5)
     if "friction angle" in text or title == "fang":
         return np.float32(0.0), np.float32(90.0)
+    if "shmin" in text or "shmax" in text:
+        return np.float32(0.0), np.float32(100000.0)
     return None
 
 

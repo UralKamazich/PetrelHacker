@@ -46,6 +46,8 @@ const state = {
   loadedModels: [],
   sleeves: null,
   selectedWells: [],
+  extractionSelectedProperties: null,
+  columnMapping: {},
   hasSavedWellSelection: false,
   tableColumns: [],
   curveRows: [],
@@ -89,6 +91,9 @@ function bindActions() {
   $('browse-sleeves').addEventListener('click', browseSleeves);
   $('sleeves-path').addEventListener('change', loadSleevesHeaders);
   $('browse-output').addEventListener('click', browseExtractionOutput);
+  ['output-path', 'skip-inactive', 'write-diagnostics', 'parallel-workers'].forEach(id => {
+    $(id).addEventListener('change', saveState);
+  });
   $('well-dropdown-button').addEventListener('click', toggleWellDropdown);
   $('select-all-wells').addEventListener('click', () => setAllWells(true));
   $('clear-wells').addEventListener('click', () => setAllWells(false));
@@ -103,13 +108,6 @@ function bindActions() {
   $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable()));
   $('load-curve-table').addEventListener('click', loadCurveTable);
   $('draw-curves').addEventListener('click', drawCurves);
-  $('section-model').addEventListener('change', () => {
-    clearSectionAutoBounds();
-    renderSectionProperties();
-    state.sectionTrajectories = [];
-    fillSectionWells([]);
-    saveState();
-  });
   ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', clearSectionAutoBounds);
   });
@@ -265,11 +263,13 @@ function selectedWellsForLoadedSleeves(wells) {
 function renderMapping(result) {
   const root = $('mapping-grid');
   root.innerHTML = '';
+  const savedMapping = state.columnMapping || {};
   sleeveMappingTargets.forEach(([target, required]) => {
     const field = document.createElement('label');
     field.className = 'field mapping-field';
+    const selectedColumn = savedMapping[target] || (result.columnMapping && result.columnMapping[target]) || '';
     const options = [''].concat(result.columns || []).map(column => {
-      const selected = result.columnMapping && result.columnMapping[target] === column ? 'selected' : '';
+      const selected = selectedColumn === column ? 'selected' : '';
       return `<option value="${escapeHtml(column)}" ${selected}>${escapeHtml(column || '-')}</option>`;
     }).join('');
     field.innerHTML = `
@@ -279,7 +279,10 @@ function renderMapping(result) {
     root.appendChild(field);
   });
   root.querySelectorAll('[data-map-target]').forEach(select => {
-    select.addEventListener('change', saveState);
+    select.addEventListener('change', () => {
+      state.columnMapping = currentColumnMapping();
+      saveState();
+    });
   });
 }
 
@@ -303,7 +306,7 @@ function currentColumnMapping() {
   document.querySelectorAll('[data-map-target]').forEach(select => {
     if (select.value) mapping[select.dataset.mapTarget] = select.value;
   });
-  return mapping;
+  return Object.keys(mapping).length ? mapping : state.columnMapping || {};
 }
 
 function renderWells() {
@@ -375,7 +378,7 @@ function showWellMatchingModal(fracWells, models) {
   `;
   document.body.appendChild(overlay);
   const modelSelect = overlay.querySelector('#well-match-model');
-  modelSelect.value = currentSectionModel() ? currentSectionModel().label : models[0].label;
+  modelSelect.value = models[0].label;
   let currentTrajectories = [];
 
   const render = async () => {
@@ -531,11 +534,14 @@ function closeWellDropdown() {
 function renderProperties() {
   const root = $('property-table');
   root.innerHTML = '';
+  const saved = state.extractionSelectedProperties;
   state.loadedModels.forEach(model => {
+    const savedForModel = saved && Array.isArray(saved[model.label]) ? new Set(saved[model.label]) : null;
     (model.properties || []).forEach(prop => {
       const row = document.createElement('label');
       row.className = 'property-row';
-      const checked = shouldAutoSelect(prop.title) ? 'checked' : '';
+      const isChecked = savedForModel ? savedForModel.has(prop.uuid) : shouldAutoSelect(prop.title);
+      const checked = isChecked ? 'checked' : '';
       row.innerHTML = `
         <input type="checkbox" ${checked} data-property="${escapeHtml(prop.uuid)}" data-model="${escapeHtml(model.label)}" data-property-title="${escapeHtml(prop.title)}">
         <strong>${escapeHtml(model.label)}</strong>
@@ -547,6 +553,7 @@ function renderProperties() {
   });
   root.querySelectorAll('[data-property]').forEach(input => {
     input.addEventListener('change', () => {
+      state.extractionSelectedProperties = currentExtractionSelectedProperties();
       if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
       saveState();
     });
@@ -554,54 +561,63 @@ function renderProperties() {
 }
 
 function renderSectionModels() {
-  const selected = $('section-model').value;
-  const values = state.loadedModels.map(model => model.label);
-  fillSelect('section-model', values, values.indexOf(selected) >= 0 ? selected : values[0]);
   renderSectionProperties();
 }
 
 function renderSectionProperties() {
-  const model = currentSectionModel();
-  const properties = sectionPropertiesForModel(model);
   const selected = $('section-property').value;
-  const options = properties.map(prop => ({
-    value: prop.uuid,
-    label: prop.title
-  }));
+  const options = sectionPropertyOptions();
   fillSelectOptions('section-property', options, options.some(option => option.value === selected) ? selected : (options[0] && options[0].value));
 }
 
-function sectionPropertiesForModel(model) {
-  if (!model) return [];
-  const properties = model.properties || [];
-  if (!state.sectionUseExtractionSelection) return properties;
-  const selected = new Set(sectionSelectedPropertyUuids(model));
-  if (!selected.size) {
-    appendLog(`Warning: no Extraction properties are selected for ${model.label}; showing all section properties.`);
-    return properties;
+function sectionPropertyOptions() {
+  const selectedSpecs = new Map(selectedModelsWithProperties().map(model => [model.label, new Set(model.selectedPropertyUuids || [])]));
+  const options = [];
+  state.loadedModels.forEach(model => {
+    const selectedForModel = selectedSpecs.get(model.label) || new Set();
+    (model.properties || []).forEach(prop => {
+      if (state.sectionUseExtractionSelection && !selectedForModel.has(prop.uuid)) return;
+      options.push({
+        value: sectionPropertyValue(model, prop),
+        label: `${model.label} - ${prop.title}`
+      });
+    });
+  });
+  if (state.sectionUseExtractionSelection && !options.length) {
+    appendLog('Warning: no selected Extraction properties were found for Sections.');
   }
-  const filtered = properties.filter(prop => selected.has(prop.uuid));
-  if (!filtered.length) {
-    appendLog(`Warning: selected Extraction properties were not found in ${model.label}; showing all section properties.`);
-    return properties;
-  }
-  return filtered;
+  return options;
 }
 
-function sectionSelectedPropertyUuids(model) {
-  const selectedModel = selectedModelsWithProperties().find(item => item.label === model.label || item.path === model.path);
-  return selectedModel ? selectedModel.selectedPropertyUuids || [] : [];
+function sectionPropertyValue(model, prop) {
+  return `${model.path || ''}::${prop.uuid || ''}`;
 }
 
-function currentSectionModel() {
-  const label = $('section-model').value;
-  return state.loadedModels.find(model => model.label === label) || state.loadedModels[0] || null;
+function findSectionPropertyByValue(value) {
+  for (const model of state.loadedModels || []) {
+    for (const prop of model.properties || []) {
+      if (sectionPropertyValue(model, prop) === value || prop.uuid === value) {
+        return { model, property: prop };
+      }
+    }
+  }
+  return null;
 }
 
 function setAllProperties(checked) {
   document.querySelectorAll('[data-property]').forEach(input => input.checked = checked);
+  state.extractionSelectedProperties = currentExtractionSelectedProperties();
   if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
   saveState();
+}
+
+function currentExtractionSelectedProperties() {
+  const selected = {};
+  document.querySelectorAll('[data-property]').forEach(input => {
+    if (!selected[input.dataset.model]) selected[input.dataset.model] = [];
+    if (input.checked) selected[input.dataset.model].push(input.dataset.property);
+  });
+  return Object.keys(selected).length ? selected : state.extractionSelectedProperties || {};
 }
 
 function selectedModelsWithProperties() {
@@ -610,8 +626,9 @@ function selectedModelsWithProperties() {
     if (!byLabel[input.dataset.model]) byLabel[input.dataset.model] = [];
     byLabel[input.dataset.model].push(input.dataset.property);
   });
+  const saved = state.extractionSelectedProperties || {};
   return requestModels().map(model => Object.assign({}, model, {
-    selectedPropertyUuids: byLabel[model.label] || []
+    selectedPropertyUuids: byLabel[model.label] || saved[model.label] || []
   }));
 }
 
@@ -836,8 +853,7 @@ function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, ro
       return Number.isFinite(depth) && Number.isFinite(value) ? depth : NaN;
     }).filter(Number.isFinite);
     if (!depths.length) return null;
-    const min = Math.min.apply(null, depths);
-    const max = Math.max.apply(null, depths);
+    const { min, max } = numericRange(depths);
     return { min, max, span: max - min };
   }).filter(Boolean);
   if (intervals.length) {
@@ -848,8 +864,7 @@ function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, ro
   columns.forEach((column, index) => {
     const values = rows.map(row => numericCell(row[column])).filter(Number.isFinite);
     if (!values.length) return;
-    const min = Math.min.apply(null, values);
-    const max = Math.max.apply(null, values);
+    const { min, max } = numericRange(values);
     const span = max - min;
     const pad = span > 0 ? span * 0.1 : Math.max(Math.abs(max) * 0.1, 1);
     $(`curve-min-${index + 1}`).value = formatInputNumber(min, 4);
@@ -874,8 +889,9 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
   }
   let depthMin = numericInput('curve-depth-min');
   let depthMax = numericInput('curve-depth-max');
-  if (!Number.isFinite(depthMin)) depthMin = Math.min.apply(null, depths);
-  if (!Number.isFinite(depthMax)) depthMax = Math.max.apply(null, depths);
+  const depthRange = numericRange(depths);
+  if (!Number.isFinite(depthMin)) depthMin = depthRange.min;
+  if (!Number.isFinite(depthMax)) depthMax = depthRange.max;
   if (depthMax === depthMin) depthMax = depthMin + 1;
   const colors = ['#2563eb', '#16a34a', '#9333ea', '#f97316'];
   const traces = [];
@@ -901,8 +917,9 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     if (!values.length) return;
     let min = numericInput(`curve-min-${index + 1}`);
     let max = numericInput(`curve-max-${index + 1}`);
-    if (!Number.isFinite(min)) min = Math.min.apply(null, values);
-    if (!Number.isFinite(max)) max = Math.max.apply(null, values);
+    const range = numericRange(values);
+    if (!Number.isFinite(min)) min = range.min;
+    if (!Number.isFinite(max)) max = range.max;
     if (max === min) max = min + 1;
     const shift = Number($(`curve-shift-${index + 1}`).value || 0);
     const axisName = index === 0 ? 'x' : `x${index + 1}`;
@@ -1002,13 +1019,12 @@ function plotEmptyIn(plotId, text) {
 }
 
 async function loadSectionWells() {
-  const model = currentSectionModel();
-  if (!model || !model.path) return fail(new Error('Load models first and select a RESQML model.'));
+  if (!state.loadedModels.length) return fail(new Error('Load models first.'));
   setBusy('Loading wells', 'Reading RESQML trajectories');
   try {
     state.sectionUseExtractionSelection = false;
     renderSectionProperties();
-    state.sectionTrajectories = await loadSectionTrajectories(model);
+    state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
     fillSectionWells(state.sectionTrajectories);
     $('section-summary').textContent = `Trajectories: ${state.sectionTrajectories.length}`;
     setReady(`Well trajectories: ${state.sectionTrajectories.length}`);
@@ -1018,14 +1034,13 @@ async function loadSectionWells() {
 }
 
 async function loadSectionFromExtraction() {
-  const model = currentSectionModel();
-  if (!model || !model.path) return fail(new Error('Load models first and select a RESQML model.'));
+  if (!state.loadedModels.length) return fail(new Error('Load models first.'));
   setBusy('Loading section context', 'Reading Extraction selection');
   try {
     state.sectionUseExtractionSelection = true;
     renderSectionProperties();
     await ensureExtractionWellsLoaded();
-    const trajectories = await loadSectionTrajectories(model);
+    const trajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
     const extractionWells = sectionExtractionWellNames();
     state.sectionTrajectories = await resolveSectionTrajectoriesFromExtraction(trajectories, extractionWells);
     fillSectionWells(state.sectionTrajectories);
@@ -1054,7 +1069,27 @@ async function ensureExtractionWellsLoaded() {
 
 async function loadSectionTrajectories(model) {
   const result = await window.petrel.run('well-trajectories', { path: model.path, includePoints: false });
-  return result.trajectories || [];
+  return annotateSectionTrajectories(result.trajectories || [], model);
+}
+
+async function loadSectionTrajectoriesFromModels(models) {
+  const all = [];
+  for (const model of models || []) {
+    if (!model || !model.path) continue;
+    try {
+      all.push(...await loadSectionTrajectories(model));
+    } catch (error) {
+      appendLog(`Warning: cannot load trajectories from ${model.label}: ${error.message}`);
+    }
+  }
+  return all;
+}
+
+function annotateSectionTrajectories(trajectories, model) {
+  return (trajectories || []).map(item => Object.assign({}, item, {
+    source_model: model.label,
+    source_path: model.path
+  }));
 }
 
 function sectionExtractionWellNames() {
@@ -1110,9 +1145,10 @@ function fillSectionWells(trajectories) {
   const options = sorted.map(item => {
     const name = sectionTrajectoryName(item);
     const hasDuplicates = (nameCounts.get(name) || 0) > 1;
+    const source = item.source_model ? ` - ${item.source_model}` : '';
     return {
-    value: item.uuid,
-      label: hasDuplicates ? `${name} (${item.point_count || '?'} pts)` : name
+      value: sectionTrajectoryValue(item),
+      label: hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`
     };
   });
   fillSelectOptions('section-well', options, options[0] && options[0].value);
@@ -1122,6 +1158,16 @@ function sectionTrajectoryName(item) {
   return String((item && (item.well_name || item.title)) || '').trim() || 'Unnamed well';
 }
 
+function sectionTrajectoryValue(item) {
+  return `${item && item.source_path ? item.source_path : ''}::${item && item.uuid ? item.uuid : ''}`;
+}
+
+function findSectionTrajectoryByValue(value) {
+  return state.sectionTrajectories.find(item => sectionTrajectoryValue(item) === value)
+    || state.sectionTrajectories.find(item => item.uuid === value)
+    || null;
+}
+
 function clearSectionAutoBounds() {
   ['section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).value = '';
@@ -1129,19 +1175,25 @@ function clearSectionAutoBounds() {
 }
 
 async function drawSection() {
-  const model = currentSectionModel();
-  if (!model || !model.path) return fail(new Error('Load models first and select a model.'));
-  const trajectoryUuid = $('section-well').value;
-  if (!trajectoryUuid) return fail(new Error('Load wells and select a trajectory.'));
-  const propertyUuid = $('section-property').value;
-  if (!propertyUuid) return fail(new Error('Select section property.'));
-  await ensureSectionWellNameMapped(trajectoryUuid);
+  const propertySelection = findSectionPropertyByValue($('section-property').value);
+  if (!propertySelection || !propertySelection.model || !propertySelection.model.path) {
+    return fail(new Error('Select section property.'));
+  }
+  const model = propertySelection.model;
+  const trajectoryValue = $('section-well').value;
+  if (!trajectoryValue) return fail(new Error('Load wells and select a trajectory.'));
+  const trajectory = findSectionTrajectoryByValue(trajectoryValue);
+  if (!trajectory) return fail(new Error('Selected trajectory was not found.'));
+  const trajectoryUuid = trajectory.uuid;
+  const propertyUuid = propertySelection.property.uuid;
+  await ensureSectionWellNameMapped(trajectoryValue);
   setBusy('Drawing section', 'Sampling model along trajectory');
   try {
     const result = await window.petrel.run('model-section', {
       path: model.path,
       propertyUuid,
       trajectoryUuid,
+      trajectoryPath: trajectory.source_path || model.path,
       sampleStep: Number($('section-step').value || 25),
       maxStations: Number($('section-max-stations').value || 1200),
       depthOffset: Number(model.depthOffset || 0),
@@ -1159,7 +1211,7 @@ async function drawSection() {
 }
 
 async function ensureSectionWellNameMapped(trajectoryUuid) {
-  const trajectory = state.sectionTrajectories.find(item => item.uuid === trajectoryUuid);
+  const trajectory = findSectionTrajectoryByValue(trajectoryUuid);
   const modelWellName = sectionTrajectoryName(trajectory);
   if (!modelWellName || state.sectionWellNameMap[modelWellName]) return;
   const fracWells = state.sleeves && state.sleeves.wells ? state.sleeves.wells.map(well => well.name) : [];
@@ -1244,20 +1296,37 @@ function paintSection(result) {
   const finiteX = xValues.filter(Number.isFinite);
   const finiteY = yValues.filter(Number.isFinite);
   const finiteValues = values.filter(Number.isFinite);
-  const propertyDepthCoreInterval = sectionPropertyDepthInterval(validRows, 0);
-  const propertyDepthInterval = sectionPropertyDepthInterval(validRows, 30);
+  const propertyDepthCoreIntervalRaw = sectionPropertyDepthInterval(validRows, 0);
+  const sleeveDepthInterval = sectionSleeveDepthInterval(rows, axis, result.sleeveMarkers || [], 50);
+  const propertyDepthCoreInterval = sleeveDepthInterval || propertyDepthCoreIntervalRaw;
+  const propertyDepthInterval = sleeveDepthInterval || sectionPropertyDepthInterval(validRows, 30);
   const displayXInterval = sectionXDisplayInterval(rows, axis, propertyDepthCoreInterval, finiteX);
   let depthMin = numericInput('section-depth-min');
   let depthMax = numericInput('section-depth-max');
-  if (!Number.isFinite(depthMin)) depthMin = propertyDepthCoreInterval.min - 10;
-  if (!Number.isFinite(depthMax)) depthMax = propertyDepthCoreInterval.max + 10;
-  if (!$('section-depth-min').value) $('section-depth-min').value = formatInputNumber(depthMin, 1);
-  if (!$('section-depth-max').value) $('section-depth-max').value = formatInputNumber(depthMax, 1);
+  if (sleeveDepthInterval) {
+    if (!Number.isFinite(depthMin) || depthMin < sleeveDepthInterval.min || depthMin > sleeveDepthInterval.max) depthMin = sleeveDepthInterval.min;
+    if (!Number.isFinite(depthMax) || depthMax > sleeveDepthInterval.max || depthMax < sleeveDepthInterval.min) depthMax = sleeveDepthInterval.max;
+    if (depthMax <= depthMin) {
+      depthMin = sleeveDepthInterval.min;
+      depthMax = sleeveDepthInterval.max;
+    }
+    $('section-depth-min').value = formatInputNumber(depthMin, 1);
+    $('section-depth-max').value = formatInputNumber(depthMax, 1);
+  } else {
+    if (!Number.isFinite(depthMin)) depthMin = propertyDepthCoreInterval.min - 10;
+    if (!Number.isFinite(depthMax)) depthMax = propertyDepthCoreInterval.max + 10;
+    if (!$('section-depth-min').value) $('section-depth-min').value = formatInputNumber(depthMin, 1);
+    if (!$('section-depth-max').value) $('section-depth-max').value = formatInputNumber(depthMax, 1);
+  }
   let valueMin = numericInput('section-value-min');
   let valueMax = numericInput('section-value-max');
   const roundedValues = roundedValueBounds(finiteValues);
   if (!Number.isFinite(valueMin)) valueMin = roundedValues.min;
   if (!Number.isFinite(valueMax)) valueMax = roundedValues.max;
+  if (Number.isFinite(roundedValues.min) && roundedValues.min >= 0 && Number.isFinite(valueMin) && valueMin < 0) {
+    valueMin = roundedValues.min;
+    $('section-value-min').value = formatInputNumber(valueMin, 4);
+  }
   if (!$('section-value-min').value) $('section-value-min').value = formatInputNumber(valueMin, 4);
   if (!$('section-value-max').value) $('section-value-max').value = formatInputNumber(valueMax, 4);
   const common = {
@@ -1281,7 +1350,8 @@ function paintSection(result) {
 
 function sectionPointTrace(common, result) {
   const finiteX = common.xValues.filter(Number.isFinite);
-  const xSpan = Math.max.apply(null, finiteX) - Math.min.apply(null, finiteX);
+  const xRange = numericRange(finiteX);
+  const xSpan = xRange.max - xRange.min;
   const markerSize = xSpan > 0 ? Math.max(4, Math.min(9, 520 / Math.max(60, result.station_count || 1))) : 6;
   return {
     type: 'scatter',
@@ -1324,17 +1394,19 @@ function sectionPropertyDepthInterval(rows, pad) {
   const values = tops.concat(bases);
   if (!values.length) return { min: NaN, max: NaN };
   const padding = Number.isFinite(pad) ? pad : 0;
+  const range = numericRange(values);
   return {
-    min: Math.min.apply(null, values) - padding,
-    max: Math.max.apply(null, values) + padding
+    min: range.min - padding,
+    max: range.max + padding
   };
 }
 
 function roundedValueBounds(values) {
   const finite = values.filter(Number.isFinite);
   if (!finite.length) return { min: NaN, max: NaN };
-  const rawMin = Math.min.apply(null, finite);
-  const rawMax = Math.max.apply(null, finite);
+  const range = numericRange(finite);
+  const rawMin = range.min;
+  const rawMax = range.max;
   const maxAbs = Math.max(Math.abs(rawMin), Math.abs(rawMax));
   const scale = maxAbs < 1 ? 10 : 1;
   return {
@@ -1414,10 +1486,9 @@ function interpolateCrossingX(left, right, targetDepth) {
 function paddedFiniteRange(values, padding) {
   const finite = (values || []).filter(Number.isFinite);
   if (!finite.length) return { min: 0, max: 1 };
-  const minValue = Math.min.apply(null, finite);
-  const maxValue = Math.max.apply(null, finite);
+  const range = numericRange(finite);
   const pad = Number.isFinite(padding) ? padding : 0;
-  return { min: Math.max(0, minValue - pad), max: maxValue + pad };
+  return { min: Math.max(0, range.min - pad), max: range.max + pad };
 }
 
 function sectionTrajectoryPoints(rows, common) {
@@ -1452,6 +1523,28 @@ function sectionTrajectoryDepth(zValue) {
   const z = numericCell(zValue);
   if (!Number.isFinite(z)) return NaN;
   return z < 0 ? -z : z;
+}
+
+function sectionSleeveDepthInterval(rows, axis, markers, padding) {
+  if (!markers || !markers.length) return null;
+  const trajectory = sectionStationTrajectoryPoints(rows, axis)
+    .filter(point => Number.isFinite(point.md))
+    .sort((a, b) => a.md - b.md);
+  if (trajectory.length < 2) return null;
+  const depths = [];
+  markers.forEach(marker => {
+    const md = numericCell(marker.md);
+    if (!Number.isFinite(md)) return;
+    const point = interpolateTrajectoryByMd(trajectory, md);
+    if (point && Number.isFinite(point.depth)) depths.push(point.depth);
+  });
+  if (!depths.length) return null;
+  const range = numericRange(depths);
+  const pad = Number.isFinite(padding) ? padding : 0;
+  return {
+    min: range.min - pad,
+    max: range.max + pad
+  };
 }
 
 function sectionSleevePoints(rows, common, markers) {
@@ -1565,10 +1658,11 @@ function buildSectionLayerMesh(rows, axis, depthMin, depthMax, valueMin, valueMa
   }
 
   const finiteX = xRaw.filter(Number.isFinite);
+  const xRange = numericRange(finiteX);
   return {
     quads,
-    xMin: Number.isFinite(xMin) ? xMin : (finiteX.length ? Math.min.apply(null, finiteX) : 0),
-    xMax: Number.isFinite(xMax) ? xMax : (finiteX.length ? Math.max.apply(null, finiteX) : 1),
+    xMin: Number.isFinite(xMin) ? xMin : (finiteX.length ? xRange.min : 0),
+    xMax: Number.isFinite(xMax) ? xMax : (finiteX.length ? xRange.max : 1),
     yMin: depthMin,
     yMax: depthMax,
     valueMin,
@@ -1830,11 +1924,13 @@ function findSectionMeshQuad(mesh, x, y) {
 }
 
 function polygonBBox(points) {
+  const xRange = numericRange(points.map(point => point.x));
+  const yRange = numericRange(points.map(point => point.y));
   return {
-    minX: Math.min.apply(null, points.map(point => point.x)),
-    maxX: Math.max.apply(null, points.map(point => point.x)),
-    minY: Math.min.apply(null, points.map(point => point.y)),
-    maxY: Math.max.apply(null, points.map(point => point.y))
+    minX: xRange.min,
+    maxX: xRange.max,
+    minY: yRange.min,
+    maxY: yRange.max
   };
 }
 
@@ -2016,7 +2112,8 @@ function buildSectionCurtainGrid(rows, axis, depthMin, depthMax) {
 function monotonicAxisValues(values) {
   if (!values.length) return values;
   const finite = values.filter(Number.isFinite);
-  const span = finite.length ? Math.max.apply(null, finite) - Math.min.apply(null, finite) : 1;
+  const range = numericRange(finite);
+  const span = finite.length ? range.max - range.min : 1;
   const epsilon = Math.max(1e-6, Math.max(1, span) * 1e-9);
   const result = values.slice();
   for (let index = 1; index < result.length; index += 1) {
@@ -2274,17 +2371,23 @@ function appendLog(message) {
 }
 
 function saveState() {
+  state.extractionSelectedProperties = currentExtractionSelectedProperties();
+  state.columnMapping = currentColumnMapping();
   const data = {
     models: state.models,
     sleevesPath: $('sleeves-path').value,
     selectedWells: state.selectedWells,
+    extractionSelectedProperties: state.extractionSelectedProperties,
+    columnMapping: state.columnMapping,
     hasSavedWellSelection: state.hasSavedWellSelection,
     outputPath: $('output-path').value,
+    skipInactive: $('skip-inactive').checked,
+    writeDiagnostics: $('write-diagnostics').checked,
+    parallelWorkers: $('parallel-workers').value,
     metricsExtracted: $('metrics-extracted').value,
     metricsIntervals: $('metrics-intervals').value,
     metricsOutput: $('metrics-output').value,
     curvePath: $('curve-path').value,
-    sectionModel: $('section-model').value,
     sectionWellNameMap: state.sectionWellNameMap,
     sectionStep: $('section-step').value,
     sectionMaxStations: $('section-max-stations').value,
@@ -2299,11 +2402,18 @@ function restoreState() {
     const data = JSON.parse(localStorage.getItem('petrelhacker.state') || '{}');
     if (data.models) state.models = data.models;
     if (Array.isArray(data.selectedWells)) state.selectedWells = data.selectedWells;
+    if (data.extractionSelectedProperties && typeof data.extractionSelectedProperties === 'object') {
+      state.extractionSelectedProperties = data.extractionSelectedProperties;
+    }
+    if (data.columnMapping && typeof data.columnMapping === 'object') state.columnMapping = data.columnMapping;
     if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
     $('sleeves-path').value = data.sleevesPath || '';
     $('output-path').value = basename(data.outputPath || '');
+    if (data.skipInactive !== undefined) $('skip-inactive').checked = Boolean(data.skipInactive);
+    if (data.writeDiagnostics !== undefined) $('write-diagnostics').checked = Boolean(data.writeDiagnostics);
+    if (data.parallelWorkers) $('parallel-workers').value = data.parallelWorkers;
     $('metrics-extracted').value = data.metricsExtracted || '';
     $('metrics-intervals').value = data.metricsIntervals || '';
     $('metrics-output').value = basename(data.metricsOutput || '');
@@ -2338,6 +2448,21 @@ function numericCell(value) {
   if (value === null || value === undefined || value === '') return NaN;
   const number = Number(value);
   return Number.isFinite(number) ? number : NaN;
+}
+
+function numericRange(values) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values || []) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) continue;
+    if (number < min) min = number;
+    if (number > max) max = number;
+  }
+  return {
+    min: min === Infinity ? NaN : min,
+    max: max === -Infinity ? NaN : max
+  };
 }
 
 function numericInput(id) {
