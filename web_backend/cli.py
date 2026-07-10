@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             "well-trajectories",
             "model-section",
             "sleeve-markers",
+            "save-section-boundaries",
         ),
     )
     args = parser.parse_args(argv)
@@ -75,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             "well-trajectories": well_trajectories,
             "model-section": model_section,
             "sleeve-markers": sleeve_markers,
+            "save-section-boundaries": save_section_boundaries,
         }
         handlers[args.command](payload)
         return 0
@@ -482,6 +484,130 @@ def sleeve_markers(payload: JsonDict) -> None:
         for _, row in filtered.iterrows()
     ]
     _emit("result", markers=markers)
+
+
+def save_section_boundaries(payload: JsonDict) -> None:
+    input_path = str(payload.get("path", "")).strip()
+    output_path = str(payload.get("outputPath", "")).strip()
+    records = payload.get("records") or []
+    if not input_path:
+        raise ValueError("Frac-list path is empty.")
+    if not output_path:
+        raise ValueError("Output path is empty.")
+    if not isinstance(records, list) or not records:
+        raise ValueError("No boundary records to save.")
+
+    source_path = output_path if Path(output_path).exists() else input_path
+    raw = read_sleeves_table_raw(source_path)
+    mapping = payload.get("columnMapping") or guess_sleeves_column_mapping(list(raw.columns))
+    normalized = apply_sleeves_column_mapping(raw, mapping)
+    column_targets = _boundary_output_columns(raw, mapping)
+    updated = 0
+
+    if Path(source_path).suffix.lower() in {".xlsx", ".xlsm"} and Path(output_path).suffix.lower() in {".xlsx", ".xlsm"}:
+        updated = _save_boundaries_openpyxl(source_path, output_path, normalized, column_targets, records)
+    else:
+        out = raw.copy()
+        for column in column_targets.values():
+            if column not in out.columns:
+                out[column] = None
+        for record in records:
+            index = _find_boundary_row(normalized, record)
+            if index is None:
+                continue
+            for key, column in column_targets.items():
+                if key in record:
+                    out.at[index, column] = _json_value(record.get(key))
+            updated += 1
+        if Path(output_path).suffix.lower() == ".csv":
+            out.to_csv(output_path, index=False)
+        else:
+            out.to_excel(output_path, index=False)
+
+    _emit("result", outputPath=output_path, rowsUpdated=updated, rowsRequested=len(records))
+
+
+def _boundary_output_columns(raw: pd.DataFrame, mapping: dict[str, str]) -> dict[str, str]:
+    defaults = {
+        "X": "X",
+        "Y": "Y",
+        "TVDSS_PORT": "TVDSS_PORT",
+        "TVDSS_TOP_TOTAL": "TVDSS_TOP_TOTAL",
+        "TVDSS_BOT_TOTAL": "TVDSS_BOT_TOTAL",
+        "TVDSS_TOP_LOCAL": "TVDSS_TOP_LOCAL",
+        "TVDSS_BOT_LOCAL": "TVDSS_BOT_LOCAL",
+    }
+    result = {}
+    for key, default in defaults.items():
+        mapped = mapping.get(key) if isinstance(mapping, dict) else None
+        result[key] = str(mapped) if mapped and mapped in raw.columns else default
+    return result
+
+
+def _save_boundaries_openpyxl(
+    input_path: str,
+    output_path: str,
+    normalized: pd.DataFrame,
+    column_targets: dict[str, str],
+    records: list[object],
+) -> int:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("openpyxl is required to save augmented XLSX frac-list files.") from exc
+
+    workbook = load_workbook(input_path)
+    sheet = workbook.active
+    headers = [str(cell.value) if cell.value is not None else "" for cell in sheet[1]]
+    column_indices = {header: index + 1 for index, header in enumerate(headers) if header}
+    for column in column_targets.values():
+        if column in column_indices:
+            continue
+        headers.append(column)
+        column_indices[column] = len(headers)
+        sheet.cell(row=1, column=len(headers), value=column)
+
+    updated = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        index = _find_boundary_row(normalized, record)
+        if index is None:
+            continue
+        excel_row = int(index) + 2
+        for key, column in column_targets.items():
+            if key in record:
+                sheet.cell(row=excel_row, column=column_indices[column], value=_json_value(record.get(key)))
+        updated += 1
+    workbook.save(output_path)
+    return updated
+
+
+def _find_boundary_row(df: pd.DataFrame, record: dict[str, Any]) -> int | None:
+    if "Well" not in df.columns:
+        return None
+    well_key = _normalize_text(record.get("well"))
+    candidates = df[df["Well"].map(_normalize_text) == well_key]
+    if candidates.empty:
+        return None
+
+    port_value = record.get("port")
+    if "Port" in candidates.columns and port_value is not None:
+        port_key = _normalize_value(port_value)
+        by_port = candidates[candidates["Port"].map(_normalize_value) == port_key]
+        if not by_port.empty:
+            candidates = by_port
+
+    md_value = _to_float(record.get("md"), math.nan)
+    if math.isfinite(md_value) and "MD" in candidates.columns:
+        md_values = pd.to_numeric(candidates["MD"], errors="coerce")
+        if md_values.notna().any():
+            distances = (md_values - md_value).abs()
+            nearest_index = distances.idxmin()
+            if math.isfinite(float(distances.loc[nearest_index])) and float(distances.loc[nearest_index]) <= 0.05:
+                return int(nearest_index)
+
+    return int(candidates.index[0])
 
 
 def _find_md_column(columns: object) -> str | None:

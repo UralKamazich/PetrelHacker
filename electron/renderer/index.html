@@ -19,9 +19,9 @@
         </div>
         <nav class="nav">
           <button class="nav-item active" data-view="extract">Extraction</button>
+          <button class="nav-item" data-view="sections">Sections</button>
           <button class="nav-item" data-view="metrics">Metrics</button>
           <button class="nav-item" data-view="curves">Curves / QC</button>
-          <button class="nav-item" data-view="sections">Sections</button>
           <button class="nav-item" data-view="logs">Logs</button>
         </nav>
         <div class="status-card">
@@ -233,6 +233,14 @@
                 <label class="field"><span>Value max</span><input id="section-value-max" type="number" step="0.01"></label>
               </div>
               <label class="field"><span>X axis</span><select id="section-axis"><option value="horizontal_distance" selected>Horizontal distance</option><option value="distance">3D distance along well</option><option value="md">MD</option></select></label>
+              <div class="section-boundary-toolbar">
+                <button class="soft-button compact" id="section-auto-boundaries" type="button">Auto boundaries</button>
+                <button class="soft-button compact" id="section-save-boundaries" type="button">Save</button>
+              </div>
+              <label class="check-row section-boundary-toggle">
+                <input type="checkbox" id="section-show-boundaries" checked>
+                <span>Show boundary points</span>
+              </label>
               <div class="progress-shell"><div class="progress-bar" id="section-progress"></div></div>
               <div class="section-summary" id="section-summary">Load models, then load wells.</div>
             </section>

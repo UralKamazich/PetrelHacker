@@ -35,8 +35,8 @@ const metadataColumns = new Set([
 const sleeveMappingTargets = [
   ['Well', true],
   ['Port', true],
-  ['X', true],
-  ['Y', true],
+  ['X', false],
+  ['Y', false],
   ['TVDSS_PORT', false],
   ['MD', false]
 ];
@@ -56,7 +56,10 @@ const state = {
   sectionRows: [],
   sectionMesh: null,
   sectionWellNameMap: {},
-  sectionUseExtractionSelection: false
+  sectionUseExtractionSelection: false,
+  sectionBoundaries: [],
+  sectionSavedWells: {},
+  sectionBoundaryDrag: null
 };
 
 const $ = id => document.getElementById(id);
@@ -122,11 +125,18 @@ function bindActions() {
   $('load-section-from-extraction').addEventListener('click', loadSectionFromExtraction);
   $('load-section-wells').addEventListener('click', loadSectionWells);
   $('draw-section').addEventListener('click', drawSection);
+  $('section-auto-boundaries').addEventListener('click', autoPlaceSectionBoundaries);
+  $('section-save-boundaries').addEventListener('click', saveSectionBoundaries);
+  $('section-show-boundaries').addEventListener('change', () => {
+    if (state.sectionMesh) redrawCurrentSectionMesh();
+    saveState();
+  });
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
   ['curve-well', 'curve-port'].forEach(id => $(id).addEventListener('change', drawCurves));
   window.addEventListener('resize', () => {
     if (state.sectionResult) paintSection(state.sectionResult);
   });
+  window.addEventListener('mouseup', stopSectionBoundaryDrag);
   document.addEventListener('click', event => {
     const dropdown = document.querySelector('.well-dropdown');
     if (dropdown && !dropdown.contains(event.target)) closeWellDropdown();
@@ -1130,6 +1140,7 @@ function addSectionTrajectoryMatch(selected, used, trajectory, extractionWell) {
 }
 
 function fillSectionWells(trajectories) {
+  const previous = $('section-well').value;
   const nameCounts = new Map();
   trajectories.forEach(item => {
     const name = sectionTrajectoryName(item);
@@ -1146,12 +1157,14 @@ function fillSectionWells(trajectories) {
     const name = sectionTrajectoryName(item);
     const hasDuplicates = (nameCounts.get(name) || 0) > 1;
     const source = item.source_model ? ` - ${item.source_model}` : '';
+    const saved = state.sectionSavedWells && state.sectionSavedWells[sectionTrajectoryValue(item)] ? ' [saved]' : '';
     return {
       value: sectionTrajectoryValue(item),
-      label: hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`
+      label: (hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`) + saved
     };
   });
-  fillSelectOptions('section-well', options, options[0] && options[0].value);
+  const selected = options.some(option => option.value === previous) ? previous : (options[0] && options[0].value);
+  fillSelectOptions('section-well', options, selected);
 }
 
 function sectionTrajectoryName(item) {
@@ -1172,6 +1185,7 @@ function clearSectionAutoBounds() {
   ['section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).value = '';
   });
+  state.sectionBoundaries = [];
 }
 
 async function drawSection() {
@@ -1202,6 +1216,7 @@ async function drawSection() {
     result.sleeveMarkers = await loadSectionSleeveMarkers(result.well_name);
     state.sectionResult = result;
     state.sectionRows = result.rows || [];
+    state.sectionBoundaries = [];
     paintSection(result);
     setProgress('section-progress', 100);
     setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
@@ -1445,7 +1460,16 @@ function sectionStationTrajectoryPoints(rows, axis) {
     const depth = sectionTrajectoryDepth(row.z);
     const md = numericCell(row.md);
     if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(depth)) return;
-    if (!byStation.has(station)) byStation.set(station, { station, x, depth, md });
+    if (!byStation.has(station)) {
+      byStation.set(station, {
+        station,
+        x,
+        depth,
+        md,
+        worldX: numericCell(row.x),
+        worldY: numericCell(row.y)
+      });
+    }
   });
   return Array.from(byStation.values()).sort((a, b) => a.x - b.x || a.station - b.station);
 }
@@ -1507,7 +1531,9 @@ function sectionTrajectoryPoints(rows, common) {
         depth,
         md: numericCell(row.md),
         distance: numericCell(row.distance),
-        horizontal_distance: numericCell(row.horizontal_distance)
+        horizontal_distance: numericCell(row.horizontal_distance),
+        worldX: numericCell(row.x),
+        worldY: numericCell(row.y)
       });
     }
   });
@@ -1561,9 +1587,12 @@ function sectionSleevePoints(rows, common, markers) {
       if (!point) return null;
       return {
         port: marker.port,
+        well: marker.well,
         md,
         x: point.x,
-        depth: point.depth
+        depth: point.depth,
+        worldX: point.worldX,
+        worldY: point.worldY
       };
     })
     .filter(Boolean);
@@ -1579,11 +1608,18 @@ function interpolateTrajectoryByMd(points, md) {
     const fraction = Math.abs(span) < 1e-9 ? 0 : (md - left.md) / span;
     return {
       x: left.x + (right.x - left.x) * fraction,
-      depth: left.depth + (right.depth - left.depth) * fraction
+      depth: left.depth + (right.depth - left.depth) * fraction,
+      worldX: interpolateOptionalNumber(left.worldX, right.worldX, fraction),
+      worldY: interpolateOptionalNumber(left.worldY, right.worldY, fraction)
     };
   }
   const last = points[points.length - 1];
-  return { x: last.x, depth: last.depth };
+  return { x: last.x, depth: last.depth, worldX: last.worldX, worldY: last.worldY };
+}
+
+function interpolateOptionalNumber(left, right, fraction) {
+  if (Number.isFinite(left) && Number.isFinite(right)) return left + (right - left) * fraction;
+  return Number.isFinite(left) ? left : right;
 }
 
 function renderSectionLayerMesh(common, result) {
@@ -1601,9 +1637,16 @@ function renderSectionLayerMesh(common, result) {
   mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || []);
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
-  canvas.addEventListener('mousemove', event => showSectionMeshTooltip(event, canvas, tooltip, mesh, common));
+  canvas.addEventListener('mousedown', event => startSectionBoundaryDrag(event, canvas, mesh));
+  canvas.addEventListener('mousemove', event => {
+    if (state.sectionBoundaryDrag) {
+      dragSectionBoundary(event, canvas);
+      return;
+    }
+    showSectionMeshTooltip(event, canvas, tooltip, mesh, common);
+  });
   canvas.addEventListener('mouseleave', () => {
-    tooltip.hidden = true;
+    if (!state.sectionBoundaryDrag) tooltip.hidden = true;
   });
 }
 
@@ -1711,6 +1754,7 @@ function drawSectionLayerMesh(canvas, mesh, common, result) {
 
   drawSectionMeshTrajectory(ctx, frame, mesh);
   drawSectionMeshSleeves(ctx, frame, mesh);
+  drawSectionMeshBoundaries(ctx, frame, mesh);
   drawSectionMeshAxes(ctx, frame, mesh, common, result);
   drawSectionMeshColorbar(ctx, frame, mesh, result);
 }
@@ -1867,6 +1911,247 @@ function drawSectionMeshSleeves(ctx, frame, mesh) {
     }
   }
   ctx.restore();
+}
+
+function drawSectionMeshBoundaries(ctx, frame, mesh) {
+  mesh.boundaryHandles = [];
+  if (!$('section-show-boundaries').checked) return;
+  const boundaries = state.sectionBoundaries || [];
+  if (!boundaries.length) return;
+  const styles = {
+    TVDSS_TOP_TOTAL: { color: '#f59e0b', label: 'TT' },
+    TVDSS_BOT_TOTAL: { color: '#f97316', label: 'BT' },
+    TVDSS_TOP_LOCAL: { color: '#2563eb', label: 'TL' },
+    TVDSS_BOT_LOCAL: { color: '#7c3aed', label: 'BL' }
+  };
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(frame.left, frame.top, frame.width, frame.height);
+  ctx.clip();
+  ctx.font = '10px Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  for (const boundary of boundaries) {
+    if (!Number.isFinite(boundary.x) || boundary.x < mesh.xMin || boundary.x > mesh.xMax) continue;
+    const topTotal = boundary.TVDSS_TOP_TOTAL;
+    const botTotal = boundary.TVDSS_BOT_TOTAL;
+    if (Number.isFinite(topTotal) || Number.isFinite(botTotal)) {
+      const y1 = sectionMeshToScreen(boundary.x, Number.isFinite(topTotal) ? topTotal : mesh.yMin, frame, mesh).y;
+      const y2 = sectionMeshToScreen(boundary.x, Number.isFinite(botTotal) ? botTotal : mesh.yMax, frame, mesh).y;
+      const x = sectionMeshToScreen(boundary.x, mesh.yMin, frame, mesh).x;
+      ctx.beginPath();
+      ctx.moveTo(x, Math.max(frame.top, Math.min(frame.bottom, y1)));
+      ctx.lineTo(x, Math.max(frame.top, Math.min(frame.bottom, y2)));
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.35)';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    Object.entries(styles).forEach(([key, style]) => {
+      const depth = boundary[key];
+      if (!Number.isFinite(depth) || depth < mesh.yMin || depth > mesh.yMax) return;
+      const screen = sectionMeshToScreen(boundary.x, depth, frame, mesh);
+      mesh.boundaryHandles.push({ boundary, key, x: screen.x, y: screen.y });
+      ctx.beginPath();
+      ctx.rect(screen.x - 4, screen.y - 4, 8, 8);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = style.color;
+      ctx.stroke();
+      ctx.fillStyle = style.color;
+      ctx.fillText(style.label, screen.x + 7, screen.y);
+    });
+  }
+  ctx.restore();
+}
+
+function autoPlaceSectionBoundaries() {
+  if (!state.sectionMesh || !state.sectionMesh.mesh) return fail(new Error('Draw a section first.'));
+  const { common, mesh } = state.sectionMesh;
+  if (!mesh.sleeves || !mesh.sleeves.length) return fail(new Error('No sleeve markers were loaded for this well.'));
+  const valueRange = numericRange((common.validRows || []).map(row => numericCell(row.value)));
+  const boundaries = [];
+  for (const sleeve of mesh.sleeves) {
+    const cells = sectionBoundaryCellsAtSleeve(common.validRows || [], common.axis, sleeve, valueRange);
+    const intervals = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), 2);
+    if (!intervals.length) continue;
+    const local = sectionNearestInterval(intervals, sleeve.depth);
+    const totalRange = numericRange(intervals.flatMap(interval => [interval.top, interval.base]));
+    boundaries.push({
+      well: sleeve.well || (state.sectionResult && state.sectionResult.well_name) || '',
+      port: sleeve.port,
+      md: sleeve.md,
+      x: sleeve.x,
+      y: sleeve.depth,
+      worldX: sleeve.worldX,
+      worldY: sleeve.worldY,
+      TVDSS_PORT: sleeve.depth,
+      TVDSS_TOP_TOTAL: totalRange.min,
+      TVDSS_BOT_TOTAL: totalRange.max,
+      TVDSS_TOP_LOCAL: local ? local.top : totalRange.min,
+      TVDSS_BOT_LOCAL: local ? local.base : totalRange.max
+    });
+  }
+  state.sectionBoundaries = boundaries;
+  redrawCurrentSectionMesh();
+  setReady(`Auto boundaries: ${boundaries.length} sleeves`);
+}
+
+function sectionBoundaryCellsAtSleeve(rows, axis, sleeve, valueRange) {
+  const stationMap = new Map();
+  for (const row of rows || []) {
+    const station = Number(row.station_index);
+    const x = numericCell(row[axis]);
+    const top = numericCell(row.tvd_top);
+    const base = numericCell(row.tvd_base);
+    const value = numericCell(row.value);
+    if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(top) || !Number.isFinite(base) || !Number.isFinite(value)) continue;
+    if (isUnitScaleRange(valueRange) && value <= 1e-9) continue;
+    if (!stationMap.has(station)) stationMap.set(station, { station, x, cells: [] });
+    stationMap.get(station).cells.push({ top: Math.min(top, base), base: Math.max(top, base), value });
+  }
+  const stations = Array.from(stationMap.values());
+  if (!stations.length) return [];
+  stations.sort((left, right) => Math.abs(left.x - sleeve.x) - Math.abs(right.x - sleeve.x));
+  return stations[0].cells.sort((a, b) => a.top - b.top);
+}
+
+function isUnitScaleRange(range) {
+  return Number.isFinite(range.min) && Number.isFinite(range.max) && range.min >= -0.001 && range.max <= 1.001;
+}
+
+function sectionMergeIntervals(intervals, gap) {
+  const sorted = (intervals || [])
+    .filter(interval => Number.isFinite(interval.top) && Number.isFinite(interval.base))
+    .map(interval => ({ top: Math.min(interval.top, interval.base), base: Math.max(interval.top, interval.base) }))
+    .sort((left, right) => left.top - right.top);
+  const merged = [];
+  for (const interval of sorted) {
+    const last = merged[merged.length - 1];
+    if (!last || interval.top > last.base + gap) {
+      merged.push({ ...interval });
+    } else {
+      last.base = Math.max(last.base, interval.base);
+    }
+  }
+  return merged;
+}
+
+function sectionNearestInterval(intervals, depth) {
+  if (!intervals.length || !Number.isFinite(depth)) return intervals[0] || null;
+  let best = intervals[0];
+  let bestDistance = Infinity;
+  for (const interval of intervals) {
+    const distance = depth >= interval.top && depth <= interval.base
+      ? 0
+      : Math.min(Math.abs(depth - interval.top), Math.abs(depth - interval.base));
+    if (distance < bestDistance) {
+      best = interval;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function startSectionBoundaryDrag(event, canvas, mesh) {
+  if (!$('section-show-boundaries').checked || !mesh.boundaryHandles || !mesh.boundaryHandles.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  let best = null;
+  let bestDistance = Infinity;
+  for (const handle of mesh.boundaryHandles) {
+    const distance = Math.hypot(handle.x - x, handle.y - y);
+    if (distance < bestDistance) {
+      best = handle;
+      bestDistance = distance;
+    }
+  }
+  if (!best || bestDistance > 10) return;
+  state.sectionBoundaryDrag = { boundary: best.boundary, key: best.key };
+  event.preventDefault();
+}
+
+function dragSectionBoundary(event, canvas) {
+  const current = state.sectionMesh;
+  if (!current || !state.sectionBoundaryDrag) return;
+  const rect = canvas.getBoundingClientRect();
+  const y = event.clientY - rect.top;
+  const depth = sectionMeshDepthFromScreen(y, current.mesh.frame, current.mesh);
+  const drag = state.sectionBoundaryDrag;
+  drag.boundary[drag.key] = Math.max(current.mesh.yMin, Math.min(current.mesh.yMax, depth));
+  normalizeBoundaryOrder(drag.boundary);
+  redrawCurrentSectionMesh();
+}
+
+function stopSectionBoundaryDrag() {
+  state.sectionBoundaryDrag = null;
+}
+
+function normalizeBoundaryOrder(boundary) {
+  if (Number.isFinite(boundary.TVDSS_TOP_TOTAL) && Number.isFinite(boundary.TVDSS_BOT_TOTAL) && boundary.TVDSS_TOP_TOTAL > boundary.TVDSS_BOT_TOTAL) {
+    [boundary.TVDSS_TOP_TOTAL, boundary.TVDSS_BOT_TOTAL] = [boundary.TVDSS_BOT_TOTAL, boundary.TVDSS_TOP_TOTAL];
+  }
+  if (Number.isFinite(boundary.TVDSS_TOP_LOCAL) && Number.isFinite(boundary.TVDSS_BOT_LOCAL) && boundary.TVDSS_TOP_LOCAL > boundary.TVDSS_BOT_LOCAL) {
+    [boundary.TVDSS_TOP_LOCAL, boundary.TVDSS_BOT_LOCAL] = [boundary.TVDSS_BOT_LOCAL, boundary.TVDSS_TOP_LOCAL];
+  }
+}
+
+function sectionMeshDepthFromScreen(y, frame, mesh) {
+  const fraction = (y - frame.top) / (frame.height || 1);
+  return mesh.yMin + fraction * (mesh.yMax - mesh.yMin);
+}
+
+function redrawCurrentSectionMesh() {
+  const current = state.sectionMesh;
+  const canvas = document.querySelector('#section-plot canvas');
+  if (!current || !canvas) return;
+  drawSectionLayerMesh(canvas, current.mesh, current.common, current.result);
+}
+
+async function saveSectionBoundaries() {
+  if (!state.sectionBoundaries || !state.sectionBoundaries.length) return fail(new Error('Place boundary points first.'));
+  const path = $('sleeves-path').value.trim();
+  if (!path) return fail(new Error('Select frac-list on Extraction page first.'));
+  const outputPath = sectionBoundaryOutputPath(path);
+  setBusy('Saving boundaries', basename(outputPath));
+  try {
+    const records = state.sectionBoundaries.map(boundary => ({
+      well: boundary.well,
+      port: boundary.port,
+      md: boundary.md,
+      X: boundary.worldX,
+      Y: boundary.worldY,
+      TVDSS_PORT: boundary.TVDSS_PORT,
+      TVDSS_TOP_TOTAL: boundary.TVDSS_TOP_TOTAL,
+      TVDSS_BOT_TOTAL: boundary.TVDSS_BOT_TOTAL,
+      TVDSS_TOP_LOCAL: boundary.TVDSS_TOP_LOCAL,
+      TVDSS_BOT_LOCAL: boundary.TVDSS_BOT_LOCAL
+    }));
+    const result = await window.petrel.run('save-section-boundaries', {
+      path,
+      outputPath,
+      columnMapping: currentColumnMapping(),
+      records
+    });
+    const selected = $('section-well').value;
+    if (selected) state.sectionSavedWells[selected] = true;
+    fillSectionWells(state.sectionTrajectories);
+    saveState();
+    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows`);
+    appendLog(`Section boundaries saved: ${result.outputPath || outputPath}`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function sectionBoundaryOutputPath(path) {
+  const dir = dirname(path);
+  const name = stripExtension(basename(path));
+  const filename = name ? `${name}_boundaries.xlsx` : 'frac_list_boundaries.xlsx';
+  return dir ? joinPath(dir, filename) : filename;
 }
 
 function drawPolyline(ctx, points, color, width, alpha) {
@@ -2389,10 +2674,12 @@ function saveState() {
     metricsOutput: $('metrics-output').value,
     curvePath: $('curve-path').value,
     sectionWellNameMap: state.sectionWellNameMap,
+    sectionSavedWells: state.sectionSavedWells,
     sectionStep: $('section-step').value,
     sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
-    sectionSkipInactive: $('section-skip-inactive').checked
+    sectionSkipInactive: $('section-skip-inactive').checked,
+    sectionShowBoundaries: $('section-show-boundaries').checked
   };
   localStorage.setItem('petrelhacker.state', JSON.stringify(data));
 }
@@ -2407,6 +2694,7 @@ function restoreState() {
     }
     if (data.columnMapping && typeof data.columnMapping === 'object') state.columnMapping = data.columnMapping;
     if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
+    if (data.sectionSavedWells && typeof data.sectionSavedWells === 'object') state.sectionSavedWells = data.sectionSavedWells;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
     $('sleeves-path').value = data.sleevesPath || '';
@@ -2422,6 +2710,7 @@ function restoreState() {
     if (data.sectionMaxStations) $('section-max-stations').value = data.sectionMaxStations;
     if (data.sectionAxis) $('section-axis').value = data.sectionAxis;
     if (data.sectionSkipInactive !== undefined) $('section-skip-inactive').checked = Boolean(data.sectionSkipInactive);
+    if (data.sectionShowBoundaries !== undefined) $('section-show-boundaries').checked = Boolean(data.sectionShowBoundaries);
   } catch (error) {
     appendLog(`State restore failed: ${error.message}`);
   }
