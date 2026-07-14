@@ -4,6 +4,56 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow = null;
+let dialogPaths = null;
+
+function dialogPathsFile() {
+  return path.join(app.getPath('userData'), 'dialog-paths.json');
+}
+
+function loadDialogPaths() {
+  if (dialogPaths) return dialogPaths;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(dialogPathsFile(), 'utf8'));
+    dialogPaths = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    dialogPaths = {};
+  }
+  return dialogPaths;
+}
+
+function rememberedDirectory(key) {
+  const directory = loadDialogPaths()[key];
+  try {
+    return directory && fs.statSync(directory).isDirectory() ? directory : undefined;
+  } catch (_error) {
+    return undefined;
+  }
+}
+
+function saveDialogDirectory(key, selectedPath, selectedDirectory = false) {
+  if (!key || !selectedPath) return;
+  const directory = selectedDirectory ? selectedPath : path.dirname(selectedPath);
+  try {
+    if (!fs.statSync(directory).isDirectory()) return;
+  } catch (_error) {
+    return;
+  }
+  loadDialogPaths()[key] = directory;
+  try {
+    fs.mkdirSync(path.dirname(dialogPathsFile()), { recursive: true });
+    fs.writeFileSync(dialogPathsFile(), JSON.stringify(dialogPaths, null, 2), 'utf8');
+  } catch (error) {
+    console.warn(`Cannot save dialog directory: ${error.message}`);
+  }
+}
+
+function dialogDefaultPath(options, key, saveDialog = false) {
+  const requested = options && options.defaultPath ? String(options.defaultPath) : '';
+  const remembered = rememberedDirectory(key);
+  if (!requested) return remembered;
+  if (path.isAbsolute(requested)) return requested;
+  return saveDialog && remembered ? path.join(remembered, requested) : requested;
+}
 
 function projectRoot() {
   return path.resolve(__dirname, '..');
@@ -70,30 +120,38 @@ app.on('activate', () => {
 });
 
 ipcMain.handle('dialog:open-file', async (_event, options) => {
+  const key = options && options.dialogKey ? String(options.dialogKey) : 'open-file';
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
-    filters: options && options.filters ? options.filters : []
+    filters: options && options.filters ? options.filters : [],
+    defaultPath: dialogDefaultPath(options, key)
   });
   if (result.canceled || !result.filePaths.length) return null;
+  saveDialogDirectory(key, result.filePaths[0]);
   return result.filePaths[0];
 });
 
-ipcMain.handle('dialog:open-model', async () => {
+ipcMain.handle('dialog:open-model', async (_event, options) => {
+  const key = options && options.dialogKey ? String(options.dialogKey) : 'models';
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Select model folder',
     buttonLabel: 'Select model folder',
-    properties: ['openDirectory']
+    properties: ['openDirectory'],
+    defaultPath: dialogDefaultPath(options, key)
   });
   if (result.canceled || !result.filePaths.length) return null;
+  saveDialogDirectory(key, result.filePaths[0], true);
   return result.filePaths[0];
 });
 
 ipcMain.handle('dialog:save-file', async (_event, options) => {
+  const key = options && options.dialogKey ? String(options.dialogKey) : 'save-file';
   const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: options && options.defaultPath ? options.defaultPath : undefined,
+    defaultPath: dialogDefaultPath(options, key, true),
     filters: options && options.filters ? options.filters : []
   });
   if (result.canceled || !result.filePath) return null;
+  saveDialogDirectory(key, result.filePath);
   return result.filePath;
 });
 

@@ -105,12 +105,12 @@ function bindActions() {
   $('well-search').addEventListener('input', renderWells);
   $('select-all-properties').addEventListener('click', () => setAllProperties(true));
   $('clear-properties').addEventListener('click', () => setAllProperties(false));
-  $('browse-metrics-extracted').addEventListener('click', async () => setPath('metrics-extracted', await pickTable()));
+  $('browse-metrics-extracted').addEventListener('click', async () => setPath('metrics-extracted', await pickTable('metrics-extracted')));
   $('browse-metrics-intervals').addEventListener('click', browseMetricsIntervals);
   $('browse-metrics-output').addEventListener('click', browseMetricsOutput);
   $('load-metrics-table').addEventListener('click', loadMetricsTable);
   $('run-metrics').addEventListener('click', runMetrics);
-  $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable()));
+  $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable('curve-table')));
   $('load-curve-table').addEventListener('click', loadCurveTable);
   $('draw-curves').addEventListener('click', drawCurves);
   ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-skip-inactive'].forEach(id => {
@@ -187,7 +187,7 @@ function renderModels() {
   root.querySelectorAll('[data-model-browse]').forEach(button => {
     button.addEventListener('click', async () => {
       const index = Number(button.dataset.modelBrowse);
-      const selected = await window.petrel.openModel();
+      const selected = await window.petrel.openModel({ dialogKey: 'models' });
       if (!selected) return;
       state.models[index].path = selected;
       renderModels();
@@ -259,7 +259,7 @@ async function loadSleevesHeaders() {
 }
 
 async function browseSleeves() {
-  const selected = await pickTable();
+  const selected = await pickTable('sleeves');
   if (!selected) return;
   const previous = $('sleeves-path').value.trim();
   $('sleeves-path').value = selected;
@@ -500,7 +500,10 @@ function setWellNameMatch(modelWellName, fracWellName) {
 }
 
 async function loadWellMatchingJson() {
-  const path = await window.petrel.openFile({ filters: [{ name: 'Well matching JSON', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }] });
+  const path = await window.petrel.openFile({
+    dialogKey: 'well-matching',
+    filters: [{ name: 'Well matching JSON', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }]
+  });
   if (!path) return;
   const text = await window.petrel.readTextFile(path);
   const data = JSON.parse(text);
@@ -515,6 +518,7 @@ async function loadWellMatchingJson() {
 
 async function saveWellMatchingJson() {
   const path = await window.petrel.saveFile({
+    dialogKey: 'well-matching',
     defaultPath: 'well_matching.json',
     filters: [{ name: 'Well matching JSON', extensions: ['json'] }]
   });
@@ -2751,26 +2755,33 @@ function guessColumn(columns, needles) {
   return columns.find(column => upperNeedles.some(needle => String(column).toUpperCase().indexOf(needle) >= 0)) || '';
 }
 
-async function pickTable() {
-  return window.petrel.openFile({ filters: [{ name: 'Tables', extensions: ['xlsx', 'xlsm', 'xls', 'csv'] }, { name: 'All files', extensions: ['*'] }] });
+async function pickTable(dialogKey = 'tables') {
+  return window.petrel.openFile({
+    dialogKey,
+    filters: [{ name: 'Tables', extensions: ['xlsx', 'xlsm', 'xls', 'csv'] }, { name: 'All files', extensions: ['*'] }]
+  });
 }
 
-async function saveXlsx(name) {
-  return window.petrel.saveFile({ defaultPath: name, filters: [{ name: 'Excel / CSV', extensions: ['xlsx', 'csv'] }] });
+async function saveXlsx(name, dialogKey = 'xlsx-output') {
+  return window.petrel.saveFile({
+    dialogKey,
+    defaultPath: name,
+    filters: [{ name: 'Excel / CSV', extensions: ['xlsx', 'csv'] }]
+  });
 }
 
 async function browseExtractionOutput() {
   const filename = $('output-path').value.trim() || 'extracted.xlsx';
   const sleevesDir = dirname($('sleeves-path').value.trim());
   const defaultPath = sleevesDir ? joinPath(sleevesDir, filename) : filename;
-  const selected = await saveXlsx(defaultPath);
+  const selected = await saveXlsx(defaultPath, 'extraction-output');
   if (!selected) return;
   $('output-path').value = basename(selected);
   saveState();
 }
 
 async function browseMetricsIntervals() {
-  const selected = await pickTable();
+  const selected = await pickTable('metrics-intervals');
   if (!selected) return;
   $('metrics-intervals').value = selected;
   if (!$('metrics-output').value.trim()) {
@@ -2783,7 +2794,7 @@ async function browseMetricsOutput() {
   const filename = $('metrics-output').value.trim() || metricsDefaultFilename(metricsBaseTablePath()) || 'metrics.xlsx';
   const outputDir = dirname(metricsBaseTablePath());
   const defaultPath = outputDir ? joinPath(outputDir, filename) : filename;
-  const selected = await saveXlsx(defaultPath);
+  const selected = await saveXlsx(defaultPath, 'metrics-output');
   if (!selected) return;
   $('metrics-output').value = basename(selected);
   saveState();
