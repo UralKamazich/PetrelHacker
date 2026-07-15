@@ -61,10 +61,11 @@ function projectRoot() {
 
 function pythonPath() {
   const root = projectRoot();
+  const isWin = process.platform === 'win32';
   const candidates = [
     process.env.PETRELHACKER_PYTHON,
-    path.resolve(root, '..', '.venv', 'Scripts', 'python.exe'),
-    path.join(root, '.venv', 'Scripts', 'python.exe'),
+    path.resolve(root, '..', '.venv', isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python'),
+    path.join(root, '.venv', isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python'),
     'python'
   ].filter(Boolean);
 
@@ -80,9 +81,11 @@ function backendExecutablePath() {
   if (!app.isPackaged && process.env.PETRELHACKER_USE_BUILT_BACKEND !== '1') {
     return null;
   }
+  const isWin = process.platform === 'win32';
+  const exeName = isWin ? 'petrelhacker-backend.exe' : 'petrelhacker-backend';
   const candidates = [
-    path.join(process.resourcesPath || '', 'backend', 'petrelhacker-backend.exe'),
-    path.join(projectRoot(), 'build-electron', 'backend', 'petrelhacker-backend', 'petrelhacker-backend.exe')
+    path.join(process.resourcesPath || '', 'backend', exeName),
+    path.join(projectRoot(), 'build-electron', 'backend', 'petrelhacker-backend', exeName)
   ];
   return candidates.find(candidate => candidate && fs.existsSync(candidate)) || null;
 }
