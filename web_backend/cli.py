@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 from datetime import date, datetime
 from dataclasses import asdict, is_dataclass
 import errno
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import sys
 import traceback
 from typing import Any, Callable
@@ -58,7 +62,10 @@ def main(argv: list[str] | None = None) -> int:
             "well-trajectories",
             "model-section",
             "sleeve-markers",
+            "load-section-boundaries",
             "save-section-boundaries",
+            "save-section-cache",
+            "clear-section-cache",
         ),
     )
     args = parser.parse_args(argv)
@@ -76,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
             "well-trajectories": well_trajectories,
             "model-section": model_section,
             "sleeve-markers": sleeve_markers,
+            "load-section-boundaries": load_section_boundaries,
             "save-section-boundaries": save_section_boundaries,
+            "save-section-cache": save_section_cache,
+            "clear-section-cache": clear_section_cache,
         }
         handlers[args.command](payload)
         return 0
@@ -418,6 +428,16 @@ def model_section(payload: JsonDict) -> None:
         value = int((current / total) * 100) if total else 0
         _emit("progress", value=value, current=current, total=total)
 
+    cache_key = _section_cache_key(payload)
+    cached = _load_section_cache(cache_key)
+    if cached is not None:
+        _emit("log", message="Loaded section from cache.")
+        _emit("progress", value=100)
+        _emit("result", **_clean_section_cache_result(cached))
+        return
+    if bool(payload.get("cacheOnly", False)):
+        raise ValueError("Cached section was not found. Use Draw section to build it.")
+
     _emit("log", message="Building section along well trajectory...")
     result = extract_well_section(
         path,
@@ -432,8 +452,11 @@ def model_section(payload: JsonDict) -> None:
         extra_md_values=_float_list(payload.get("extraMds")),
         progress_callback=progress,
     )
+    result_payload = _dataclass_dict(result)
+    if bool(payload.get("saveCache", False)):
+        _save_section_cache(cache_key, result_payload)
     _emit("progress", value=100)
-    _emit("result", **_dataclass_dict(result))
+    _emit("result", **result_payload)
 
 
 def sleeve_markers(payload: JsonDict) -> None:
@@ -538,6 +561,160 @@ def save_section_boundaries(payload: JsonDict) -> None:
     if skipped:
         _emit("log", message=f"Warning: boundary rows were not matched and were skipped: {len(skipped)}.")
     _emit("result", outputPath=output_path, rowsUpdated=updated, rowsRequested=len(records), rowsSkipped=len(skipped), skipped=skipped[:20])
+
+
+def load_section_boundaries(payload: JsonDict) -> None:
+    path = str(payload.get("path", "")).strip()
+    well_name = str(payload.get("wellName", "")).strip()
+    if not path or not Path(path).exists():
+        _emit("result", records=[])
+        return
+    raw = read_sleeves_table_raw(path)
+    mapping = payload.get("columnMapping") or guess_sleeves_column_mapping(list(raw.columns))
+    normalized = apply_sleeves_column_mapping(raw, mapping)
+    if "Well" not in normalized.columns:
+        _emit("result", records=[])
+        return
+    well_key = _normalize_text(well_name)
+    rows = normalized[normalized["Well"].map(_normalize_text) == well_key] if well_key else normalized
+    column_targets = _boundary_output_columns(raw, mapping)
+    records: list[JsonDict] = []
+    for index in rows.index:
+        record: JsonDict = {
+            "well": _json_value(normalized.at[index, "Well"]) if "Well" in normalized.columns else None,
+            "port": _json_value(normalized.at[index, "Port"]) if "Port" in normalized.columns else None,
+            "md": _json_value(normalized.at[index, "MD"]) if "MD" in normalized.columns else None,
+            "X": _json_value(normalized.at[index, "X"]) if "X" in normalized.columns else None,
+            "Y": _json_value(normalized.at[index, "Y"]) if "Y" in normalized.columns else None,
+            "TVDSS_PORT": _json_value(normalized.at[index, "TVDSS_PORT"]) if "TVDSS_PORT" in normalized.columns else None,
+        }
+        has_boundary = False
+        for key, column in column_targets.items():
+            if column not in raw.columns:
+                continue
+            value = _json_value(raw.at[index, column])
+            record[key] = value
+            if key.startswith("TVDSS_") and key != "TVDSS_PORT" and math.isfinite(_to_float(value, math.nan)):
+                has_boundary = True
+        if has_boundary:
+            records.append(record)
+    _emit("result", records=records)
+
+
+def clear_section_cache(_payload: JsonDict) -> None:
+    cache_dir = _section_cache_dir()
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    _emit("result", cachePath=str(cache_dir), cleared=True)
+
+
+def save_section_cache(payload: JsonDict) -> None:
+    section_payload = payload.get("sectionPayload")
+    result = payload.get("result")
+    if not isinstance(section_payload, dict):
+        raise ValueError("Section cache payload is missing.")
+    if not isinstance(result, dict):
+        raise ValueError("Section result is missing.")
+    cache_key = _section_cache_key(section_payload)
+    _save_section_cache(cache_key, _clean_section_cache_result(result))
+    _emit("result", cached=True, cacheKey=cache_key)
+
+
+def _section_cache_key(payload: JsonDict) -> str:
+    model_path = resolve_model_path(str(payload.get("path", "")).strip())
+    trajectory_path = resolve_model_path(str(payload.get("trajectoryPath", "")).strip()) if payload.get("trajectoryPath") else model_path
+    data = {
+        "version": 1,
+        "model": _file_cache_identity(model_path),
+        "trajectory": _file_cache_identity(trajectory_path),
+        "propertyUuid": str(payload.get("propertyUuid", "")).strip(),
+        "wellName": _empty_to_none(payload.get("wellName")),
+        "trajectoryUuid": _empty_to_none(payload.get("trajectoryUuid")),
+        "sampleStep": _to_float(payload.get("sampleStep"), 25.0),
+        "depthOffset": _to_float(payload.get("depthOffset"), 0.0),
+        "skipInactive": bool(payload.get("skipInactive", True)),
+        "maxStations": max(50, int(payload.get("maxStations") or 1200)),
+        "extraMds": [round(value, 4) for value in _float_list(payload.get("extraMds"))],
+    }
+    raw = json.dumps(data, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _file_cache_identity(path: Path) -> JsonDict:
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path.resolve()),
+            "mtimeNs": stat.st_mtime_ns,
+            "size": stat.st_size,
+        }
+    except OSError:
+        return {"path": str(path), "mtimeNs": None, "size": None}
+
+
+def _section_cache_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "PetrelHacker" / "section-cache"
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(root) / "PetrelHacker" / "section-cache"
+    root = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(root) / "petrelhacker" / "section-cache"
+
+
+def _section_cache_file(key: str) -> Path:
+    return _section_cache_dir() / f"{key}.json.gz"
+
+
+def _load_section_cache(key: str) -> JsonDict | None:
+    path = _section_cache_file(key)
+    if not path.exists():
+        return None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        os.utime(path, None)
+        result = payload.get("result") if isinstance(payload, dict) else None
+        return _clean_section_cache_result(result) if isinstance(result, dict) else None
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _clean_section_cache_result(result: JsonDict) -> JsonDict:
+    cleaned = dict(result)
+    cleaned.pop("event", None)
+    return cleaned
+
+
+def _save_section_cache(key: str, result: JsonDict) -> None:
+    cache_dir = _section_cache_dir()
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = _section_cache_file(key)
+        with gzip.open(path, "wt", encoding="utf-8") as stream:
+            json.dump({"version": 1, "result": result}, stream, ensure_ascii=True)
+        _prune_section_cache(cache_dir, max_bytes=500 * 1024 * 1024)
+    except Exception as exc:  # noqa: BLE001
+        _emit("log", message=f"Warning: section cache was not saved: {exc}")
+
+
+def _prune_section_cache(cache_dir: Path, max_bytes: int) -> None:
+    files = [path for path in cache_dir.glob("*.json.gz") if path.is_file()]
+    total = sum(path.stat().st_size for path in files)
+    if total <= max_bytes:
+        return
+    for path in sorted(files, key=lambda item: item.stat().st_mtime):
+        try:
+            total -= path.stat().st_size
+            path.unlink()
+        except OSError:
+            pass
+        if total <= max_bytes:
+            break
 
 
 def _boundary_output_columns(raw: pd.DataFrame, mapping: dict[str, str]) -> dict[str, str]:

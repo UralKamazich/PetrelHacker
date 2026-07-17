@@ -60,9 +60,17 @@ const state = {
   sectionWellNameMap: {},
   sectionUseExtractionSelection: false,
   sectionBoundaries: [],
+  sectionBoundaryPath: '',
+  sectionSceneSettings: {},
+  currentSectionSceneKey: '',
+  currentSectionContext: null,
+  currentSectionPayload: null,
   sectionSavedWells: {},
+  sectionCachedWells: {},
+  sectionBoundaryFileName: '',
   sectionBoundaryDrag: null,
-  sectionAxisDrag: null
+  sectionAxisDrag: null,
+  sectionAutoDrawTimer: null
 };
 
 const $ = id => document.getElementById(id);
@@ -120,8 +128,15 @@ function bindActions() {
   ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-axis', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
+  $('section-well').addEventListener('change', scheduleCachedSectionAutoDraw);
   ['section-boundary-gap', 'section-min-layer'].forEach(id => {
     $(id).addEventListener('change', saveState);
+  });
+  $('section-boundary-file').addEventListener('change', () => {
+    state.sectionBoundaryFileName = $('section-boundary-file').value.trim();
+    state.sectionBoundaryPath = sectionBoundaryOutputPathFromInput();
+    state.currentSectionSceneKey = currentSectionSceneKeyForPath(state.sectionBoundaryPath);
+    saveState();
   });
   ['section-axis', 'section-depth-min', 'section-depth-max', 'section-value-min', 'section-value-max'].forEach(id => {
     $(id).addEventListener('change', () => {
@@ -134,6 +149,7 @@ function bindActions() {
   $('draw-section').addEventListener('click', drawSection);
   $('section-auto-boundaries').addEventListener('click', autoPlaceSectionBoundaries);
   $('section-save-boundaries').addEventListener('click', saveSectionBoundaries);
+  $('section-clear-cache').addEventListener('click', clearSectionCache);
   $('section-show-boundaries').addEventListener('change', () => {
     if (state.sectionMesh) redrawCurrentSectionMesh();
     saveState();
@@ -231,6 +247,7 @@ async function loadSleeves() {
       $('output-path').value = basename(suggested.outputPath || '');
     }
     applyMetricsDefaultsFromSleeves(path);
+    updateSectionBoundaryFileDefault();
     saveState();
     setReady(`Sleeves: ${result.rows} rows`);
   } catch (error) {
@@ -252,6 +269,7 @@ async function loadSleevesHeaders() {
       $('output-path').value = basename(suggested.outputPath || '');
     }
     applyMetricsDefaultsFromSleeves(path);
+    updateSectionBoundaryFileDefault();
     saveState();
     setReady(`Sleeves headers: ${result.columns.length} columns`);
   } catch (error) {
@@ -272,6 +290,12 @@ async function browseSleeves() {
 
 function clearSleevesDependentState() {
   state.sleeves = null;
+  state.sectionBoundaryPath = '';
+  state.sectionBoundaryFileName = '';
+  state.currentSectionSceneKey = '';
+  state.currentSectionContext = null;
+  state.currentSectionPayload = null;
+  $('section-boundary-file').value = '';
   renderEmptyMapping();
   $('well-list').innerHTML = '';
   $('well-summary').textContent = 'No sleeves loaded';
@@ -1121,6 +1145,7 @@ async function loadSectionWells() {
     state.sectionUseExtractionSelection = false;
     renderSectionProperties();
     state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+    await refreshSectionSavedWellsFromBoundaryFile();
     fillSectionWells(state.sectionTrajectories);
     $('section-summary').textContent = `Trajectories: ${state.sectionTrajectories.length}`;
     setReady(`Well trajectories: ${state.sectionTrajectories.length}`);
@@ -1139,6 +1164,7 @@ async function loadSectionFromExtraction() {
     const trajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
     const extractionWells = sectionExtractionWellNames();
     state.sectionTrajectories = await resolveSectionTrajectoriesFromExtraction(trajectories, extractionWells);
+    await refreshSectionSavedWellsFromBoundaryFile();
     fillSectionWells(state.sectionTrajectories);
     if (!extractionWells.length) {
       appendLog('Warning: no Extraction wells are selected or loaded; section well list is empty.');
@@ -1243,14 +1269,67 @@ function fillSectionWells(trajectories) {
     const name = sectionTrajectoryName(item);
     const hasDuplicates = (nameCounts.get(name) || 0) > 1;
     const source = item.source_model ? ` - ${item.source_model}` : '';
-    const saved = state.sectionSavedWells && state.sectionSavedWells[sectionTrajectoryValue(item)] ? ' [saved]' : '';
+    const value = sectionTrajectoryValue(item);
+    const points = state.sectionSavedWells && state.sectionSavedWells[value] ? ' [points]' : '';
+    const section = state.sectionCachedWells && state.sectionCachedWells[value] ? ' [section]' : '';
     return {
-      value: sectionTrajectoryValue(item),
-      label: (hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`) + saved
+      value,
+      label: (hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`) + points + section
     };
   });
   const selected = options.some(option => option.value === previous) ? previous : (options[0] && options[0].value);
   fillSelectOptions('section-well', options, selected);
+}
+
+async function refreshSectionSavedWellsFromBoundaryFile() {
+  const path = currentSectionBoundaryPath();
+  if (!path || !state.sectionTrajectories || !state.sectionTrajectories.length) return;
+  try {
+    const loaded = await window.petrel.run('load-section-boundaries', {
+      path,
+      columnMapping: currentColumnMapping()
+    });
+    const savedWellKeys = new Set((loaded.records || []).map(record => normalizeLookupTextSafe(record.well)).filter(Boolean));
+    if (!savedWellKeys.size) return;
+    for (const trajectory of state.sectionTrajectories) {
+      if (sectionTrajectoryMatchesSavedWell(trajectory, savedWellKeys)) {
+        state.sectionSavedWells[sectionTrajectoryValue(trajectory)] = true;
+      }
+    }
+    saveState();
+  } catch (error) {
+    appendLog(`Warning: saved section markers were not loaded: ${error.message}`);
+  }
+}
+
+function sectionTrajectoryMatchesSavedWell(trajectory, savedWellKeys) {
+  const modelName = sectionTrajectoryName(trajectory);
+  const mappedName = state.sectionWellNameMap && state.sectionWellNameMap[modelName] ? state.sectionWellNameMap[modelName] : '';
+  return savedWellKeys.has(normalizeLookupTextSafe(modelName)) || savedWellKeys.has(normalizeLookupTextSafe(mappedName));
+}
+
+function sectionSelectedWellHasCachedSection() {
+  const value = $('section-well').value;
+  return Boolean(value && state.sectionCachedWells && state.sectionCachedWells[value]);
+}
+
+function scheduleCachedSectionAutoDraw() {
+  if (state.sectionAutoDrawTimer) clearTimeout(state.sectionAutoDrawTimer);
+  state.sectionAutoDrawTimer = setTimeout(() => {
+    state.sectionAutoDrawTimer = null;
+    if (!sectionSelectedWellHasCachedSection()) return;
+    if (!$('section-property').value) return;
+    appendLog('Cached section selected; loading section automatically.');
+    drawSection({ cacheOnly: true }).catch(error => {
+      const selected = $('section-well').value;
+      if (selected && state.sectionCachedWells) {
+        delete state.sectionCachedWells[selected];
+        fillSectionWells(state.sectionTrajectories);
+        saveState();
+      }
+      fail(error);
+    });
+  }, 120);
 }
 
 function sectionTrajectoryName(item) {
@@ -1275,7 +1354,8 @@ function clearSectionAutoBounds() {
   state.sectionViewXRange = null;
 }
 
-async function drawSection() {
+async function drawSection(options = {}) {
+  const cacheOnly = Boolean(options.cacheOnly);
   const propertySelection = findSectionPropertyByValue($('section-property').value);
   if (!propertySelection || !propertySelection.model || !propertySelection.model.path) {
     return fail(new Error('Select section property.'));
@@ -1291,7 +1371,7 @@ async function drawSection() {
   const sleeveMarkers = await loadSectionSleeveMarkers(sectionTrajectoryName(trajectory));
   setBusy('Drawing section', 'Sampling model along trajectory');
   try {
-    const result = await window.petrel.run('model-section', {
+    const sectionPayload = {
       path: model.path,
       propertyUuid,
       trajectoryUuid,
@@ -1300,13 +1380,27 @@ async function drawSection() {
       maxStations: Number($('section-max-stations').value || 1200),
       depthOffset: Number(model.depthOffset || 0),
       skipInactive: $('section-skip-inactive').checked,
-      extraMds: sleeveMarkers.map(marker => numericCell(marker.md)).filter(Number.isFinite)
-    });
+      extraMds: sleeveMarkers.map(marker => numericCell(marker.md)).filter(Number.isFinite),
+      cacheOnly
+    };
+    const result = await window.petrel.run('model-section', sectionPayload);
+    delete sectionPayload.cacheOnly;
+    state.currentSectionPayload = sectionPayload;
     result.sleeveMarkers = sleeveMarkers;
     state.sectionResult = result;
     state.sectionRows = result.rows || [];
     state.sectionBoundaries = [];
+    const boundaryPath = currentSectionBoundaryPath();
+    state.currentSectionContext = {
+      modelPath: model.path,
+      propertyUuid,
+      trajectorySourcePath: trajectory.source_path || model.path,
+      trajectoryUuid
+    };
+    state.currentSectionSceneKey = currentSectionSceneKeyForPath(boundaryPath);
+    applySectionSceneSettings(state.currentSectionSceneKey);
     paintSection(result);
+    await restoreSectionBoundariesFromFile(boundaryPath, result, trajectory);
     setProgress('section-progress', 100);
     setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
   } catch (error) {
@@ -1347,6 +1441,178 @@ async function loadSectionSleeveMarkers(wellName) {
     appendLog(`Warning: sleeve markers were not loaded: ${error.message}`);
     return [];
   }
+}
+
+function currentSectionBoundaryPath() {
+  updateSectionBoundaryFileDefault();
+  return sectionBoundaryOutputPathFromInput();
+}
+
+function updateSectionBoundaryFileDefault() {
+  const input = $('section-boundary-file');
+  if (!input) return;
+  const current = input.value.trim();
+  if (current) return;
+  const path = $('sleeves-path').value.trim();
+  if (!path) return;
+  const filename = basename(sectionBoundaryOutputPath(path));
+  input.value = filename;
+  state.sectionBoundaryFileName = filename;
+  state.sectionBoundaryPath = sectionBoundaryOutputPathFromInput();
+}
+
+function sectionBoundaryOutputPathFromInput() {
+  const raw = ($('section-boundary-file') ? $('section-boundary-file').value : '').trim() || state.sectionBoundaryFileName || '';
+  if (!raw) return '';
+  const filename = ensureExcelExtension(raw);
+  state.sectionBoundaryFileName = filename;
+  if ($('section-boundary-file') && $('section-boundary-file').value !== filename) $('section-boundary-file').value = filename;
+  if (isAbsolutePath(filename)) return filename;
+  const baseDir = dirname(state.sectionBoundaryPath || $('sleeves-path').value.trim());
+  return baseDir ? joinPath(baseDir, filename) : filename;
+}
+
+function ensureExcelExtension(filename) {
+  return /\.(xlsx|xlsm)$/i.test(filename) ? filename : `${filename}.xlsx`;
+}
+
+function sectionSceneKey(model, propertyUuid, trajectory, boundaryPath) {
+  const parts = [
+    model && model.path ? model.path : '',
+    propertyUuid || '',
+    trajectory && trajectory.source_path ? trajectory.source_path : '',
+    trajectory && trajectory.uuid ? trajectory.uuid : '',
+    boundaryPath || ''
+  ];
+  return parts.map(value => String(value || '').trim()).join('::');
+}
+
+function currentSectionSceneKeyForPath(boundaryPath) {
+  const context = state.currentSectionContext || {};
+  const parts = [
+    context.modelPath || '',
+    context.propertyUuid || '',
+    context.trajectorySourcePath || '',
+    context.trajectoryUuid || '',
+    boundaryPath || ''
+  ];
+  return parts.map(value => String(value || '').trim()).join('::');
+}
+
+function currentSectionSceneSettings() {
+  return {
+    axis: $('section-axis').value,
+    xRange: state.sectionViewXRange && Number.isFinite(state.sectionViewXRange.min) && Number.isFinite(state.sectionViewXRange.max)
+      ? { min: state.sectionViewXRange.min, max: state.sectionViewXRange.max }
+      : null,
+    depthMin: $('section-depth-min').value,
+    depthMax: $('section-depth-max').value,
+    valueMin: $('section-value-min').value,
+    valueMax: $('section-value-max').value,
+    boundaryGap: $('section-boundary-gap').value,
+    minLayer: $('section-min-layer').value,
+    showBoundaries: $('section-show-boundaries').checked,
+    barrierThickness: $('section-barrier-thickness').checked
+  };
+}
+
+function saveCurrentSectionSceneSettings() {
+  const key = state.currentSectionSceneKey;
+  if (!key) return;
+  state.sectionSceneSettings[key] = currentSectionSceneSettings();
+}
+
+function applySectionSceneSettings(key) {
+  const settings = key && state.sectionSceneSettings ? state.sectionSceneSettings[key] : null;
+  if (!settings) return false;
+  if (settings.axis) $('section-axis').value = settings.axis;
+  if (settings.depthMin !== undefined) $('section-depth-min').value = settings.depthMin;
+  if (settings.depthMax !== undefined) $('section-depth-max').value = settings.depthMax;
+  if (settings.valueMin !== undefined) $('section-value-min').value = settings.valueMin;
+  if (settings.valueMax !== undefined) $('section-value-max').value = settings.valueMax;
+  if (settings.boundaryGap !== undefined) $('section-boundary-gap').value = settings.boundaryGap;
+  if (settings.minLayer !== undefined) $('section-min-layer').value = settings.minLayer;
+  if (settings.showBoundaries !== undefined) $('section-show-boundaries').checked = Boolean(settings.showBoundaries);
+  if (settings.barrierThickness !== undefined) $('section-barrier-thickness').checked = Boolean(settings.barrierThickness);
+  state.sectionViewXRange = settings.xRange && Number.isFinite(Number(settings.xRange.min)) && Number.isFinite(Number(settings.xRange.max))
+    ? { min: Number(settings.xRange.min), max: Number(settings.xRange.max) }
+    : null;
+  appendLog('Restored section scene settings.');
+  return true;
+}
+
+async function restoreSectionBoundariesFromFile(path, result, trajectory) {
+  if (!path || !state.sectionMesh || !state.sectionMesh.mesh) return;
+  const wellName = sectionTrajectoryName(trajectory) || (result && result.well_name) || '';
+  try {
+    const loaded = await window.petrel.run('load-section-boundaries', {
+      path,
+      wellName: state.sectionWellNameMap[wellName] || wellName,
+      columnMapping: currentColumnMapping()
+    });
+    const boundaries = sectionBoundariesFromSavedRecords(loaded.records || [], state.sectionMesh.mesh, result);
+    if (!boundaries.length) return;
+    state.sectionBoundaries = boundaries;
+    redrawCurrentSectionMesh();
+    const selected = $('section-well').value;
+    if (selected) state.sectionSavedWells[selected] = true;
+    fillSectionWells(state.sectionTrajectories);
+    saveState();
+    appendLog(`Restored section boundary points: ${boundaries.length} from ${path}`);
+  } catch (error) {
+    appendLog(`Warning: saved section boundaries were not restored: ${error.message}`);
+  }
+}
+
+function sectionBoundariesFromSavedRecords(records, mesh, result) {
+  const sleeves = mesh && Array.isArray(mesh.sleeves) ? mesh.sleeves : [];
+  const boundaries = [];
+  for (const record of records || []) {
+    const sleeve = findSavedBoundarySleeve(record, sleeves);
+    if (!sleeve) continue;
+    const boundary = {
+      well: record.well || sleeve.well || (result && result.well_name) || '',
+      port: record.port != null ? record.port : sleeve.port,
+      md: Number.isFinite(numericCell(record.md)) ? numericCell(record.md) : sleeve.md,
+      x: sleeve.x,
+      y: sleeve.depth,
+      worldX: Number.isFinite(numericCell(record.X)) ? numericCell(record.X) : sleeve.worldX,
+      worldY: Number.isFinite(numericCell(record.Y)) ? numericCell(record.Y) : sleeve.worldY,
+      TVDSS_PORT: Number.isFinite(numericCell(record.TVDSS_PORT)) ? numericCell(record.TVDSS_PORT) : sleeve.depth,
+      TVDSS_TOP_TOTAL: numericCell(record.TVDSS_TOP_TOTAL),
+      TVDSS_BOT_TOTAL: numericCell(record.TVDSS_BOT_TOTAL),
+      TVDSS_TOP_LOCAL: numericCell(record.TVDSS_TOP_LOCAL),
+      TVDSS_BOT_LOCAL: numericCell(record.TVDSS_BOT_LOCAL),
+      TVDSS_TOP_BARRIER_LOCAL: numericCell(record.TVDSS_TOP_BARRIER_LOCAL),
+      TVDSS_BOT_BARRIER_LOCAL: numericCell(record.TVDSS_BOT_BARRIER_LOCAL),
+      BARRIER_TOP_LOCAL: numericCell(record.BARRIER_TOP_LOCAL),
+      BARRIER_BOT_LOCAL: numericCell(record.BARRIER_BOT_LOCAL)
+    };
+    normalizeBoundaryOrder(boundary);
+    boundaries.push(boundary);
+  }
+  return boundaries;
+}
+
+function findSavedBoundarySleeve(record, sleeves) {
+  if (!sleeves || !sleeves.length) return null;
+  const portKey = normalizeLookupTextSafe(record && record.port);
+  const md = numericCell(record && record.md);
+  const wellKey = normalizeLookupTextSafe(record && record.well);
+  const candidates = sleeves.filter(sleeve => {
+    if (wellKey && normalizeLookupTextSafe(sleeve.well) && normalizeLookupTextSafe(sleeve.well) !== wellKey) return false;
+    if (portKey && normalizeLookupTextSafe(sleeve.port) && normalizeLookupTextSafe(sleeve.port) !== portKey) return false;
+    return true;
+  });
+  const pool = candidates.length ? candidates : sleeves;
+  if (Number.isFinite(md)) {
+    const best = pool
+      .map(sleeve => ({ sleeve, distance: Math.abs(numericCell(sleeve.md) - md) }))
+      .filter(item => Number.isFinite(item.distance))
+      .sort((left, right) => left.distance - right.distance)[0];
+    if (best && best.distance <= 0.5) return best.sleeve;
+  }
+  return pool.length === 1 ? pool[0] : null;
 }
 
 function normalizeLookupText(value) {
@@ -2314,9 +2580,13 @@ async function saveSectionBoundaries() {
   if (!state.sectionBoundaries || !state.sectionBoundaries.length) return fail(new Error('Place boundary points first.'));
   const path = $('sleeves-path').value.trim();
   if (!path) return fail(new Error('Select frac-list on Extraction page first.'));
-  const outputPath = sectionBoundaryOutputPath(path);
+  updateSectionBoundaryFileDefault();
+  const outputPath = sectionBoundaryOutputPathFromInput();
+  if (!outputPath) return fail(new Error('Enter boundary file name.'));
   setBusy('Saving boundaries', basename(outputPath));
   try {
+    state.currentSectionSceneKey = currentSectionSceneKeyForPath(outputPath);
+    saveCurrentSectionSceneSettings();
     const records = state.sectionBoundaries.map(boundary => ({
       well: boundary.well,
       port: boundary.port,
@@ -2344,15 +2614,52 @@ async function saveSectionBoundaries() {
       $('sleeves-path').value = savedPath;
       $('metrics-intervals').value = savedPath;
       state.columnMapping = currentColumnMapping();
+      state.sectionBoundaryPath = savedPath;
     }
+    if (savedPath) state.sectionBoundaryPath = savedPath;
     const selected = $('section-well').value;
     if (selected) state.sectionSavedWells[selected] = true;
+    await saveCurrentSectionCache();
+    if (selected && state.currentSectionPayload && state.sectionResult) state.sectionCachedWells[selected] = true;
     fillSectionWells(state.sectionTrajectories);
     saveState();
     const skipped = Number(result.rowsSkipped || 0);
     setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}`);
     appendLog(`Section boundaries saved: ${savedPath}`);
     if (skipped) appendLog(`Warning: ${skipped} sleeve row(s) were not matched and were not updated.`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function saveCurrentSectionCache() {
+  if (!state.currentSectionPayload || !state.sectionResult) return;
+  try {
+    await window.petrel.run('save-section-cache', {
+      sectionPayload: state.currentSectionPayload,
+      result: sectionCacheResultPayload(state.sectionResult)
+    });
+    appendLog('Section cache saved.');
+  } catch (error) {
+    appendLog(`Warning: section cache was not saved: ${error.message}`);
+  }
+}
+
+function sectionCacheResultPayload(result) {
+  const payload = Object.assign({}, result || {});
+  delete payload.event;
+  return payload;
+}
+
+async function clearSectionCache() {
+  setBusy('Clearing section cache', 'Removing saved section rasters');
+  try {
+    const result = await window.petrel.run('clear-section-cache', {});
+    state.sectionCachedWells = {};
+    fillSectionWells(state.sectionTrajectories);
+    saveState();
+    setReady('Section cache cleared');
+    appendLog(`Section cache cleared: ${result.cachePath || ''}`);
   } catch (error) {
     fail(error);
   }
@@ -3089,6 +3396,11 @@ function saveState() {
     curveSettings: state.curveSettings,
     sectionWellNameMap: state.sectionWellNameMap,
     sectionSavedWells: state.sectionSavedWells,
+    sectionCachedWells: state.sectionCachedWells,
+    sectionCacheLabelVersion: 2,
+    sectionBoundaryPath: state.sectionBoundaryPath,
+    sectionBoundaryFileName: $('section-boundary-file').value,
+    sectionSceneSettings: state.sectionSceneSettings,
     sectionStep: $('section-step').value,
     sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
@@ -3112,6 +3424,18 @@ function restoreState() {
     if (data.columnMapping && typeof data.columnMapping === 'object') state.columnMapping = data.columnMapping;
     if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
     if (data.sectionSavedWells && typeof data.sectionSavedWells === 'object') state.sectionSavedWells = data.sectionSavedWells;
+    if (data.sectionCacheLabelVersion === 2 && data.sectionCachedWells && typeof data.sectionCachedWells === 'object') {
+      state.sectionCachedWells = data.sectionCachedWells;
+    }
+    if (data.sectionBoundaryPath) state.sectionBoundaryPath = data.sectionBoundaryPath;
+    if (data.sectionBoundaryFileName) {
+      state.sectionBoundaryFileName = data.sectionBoundaryFileName;
+      $('section-boundary-file').value = data.sectionBoundaryFileName;
+    } else if (data.sectionBoundaryPath) {
+      state.sectionBoundaryFileName = basename(data.sectionBoundaryPath);
+      $('section-boundary-file').value = state.sectionBoundaryFileName;
+    }
+    if (data.sectionSceneSettings && typeof data.sectionSceneSettings === 'object') state.sectionSceneSettings = data.sectionSceneSettings;
     if (data.curveSettings && typeof data.curveSettings === 'object') state.curveSettings = data.curveSettings;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
