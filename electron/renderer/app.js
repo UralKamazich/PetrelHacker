@@ -61,7 +61,8 @@ const state = {
   sectionUseExtractionSelection: false,
   sectionBoundaries: [],
   sectionSavedWells: {},
-  sectionBoundaryDrag: null
+  sectionBoundaryDrag: null,
+  sectionAxisDrag: null
 };
 
 const $ = id => document.getElementById(id);
@@ -151,7 +152,7 @@ function bindActions() {
   window.addEventListener('resize', () => {
     if (state.sectionResult) paintSection(state.sectionResult);
   });
-  window.addEventListener('mouseup', stopSectionBoundaryDrag);
+  window.addEventListener('mouseup', stopSectionDrag);
   document.addEventListener('click', event => {
     const dropdown = document.querySelector('.well-dropdown');
     if (dropdown && !dropdown.contains(event.target)) closeWellDropdown();
@@ -1754,17 +1755,26 @@ function renderSectionLayerMesh(common, result) {
   mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || [], result);
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
-  canvas.addEventListener('mousedown', event => startSectionBoundaryDrag(event, canvas, mesh));
+  canvas.addEventListener('mousedown', event => {
+    if (startSectionAxisDrag(event, canvas, mesh)) return;
+    startSectionBoundaryDrag(event, canvas, mesh);
+  });
   canvas.addEventListener('wheel', event => zoomSectionMesh(event, canvas, mesh), { passive: false });
   canvas.addEventListener('mousemove', event => {
+    if (state.sectionAxisDrag) {
+      dragSectionAxis(event, canvas);
+      return;
+    }
     if (state.sectionBoundaryDrag) {
       dragSectionBoundary(event, canvas);
       return;
     }
+    updateSectionMeshCursor(event, canvas, mesh);
     showSectionMeshTooltip(event, canvas, tooltip, mesh, common);
   });
   canvas.addEventListener('mouseleave', () => {
-    if (!state.sectionBoundaryDrag) tooltip.hidden = true;
+    if (!state.sectionBoundaryDrag && !state.sectionAxisDrag) tooltip.hidden = true;
+    if (!state.sectionBoundaryDrag && !state.sectionAxisDrag) canvas.style.cursor = '';
   });
 }
 
@@ -2256,6 +2266,13 @@ function stopSectionBoundaryDrag() {
   state.sectionBoundaryDrag = null;
 }
 
+function stopSectionDrag() {
+  state.sectionBoundaryDrag = null;
+  state.sectionAxisDrag = null;
+  const canvas = document.querySelector('#section-plot canvas');
+  if (canvas) canvas.style.cursor = '';
+}
+
 function normalizeBoundaryOrder(boundary) {
   if (Number.isFinite(boundary.TVDSS_TOP_TOTAL) && Number.isFinite(boundary.TVDSS_BOT_TOTAL) && boundary.TVDSS_TOP_TOTAL > boundary.TVDSS_BOT_TOTAL) {
     [boundary.TVDSS_TOP_TOTAL, boundary.TVDSS_BOT_TOTAL] = [boundary.TVDSS_BOT_TOTAL, boundary.TVDSS_TOP_TOTAL];
@@ -2387,21 +2404,148 @@ function sectionMeshPointFromScreen(x, y, frame, mesh) {
   };
 }
 
+function sectionMeshInteractionRegion(x, y, frame) {
+  if (!frame) return null;
+  const insideX = x >= frame.left && x <= frame.right;
+  const insideY = y >= frame.top && y <= frame.bottom;
+  if (insideX && insideY) return { type: 'plot' };
+  if (insideX && y > frame.bottom && y <= frame.bottom + 58) {
+    const fraction = (x - frame.left) / (frame.width || 1);
+    return {
+      type: 'x-axis',
+      mode: fraction < 0.18 ? 'resize-min' : (fraction > 0.82 ? 'resize-max' : 'pan')
+    };
+  }
+  if (insideY && x >= frame.left - 76 && x < frame.left) {
+    const fraction = (y - frame.top) / (frame.height || 1);
+    return {
+      type: 'y-axis',
+      mode: fraction < 0.18 ? 'resize-min' : (fraction > 0.82 ? 'resize-max' : 'pan')
+    };
+  }
+  return null;
+}
+
+function startSectionAxisDrag(event, canvas, mesh) {
+  if (!state.sectionResult || !mesh || !mesh.frame) return false;
+  const rect = canvas.getBoundingClientRect();
+  const screenX = event.clientX - rect.left;
+  const screenY = event.clientY - rect.top;
+  const region = sectionMeshInteractionRegion(screenX, screenY, mesh.frame);
+  if (!region || region.type === 'plot') return false;
+  state.sectionAxisDrag = {
+    type: region.type,
+    mode: region.mode,
+    startX: screenX,
+    startY: screenY,
+    xMin: mesh.xMin,
+    xMax: mesh.xMax,
+    yMin: mesh.yMin,
+    yMax: mesh.yMax
+  };
+  canvas.style.cursor = sectionAxisCursor(region);
+  event.preventDefault();
+  return true;
+}
+
+function dragSectionAxis(event, canvas) {
+  const current = state.sectionMesh;
+  const drag = state.sectionAxisDrag;
+  if (!current || !drag || !current.mesh || !current.mesh.frame) return;
+  const rect = canvas.getBoundingClientRect();
+  const screenX = event.clientX - rect.left;
+  const screenY = event.clientY - rect.top;
+  const frame = current.mesh.frame;
+  if (drag.type === 'x-axis') {
+    const range = sectionDraggedAxisRange(
+      drag.xMin,
+      drag.xMax,
+      screenX - drag.startX,
+      frame.width,
+      drag.mode,
+      5
+    );
+    state.sectionViewXRange = range;
+  } else if (drag.type === 'y-axis') {
+    const range = sectionDraggedAxisRange(
+      drag.yMin,
+      drag.yMax,
+      screenY - drag.startY,
+      frame.height,
+      drag.mode,
+      1
+    );
+    $('section-depth-min').value = formatInputNumber(range.min, 1);
+    $('section-depth-max').value = formatInputNumber(range.max, 1);
+  }
+  event.preventDefault();
+  paintSection(state.sectionResult);
+}
+
+function sectionDraggedAxisRange(minValue, maxValue, pixelDelta, pixelSpan, mode, minSpan) {
+  const span = maxValue - minValue;
+  if (!Number.isFinite(span) || span <= 0 || !Number.isFinite(pixelDelta)) return { min: minValue, max: maxValue };
+  const valueDelta = (pixelDelta / Math.max(1, pixelSpan)) * span;
+  if (mode === 'resize-min') {
+    return sectionNormalizedRange(minValue + valueDelta, maxValue, minSpan);
+  }
+  if (mode === 'resize-max') {
+    return sectionNormalizedRange(minValue, maxValue + valueDelta, minSpan);
+  }
+  return {
+    min: minValue - valueDelta,
+    max: maxValue - valueDelta
+  };
+}
+
+function sectionNormalizedRange(minValue, maxValue, minSpan) {
+  let min = minValue;
+  let max = maxValue;
+  if (min > max) [min, max] = [max, min];
+  if (max - min < minSpan) {
+    const center = (min + max) / 2;
+    min = center - minSpan / 2;
+    max = center + minSpan / 2;
+  }
+  return { min, max };
+}
+
+function updateSectionMeshCursor(event, canvas, mesh) {
+  if (!mesh || !mesh.frame) {
+    canvas.style.cursor = '';
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const region = sectionMeshInteractionRegion(event.clientX - rect.left, event.clientY - rect.top, mesh.frame);
+  canvas.style.cursor = sectionAxisCursor(region);
+}
+
+function sectionAxisCursor(region) {
+  if (!region) return '';
+  if (region.type === 'x-axis') return region.mode === 'pan' ? 'grab' : 'ew-resize';
+  if (region.type === 'y-axis') return region.mode === 'pan' ? 'grab' : 'ns-resize';
+  return 'crosshair';
+}
+
 function zoomSectionMesh(event, canvas, mesh) {
   if (!state.sectionResult || !mesh || !mesh.frame) return;
-  event.preventDefault();
   const rect = canvas.getBoundingClientRect();
   const screenX = event.clientX - rect.left;
   const screenY = event.clientY - rect.top;
   const frame = mesh.frame;
-  if (screenX < frame.left || screenX > frame.right || screenY < frame.top || screenY > frame.bottom) return;
+  const region = sectionMeshInteractionRegion(screenX, screenY, frame);
+  if (!region) return;
+  event.preventDefault();
   const point = sectionMeshPointFromScreen(screenX, screenY, frame, mesh);
   const factor = event.deltaY < 0 ? 0.82 : 1.22;
-  const xRange = sectionZoomRange(mesh.xMin, mesh.xMax, point.x, point.xFraction, factor, 5);
-  const yRange = sectionZoomRange(mesh.yMin, mesh.yMax, point.y, point.yFraction, factor, 1);
-  state.sectionViewXRange = xRange;
-  $('section-depth-min').value = formatInputNumber(yRange.min, 1);
-  $('section-depth-max').value = formatInputNumber(yRange.max, 1);
+  if (region.type === 'plot' || region.type === 'x-axis') {
+    state.sectionViewXRange = sectionZoomRange(mesh.xMin, mesh.xMax, point.x, point.xFraction, factor, 5);
+  }
+  if (region.type === 'plot' || region.type === 'y-axis') {
+    const yRange = sectionZoomRange(mesh.yMin, mesh.yMax, point.y, point.yFraction, factor, 1);
+    $('section-depth-min').value = formatInputNumber(yRange.min, 1);
+    $('section-depth-max').value = formatInputNumber(yRange.max, 1);
+  }
   paintSection(state.sectionResult);
 }
 
