@@ -5,9 +5,10 @@ from pathlib import Path
 import re
 import sqlite3
 
-from core.petrel_grid_reader import PetrelGridReader
+from core.petrel_grid_reader import PetrelGridReader, read_petrel_grid_horizontal_shape
+from core.petrel_model_metadata import read_petrel_object_names
 from core.resqml_reader import GridInfo, PropertyInfo, ResqmlReader
-from core.petrel_property_reader import PetrelPropertyReader
+from core.petrel_property_reader import PetrelPropertyReader, read_petrel_property_shape
 
 
 PETREL_PROJECT_SUFFIX = ".pet"
@@ -83,6 +84,7 @@ class PetrelProjectReader:
         self._property_counts: dict[str, int] = {}
         self._property_names: dict[str, tuple[str, ...]] = {}
         self._geological_grid_uuid: str | None = None
+        self._model_names: dict[str, str] = {}
         self._companion_epc_path: Path | None = None
         self._companion_readers: dict[str, ResqmlReader] = {}
         self._column_centers_cache: dict[str, object] = {}
@@ -105,8 +107,18 @@ class PetrelProjectReader:
 
     def open(self) -> None:
         self.project = resolve_petrel_project_path(self.input_path)
+        object_rows = _query_project_objects(
+            self.data_path,
+            ("PillarGrid2", "FloatProperty", "IntProperty"),
+        )
+        self._model_names = read_petrel_object_names(
+            self.project.ptd_path,
+            [row[1] for row in object_rows],
+        )
         self._grids = self._load_grids()
         self._properties = self._load_properties()
+        self._apply_native_grid_shapes_from_properties()
+        self._apply_native_metadata_summary()
         self._enrich_from_companion_resqml()
         if len(self._grids) == 1:
             self._selected_grid_uuid = self._grids[0].uuid
@@ -240,16 +252,22 @@ class PetrelProjectReader:
         grids: list[GridInfo] = []
         for index, row in enumerate(rows):
             data_pk, droid, blob_type, time_stamp, bytes_size = row
-            title = f"Petrel model {index + 1} - {_format_bytes(bytes_size)}"
-            if time_stamp:
+            try:
+                ni, nj = read_petrel_grid_horizontal_shape(self.data_path, data_pk)
+            except (EOFError, OSError, ValueError):
+                ni, nj = None, None
+            title = self._model_names.get(_plain_uuid(str(droid)))
+            if not title:
+                title = f"Petrel model {index + 1} - {_format_bytes(bytes_size)}"
+            if time_stamp and title.startswith("Petrel model "):
                 title = f"{title} ({time_stamp})"
             grids.append(
                 GridInfo(
                     index=index,
                     title=title,
                     uuid=str(droid),
-                    ni=None,
-                    nj=None,
+                    ni=ni,
+                    nj=nj,
                     nk=None,
                     grid_type=str(blob_type),
                     hdf_paths=(f"Data.ptd:data_pk={data_pk}; bytes={int(bytes_size or 0)}",),
@@ -259,20 +277,38 @@ class PetrelProjectReader:
 
     def _load_properties(self) -> list[PropertyInfo]:
         rows = _query_project_objects(self.data_path, ("FloatProperty", "IntProperty"))
+        grid_by_property = _property_grid_assignments(self.data_path)
+        grids_by_horizontal_shape = {
+            (grid.ni, grid.nj): grid.uuid
+            for grid in self._grids
+            if grid.ni is not None and grid.nj is not None
+        }
         properties: list[PropertyInfo] = []
         for index, row in enumerate(rows):
             data_pk, droid, blob_type, time_stamp, bytes_size = row
-            title = f"{blob_type} {index + 1}"
-            if time_stamp:
+            title = self._model_names.get(_plain_uuid(str(droid)))
+            if not title:
+                title = f"{blob_type} {index + 1}"
+            if time_stamp and title.startswith(("FloatProperty ", "IntProperty ")):
                 title = f"{title} ({time_stamp})"
+            try:
+                ni, nj, nk = read_petrel_property_shape(self.data_path, data_pk)
+                shape = (nk, nj, ni)
+            except (EOFError, OSError, ValueError):
+                ni, nj, nk = None, None, None
+                shape = None
+            supporting_grid_uuid = grids_by_horizontal_shape.get((ni, nj))
+            if supporting_grid_uuid is None:
+                supporting_grid_uuid = grid_by_property.get(_plain_uuid(str(droid)))
             properties.append(
                 PropertyInfo(
                     index=index,
                     title=title,
                     uuid=str(droid),
                     property_type=str(blob_type),
-                    supporting_grid_uuid=None,
+                    supporting_grid_uuid=supporting_grid_uuid,
                     hdf_paths=(f"Data.ptd:data_pk={data_pk}; bytes={int(bytes_size or 0)}",),
+                    shape=shape,
                     dtype="float32" if blob_type == "FloatProperty" else "int32",
                 )
             )
@@ -306,6 +342,39 @@ class PetrelProjectReader:
             matched_names = [prop.title for prop in matched_properties]
             if _has_geological_properties(matched_names) or self._companion_epc_path is None:
                 self._companion_epc_path = epc_path
+
+    def _apply_native_metadata_summary(self) -> None:
+        names_by_grid: dict[str, list[str]] = {}
+        for prop in self._properties:
+            if prop.supporting_grid_uuid:
+                names_by_grid.setdefault(prop.supporting_grid_uuid, []).append(prop.title)
+        for grid in self._grids:
+            names = tuple(names_by_grid.get(grid.uuid, ()))
+            if not names:
+                continue
+            self._property_counts[grid.uuid] = len(names)
+            self._property_names[grid.uuid] = names
+            if _has_geological_properties(list(names)):
+                self._geological_grid_uuid = grid.uuid
+
+    def _apply_native_grid_shapes_from_properties(self) -> None:
+        nk_by_grid: dict[str, int] = {}
+        for prop in self._properties:
+            if prop.supporting_grid_uuid and prop.shape and len(prop.shape) == 3:
+                nk_by_grid.setdefault(prop.supporting_grid_uuid, int(prop.shape[0]))
+        self._grids = [
+            GridInfo(
+                index=grid.index,
+                title=grid.title,
+                uuid=grid.uuid,
+                ni=grid.ni,
+                nj=grid.nj,
+                nk=nk_by_grid.get(grid.uuid, grid.nk),
+                grid_type=grid.grid_type,
+                hdf_paths=grid.hdf_paths,
+            )
+            for grid in self._grids
+        ]
 
     def _apply_companion_metadata(
         self,
@@ -508,6 +577,28 @@ def _query_project_objects(data_path: Path, blob_types: tuple[str, ...]) -> list
             (int(data_pk), str(droid), str(blob_type), str(time_stamp or ""), int(bytes_size or 0))
             for data_pk, droid, blob_type, time_stamp, bytes_size in connection.execute(sql, blob_types)
         ]
+
+
+def _property_grid_assignments(data_path: Path) -> dict[str, str]:
+    with sqlite3.connect(f"file:{data_path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            """
+            select data_pk, droid, blob_type
+              from data
+             where blob_type in ('PillarGrid2', 'FloatProperty', 'IntProperty')
+             order by data_pk
+            """
+        )
+        current_grid: str | None = None
+        previous_type: str | None = None
+        assignments: dict[str, str] = {}
+        for _data_pk, droid, blob_type in rows:
+            if blob_type == "PillarGrid2":
+                current_grid = None if previous_type == "PillarGrid2" else _petrel_droid(str(droid))
+            elif current_grid is not None:
+                assignments[_plain_uuid(str(droid))] = current_grid
+            previous_type = str(blob_type)
+        return assignments
 
 
 def _grid_to_dict(grid: GridInfo) -> dict[str, object]:

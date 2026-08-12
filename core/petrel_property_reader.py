@@ -6,7 +6,7 @@ import struct
 
 import numpy as np
 
-from core.petrel_lz4 import PetrelLz4Blob
+from core.petrel_lz4 import PetrelLz4Blob, read_first_petrel_lz4_block
 
 
 @dataclass(frozen=True)
@@ -136,19 +136,10 @@ class _DecompressedStream:
 
 def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> PetrelPropertyLayout:
     first_block = blob.read_range(0, min(blob.uncompressed_size, 1024 * 1024))
-    names, body_offset = _read_bxml_dictionary(first_block)
     if property_type not in {"FloatProperty", "IntProperty"}:
         raise ValueError(f"Unsupported native Petrel property type: {property_type}")
-    try:
-        cell_size_tag = _tag(names.index("cell_size"))
-        int_tag = _tag(names.index("int"))
-    except ValueError as exc:
-        raise ValueError("Petrel property has no readable cell_size metadata") from exc
-    shape_marker = cell_size_tag + b"\x03" + int_tag + b"\x01\x8d\x03"
-    shape_pos = first_block.find(shape_marker, body_offset)
-    if shape_pos < 0:
-        raise ValueError("Cannot locate Petrel property dimensions in BXML")
-    ni, nj, nk = struct.unpack_from("<III", first_block, shape_pos + len(shape_marker))
+    names, body_offset = _read_bxml_dictionary(first_block)
+    ni, nj, nk = _parse_property_shape_data(first_block, names, body_offset)
     element_count = ni * nj * nk
 
     if property_type == "FloatProperty":
@@ -157,7 +148,7 @@ def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> Petr
         except ValueError as exc:
             raise ValueError("Petrel FloatProperty has no float data tag") from exc
         marker = primitive_tag + b"\x01\x91"
-        marker_pos = first_block.find(marker, shape_pos)
+        marker_pos = first_block.find(marker, body_offset)
         if marker_pos < 0:
             raise ValueError("Cannot locate Petrel float pages in BXML")
         page_capacity, value_offset = _read_varint(first_block, marker_pos + len(marker))
@@ -168,7 +159,7 @@ def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> Petr
             page_tag = _tag(names.index("page"))
         except ValueError as exc:
             raise ValueError("Petrel IntProperty has no page data tag") from exc
-        marker_pos = first_block.find(page_tag, shape_pos)
+        marker_pos = first_block.find(page_tag, body_offset)
         if marker_pos < 0:
             raise ValueError("Cannot locate Petrel integer pages in BXML")
         page_capacity = 512 * 1024
@@ -188,6 +179,30 @@ def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> Petr
         page_stride=page_stride,
         item_size=item_size,
     )
+
+
+def read_petrel_property_shape(data_path: str | Path, data_pk: int) -> tuple[int, int, int]:
+    first_block = read_first_petrel_lz4_block(data_path, data_pk)
+    names, body_offset = _read_bxml_dictionary(first_block)
+    return _parse_property_shape_data(first_block, names, body_offset)
+
+
+def _parse_property_shape_data(
+    first_block: bytes,
+    names: list[str],
+    body_offset: int,
+) -> tuple[int, int, int]:
+    try:
+        cell_size_tag = _tag(names.index("cell_size"))
+        int_tag = _tag(names.index("int"))
+    except ValueError as exc:
+        raise ValueError("Petrel property has no readable cell_size metadata") from exc
+    shape_marker = cell_size_tag + b"\x03" + int_tag + b"\x01\x8d\x03"
+    shape_pos = first_block.find(shape_marker, body_offset)
+    if shape_pos < 0:
+        raise ValueError("Cannot locate Petrel property dimensions in BXML")
+    ni, nj, nk = struct.unpack_from("<III", first_block, shape_pos + len(shape_marker))
+    return ni, nj, nk
 
 
 def _read_bxml_dictionary(data: bytes) -> tuple[list[str], int]:

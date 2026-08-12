@@ -102,6 +102,39 @@ def read_petrel_lz4(data_path: str | Path, data_pk: int, *, max_bytes: int | Non
     return bytes(output)
 
 
+def read_first_petrel_lz4_block(data_path: str | Path, data_pk: int) -> bytes:
+    path = Path(data_path)
+    parts = _blob_part_locations(path, int(data_pk))
+    header = _read_blob_range(path, parts, 0, len(PETREL_LZ4_MAGIC) + 8)
+    if header[: len(PETREL_LZ4_MAGIC)] != PETREL_LZ4_MAGIC:
+        raise ValueError(f"Unsupported Petrel blob compression header: {header[:4]!r}")
+    compressed_size, _checksum = struct.unpack_from("<II", header, len(PETREL_LZ4_MAGIC))
+    compressed = _read_blob_range(path, parts, len(header), compressed_size)
+    return _decompress(compressed, int(data_pk))
+
+
+def read_petrel_lz4_file(path: str | Path, *, max_bytes: int | None = None) -> bytes:
+    """Decompress a standalone Petrel LZ4 container such as Model.ptd."""
+    source = Path(path).read_bytes()
+    if not source.startswith(PETREL_LZ4_MAGIC):
+        raise ValueError(f"Unsupported Petrel file compression header: {source[:4]!r}")
+    output = bytearray()
+    offset = len(PETREL_LZ4_MAGIC)
+    while offset < len(source):
+        if offset + 8 > len(source):
+            raise EOFError("Petrel LZ4 file has a truncated block header")
+        compressed_size, _checksum = struct.unpack_from("<II", source, offset)
+        offset += 8
+        block_end = offset + compressed_size
+        if compressed_size <= 0 or block_end > len(source):
+            raise ValueError(f"Invalid Petrel LZ4 file block size: {compressed_size}")
+        output.extend(_decompress(source[offset:block_end], data_pk=-1))
+        offset = block_end
+        if max_bytes is not None and len(output) > max_bytes:
+            raise ValueError(f"Decompressed Petrel file exceeds the {max_bytes}-byte limit")
+    return bytes(output)
+
+
 class _MultipartBlobReader:
     def __init__(self, connection: sqlite3.Connection, rows: list[tuple[int, int]]) -> None:
         self._connection = connection

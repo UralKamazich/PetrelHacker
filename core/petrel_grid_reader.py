@@ -11,7 +11,7 @@ import tempfile
 
 import numpy as np
 
-from core.petrel_lz4 import PetrelLz4Blob
+from core.petrel_lz4 import PetrelLz4Blob, read_first_petrel_lz4_block
 from core.petrel_property_reader import _read_bxml_dictionary, _read_varint, _tag
 
 
@@ -148,6 +148,15 @@ class PetrelGridReader:
 
 def _parse_horizontal_shape(blob: PetrelLz4Blob) -> tuple[int, int]:
     first_block = blob.read_range(0, min(blob.uncompressed_size, 1024 * 1024))
+    return _parse_horizontal_shape_data(first_block)
+
+
+def read_petrel_grid_horizontal_shape(data_path: str | Path, data_pk: int) -> tuple[int, int]:
+    first_block = read_first_petrel_lz4_block(data_path, data_pk)
+    return _parse_horizontal_shape_data(first_block)
+
+
+def _parse_horizontal_shape_data(first_block: bytes) -> tuple[int, int]:
     names, body_offset = _read_bxml_dictionary(first_block)
     try:
         node_size_tag = _tag(names.index("node_size"))
