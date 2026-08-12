@@ -5,9 +5,18 @@ from pathlib import Path
 import re
 import sqlite3
 
+import numpy as np
+
 from core.petrel_grid_reader import PetrelGridReader, read_petrel_grid_horizontal_shape
-from core.petrel_model_metadata import read_petrel_object_names
-from core.resqml_reader import GridInfo, PropertyInfo, ResqmlReader
+from core.petrel_model_metadata import read_petrel_object_names, read_petrel_parent_names
+from core.petrel_trajectory_reader import read_petrel_trajectory, read_petrel_trajectory_point_count
+from core.resqml_reader import (
+    GridInfo,
+    PropertyInfo,
+    ResqmlReader,
+    WellTrajectoryInfo,
+    WellTrajectoryPoint,
+)
 from core.petrel_property_reader import PetrelPropertyReader, read_petrel_property_shape
 
 
@@ -90,6 +99,8 @@ class PetrelProjectReader:
         self._column_centers_cache: dict[str, object] = {}
         self._native_grid_readers: dict[str, PetrelGridReader] = {}
         self._native_property_readers: dict[str, PetrelPropertyReader] = {}
+        self._trajectories: list[WellTrajectoryInfo] | None = None
+        self._trajectory_data_pks: dict[str, int] = {}
 
     @property
     def epc_path(self) -> Path:
@@ -151,6 +162,44 @@ class PetrelProjectReader:
 
     def list_md_datums(self) -> list[object]:
         return []
+
+    def list_well_trajectories(self) -> list[WellTrajectoryInfo]:
+        if self._trajectories is None:
+            self._load_trajectories()
+        return list(self._trajectories or [])
+
+    def get_well_trajectory_points(self, trajectory_uuid: str) -> list[WellTrajectoryPoint]:
+        normalized = _plain_uuid(trajectory_uuid)
+        info = next(
+            (item for item in self.list_well_trajectories() if _plain_uuid(item.uuid) == normalized),
+            None,
+        )
+        if info is None:
+            raise ValueError(f"Petrel trajectory UUID not found: {trajectory_uuid}")
+        data_pk = self._trajectory_data_pks.get(normalized)
+        if data_pk is None:
+            raise ValueError(f"Petrel trajectory has no Data.ptd object reference: {info.title}")
+        first_md, xyz = read_petrel_trajectory(self.data_path, data_pk)
+        distance = _trajectory_distances(xyz)
+        horizontal_distance = _trajectory_distances(xyz[:, :2])
+        md = first_md + distance
+        tvd = _z_to_depth(xyz[:, 2])
+        return [
+            WellTrajectoryPoint(
+                trajectory_uuid=info.uuid,
+                trajectory_title=info.title,
+                well_name=info.well_name,
+                point_index=index,
+                x=float(values[0]),
+                y=float(values[1]),
+                z=float(values[2]),
+                tvd=float(tvd[index]),
+                md=float(md[index]),
+                distance_along=float(distance[index]),
+                horizontal_distance=float(horizontal_distance[index]),
+            )
+            for index, values in enumerate(xyz)
+        ]
 
     def get_grid_shape(self) -> tuple[int | None, int | None, int | None]:
         self._require_selected_grid()
@@ -313,6 +362,33 @@ class PetrelProjectReader:
                 )
             )
         return properties
+
+    def _load_trajectories(self) -> None:
+        if self.project is None:
+            raise RuntimeError("Petrel project is not opened.")
+        rows = _query_project_objects(self.data_path, ("XYZTrajectoryProviderData",))
+        well_names = read_petrel_parent_names(self.project.ptd_path, [row[1] for row in rows])
+        trajectories: list[WellTrajectoryInfo] = []
+        for data_pk, droid, _blob_type, _time_stamp, _bytes_size in rows:
+            normalized = _plain_uuid(droid)
+            well_name = well_names.get(normalized)
+            if not well_name:
+                continue
+            point_count = read_petrel_trajectory_point_count(self.data_path, data_pk)
+            if point_count is None or point_count < 2:
+                continue
+            self._trajectory_data_pks[normalized] = data_pk
+            trajectories.append(
+                WellTrajectoryInfo(
+                    index=len(trajectories),
+                    title=well_name,
+                    uuid=normalized,
+                    well_name=well_name,
+                    trajectory_type="XYZTrajectoryProviderData",
+                    point_count=point_count,
+                )
+            )
+        self._trajectories = trajectories
 
     def _enrich_from_companion_resqml(self) -> None:
         if self.project is None:
@@ -658,6 +734,20 @@ def _scale_native_property_value(prop: PropertyInfo, value):
     if value == "":
         return value
     return value * _native_property_scale(prop)
+
+
+def _trajectory_distances(points: np.ndarray) -> np.ndarray:
+    values = np.asarray(points, dtype=np.float64)
+    if len(values) == 0:
+        return np.asarray([], dtype=np.float64)
+    increments = np.linalg.norm(np.diff(values, axis=0), axis=1)
+    return np.concatenate(([0.0], np.cumsum(increments)))
+
+
+def _z_to_depth(values: np.ndarray) -> np.ndarray:
+    output = np.asarray(values, dtype=np.float64)
+    finite = output[np.isfinite(output)]
+    return -output if finite.size and float(np.nanmean(finite)) < 0.0 else output
 
 
 def _format_bytes(value: int) -> str:

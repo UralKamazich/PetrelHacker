@@ -4,9 +4,10 @@ import struct
 import uuid
 
 from core.petrel_grid_reader import _parse_horizontal_shape_data, _remove_bxml_stream_metadata
-from core.petrel_model_metadata import extract_petrel_object_names
+from core.petrel_model_metadata import extract_petrel_object_names, extract_petrel_parent_names
 from core.petrel_property_reader import _strip_binary_segment_frame
 from core.petrel_property_reader import _parse_property_shape_data
+from core.petrel_trajectory_reader import _consume_marker, _read_bxml_number
 
 
 def test_strips_binary_page_frame_between_float_bytes():
@@ -55,3 +56,36 @@ def test_parses_grid_horizontal_shape_from_header():
     body = marker + struct.pack("<II", 711, 715) + b"\x01"
 
     assert _parse_horizontal_shape_data(dictionary + body) == (710, 714)
+
+
+def test_extracts_parent_well_name_for_trajectory_guid():
+    well_uuid = uuid.UUID("ba30d4a6-5627-498e-b182-161fa05d5d7a")
+    trajectory_uuid = uuid.UUID("064ed32f-fa0e-474f-a147-5f58ccc6d878")
+    dictionary = b"BXML\x01\xa1\x0aunique_tag\xa1\x04name\xa0"
+    record = (
+        b"\x42\x00\xb1"
+        + well_uuid.bytes_le
+        + b"\x42\x02\x99\x04U202"
+        + b"\x42\x04\xb1"
+        + trajectory_uuid.bytes_le
+    )
+    raw = dictionary + b"\xa2\xa0" + bytes((len(record),)) + record
+
+    assert extract_petrel_parent_names(raw, [str(trajectory_uuid)]) == {
+        str(trajectory_uuid): "U202"
+    }
+
+
+def test_reads_compact_petrel_numbers():
+    assert _read_bxml_number(b"\x81", 0) == (0, 1)
+    assert _read_bxml_number(b"\x89\x55", 0) == (85, 2)
+    assert _read_bxml_number(b"\x8b\xcd\xec", 0) == (-4915, 3)
+    value, offset = _read_bxml_number(b"\x91" + struct.pack("<f", -3721.5), 0)
+    assert value == -3721.5
+    assert offset == 5
+
+
+def test_consumes_bxml_page_frame_inside_marker():
+    data = b"\x42\xa0\xff\x1f\x24\x93"
+
+    assert _consume_marker(data, 0, b"\x42\x24\x93") == len(data)

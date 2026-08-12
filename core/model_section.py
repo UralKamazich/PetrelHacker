@@ -69,8 +69,6 @@ def extract_well_section(
 ) -> SectionResult:
     resolved_path = resolve_model_path(model_path)
     resolved_trajectory_path = resolve_model_path(trajectory_model_path) if trajectory_model_path else resolved_path
-    if resolved_trajectory_path.suffix.lower() != ".epc":
-        raise ValueError("Well trajectory source requires a RESQML .epc model.")
 
     reader = open_model_reader(resolved_path)
     grids = reader.list_grids()
@@ -79,9 +77,12 @@ def extract_well_section(
     grid = _select_grid(grids, grid_uuid)
     reader.select_grid(grid.uuid)
 
-    trajectory_reader = reader if isinstance(reader, ResqmlReader) and resolved_trajectory_path == resolved_path else ResqmlReader(resolved_trajectory_path)
-    if trajectory_reader is not reader:
-        trajectory_reader.open(include_properties=False, validate_with_resqpy=False)
+    trajectory_reader = reader if resolved_trajectory_path == resolved_path else open_model_reader(resolved_trajectory_path)
+    if not all(
+        hasattr(trajectory_reader, name)
+        for name in ("list_well_trajectories", "get_well_trajectory_points")
+    ):
+        raise ValueError("Selected model has no readable well trajectories.")
 
     trajectory = _select_trajectory(trajectory_reader.list_well_trajectories(), well_name, trajectory_uuid)
     prop = _select_property(reader.list_properties(), property_uuid)
