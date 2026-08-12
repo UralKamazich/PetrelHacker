@@ -2193,12 +2193,10 @@ function renderSectionLayerMesh(common, result) {
   const target = $('section-plot');
   if (!target) return;
   if (window.Plotly) Plotly.purge(target);
-  target.innerHTML = `
-    <canvas class="section-mesh-canvas"></canvas>
-    <div class="section-mesh-tooltip" hidden></div>
-  `;
+  target.innerHTML = '<canvas class="section-mesh-canvas"></canvas>';
   const canvas = target.querySelector('canvas');
-  const tooltip = target.querySelector('.section-mesh-tooltip');
+  const inspector = $('section-cell-inspector');
+  clearSectionCellInspector(inspector);
   const mesh = buildSectionLayerMesh(common.validRows, common.axis, common.depthMin, common.depthMax, common.valueMin, common.valueMax, common.xMin, common.xMax);
   mesh.trajectory = sectionTrajectoryPoints(result.rows || [], common);
   mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || [], result);
@@ -2220,11 +2218,13 @@ function renderSectionLayerMesh(common, result) {
       return;
     }
     updateSectionMeshCursor(event, canvas, mesh);
-    showSectionMeshTooltip(event, canvas, tooltip, mesh, common);
+    updateSectionCellInspector(event, canvas, inspector, mesh, result);
   });
   canvas.addEventListener('mouseleave', () => {
-    if (!state.sectionBoundaryDrag && !state.sectionAxisDrag) tooltip.hidden = true;
-    if (!state.sectionBoundaryDrag && !state.sectionAxisDrag) canvas.style.cursor = '';
+    if (!state.sectionBoundaryDrag && !state.sectionAxisDrag) {
+      clearSectionCellInspector(inspector);
+      canvas.style.cursor = '';
+    }
   });
 }
 
@@ -3122,31 +3122,56 @@ function sectionZoomRange(minValue, maxValue, centerValue, fraction, factor, min
   };
 }
 
-function showSectionMeshTooltip(event, canvas, tooltip, mesh, common) {
+function updateSectionCellInspector(event, canvas, inspector, mesh, result) {
+  if (!inspector) return;
   const rect = canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   const hit = findSectionMeshQuad(mesh, x, y);
   if (!hit) {
-    tooltip.hidden = true;
+    clearSectionCellInspector(inspector);
     return;
   }
-  tooltip.hidden = false;
-  tooltip.innerHTML = `
-    <b>K ${hit.k}</b><br>
-    ${escapeHtml(sectionXAxisTitle(common.axis))}: ${formatAxisTick((hit.points[0].x + hit.points[1].x) / 2)}<br>
-    TVD: ${formatAxisTick((hit.points[0].y + hit.points[2].y) / 2)}<br>
-    Value: ${formatAxisTick(hit.value)}
-  `;
-  tooltip.style.left = `${Math.min(rect.width - 210, x + 14)}px`;
-  tooltip.style.top = `${Math.max(8, y - 58)}px`;
+  const leftDistance = Math.abs(x - (hit.points[0].x + hit.points[3].x) / 2);
+  const rightDistance = Math.abs(x - (hit.points[1].x + hit.points[2].x) / 2);
+  const row = (leftDistance <= rightDistance ? hit.quad.leftCell : hit.quad.rightCell).row;
+  const inspectorKey = `${row.station_index}:${row.i}:${row.j}:${row.k}`;
+  if (inspector.dataset.cellKey === inspectorKey) return;
+  inspector.dataset.cellKey = inspectorKey;
+  const depth = numericCell(row.tvd_center);
+  const fields = [
+    [result.property_title || 'Value', row.value],
+    ['I / J / K', `${row.i} / ${row.j} / ${row.k}`],
+    ['MD, m', row.md],
+    ['3D distance, m', row.distance],
+    ['Horizontal distance, m', row.horizontal_distance],
+    ['TVD, m', Number.isFinite(depth) ? depth : (numericCell(row.tvd_top) + numericCell(row.tvd_base)) / 2]
+  ];
+  inspector.innerHTML = fields.map(([label, value]) => `
+    <span class="section-cell-inspector-item">
+      <span class="section-cell-inspector-label">${escapeHtml(String(label))}</span>
+      <span class="section-cell-inspector-value">${escapeHtml(formatSectionInspectorValue(value))}</span>
+    </span>
+  `).join('');
+}
+
+function clearSectionCellInspector(inspector) {
+  if (!inspector) return;
+  delete inspector.dataset.cellKey;
+  inspector.innerHTML = '<span class="section-cell-inspector-empty">Hover over a section cell</span>';
+}
+
+function formatSectionInspectorValue(value) {
+  if (typeof value === 'string' && value.trim()) return value;
+  const numeric = numericCell(value);
+  return Number.isFinite(numeric) ? formatAxisTick(numeric) : '-';
 }
 
 function findSectionMeshQuad(mesh, x, y) {
   for (let index = mesh.screenQuads.length - 1; index >= 0; index -= 1) {
     const candidate = mesh.screenQuads[index];
     if (x < candidate.bbox.minX || x > candidate.bbox.maxX || y < candidate.bbox.minY || y > candidate.bbox.maxY) continue;
-    if (pointInPolygon(x, y, candidate.points)) return candidate.quad;
+    if (pointInPolygon(x, y, candidate.points)) return candidate;
   }
   return null;
 }
