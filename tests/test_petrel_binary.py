@@ -3,7 +3,13 @@ from __future__ import annotations
 import struct
 import uuid
 
-from core.petrel_grid_reader import _parse_horizontal_shape_data, _remove_bxml_stream_metadata
+from core.petrel_grid_reader import (
+    _detect_geometry_mode,
+    _parse_horizontal_shape_data,
+    _parse_vertical_curve_pillar_header,
+    _read_paged_section,
+    _remove_bxml_stream_metadata,
+)
 from core.petrel_model_metadata import extract_petrel_object_names, extract_petrel_parent_names
 from core.petrel_property_reader import _strip_binary_segment_frame
 from core.petrel_property_reader import _parse_property_shape_data
@@ -89,3 +95,47 @@ def test_consumes_bxml_page_frame_inside_marker():
     data = b"\x42\xa0\xff\x1f\x24\x93"
 
     assert _consume_marker(data, 0, b"\x42\x24\x93") == len(data)
+
+
+def test_reads_chained_bxml_pages_and_dictionary_extensions():
+    first = b"first-page"
+    second = b"second-page"
+    data = (
+        b"prefix"
+        b"\xa1\x07pillars\xa1\x05curve\xa1\x08vertices\xa1\x07zvalues"
+        + b"\xa0"
+        + bytes((len(first),))
+        + first
+        + b"\xa1\x05float\xa1\x06double\xa0"
+        + bytes((len(second),))
+        + second
+    )
+
+    payload, pages, names = _read_paged_section(data, b"pillars")
+
+    assert payload == first + second
+    assert [page[2] for page in pages] == [len(first), len(second)]
+    assert names == ["pillars", "curve", "vertices", "zvalues", "float", "double"]
+    assert _detect_geometry_mode(data) == "vertical_curve"
+
+
+def test_normalizes_vertical_petrel_curve_to_xy_position():
+    vertices = (
+        (527093.31250000, 7416219.00000000, -4500.0),
+        (527093.31250001, 7416219.00000002, -2250.0),
+        (527093.31249999, 7416218.99999998, 0.0),
+    )
+    flat_vertices = struct.pack("<9d", *(value for vertex in vertices for value in vertex))
+    header = (
+        b"\x40\x06\x00\x88\x07"
+        b"\x42\x4c\x89\x03"
+        b"\x42\x50\x01\x93\x09"
+        + flat_vertices
+        + b"\x42\x5a\x01\x91\x05"
+    )
+
+    xy, z_offset, count = _parse_vertical_curve_pillar_header(header, 0)
+
+    assert xy == (527093.3125, 7416219.0)
+    assert z_offset == len(header)
+    assert count == 5

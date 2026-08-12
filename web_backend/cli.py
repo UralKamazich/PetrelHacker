@@ -118,10 +118,12 @@ def load_models(payload: JsonDict) -> None:
         _emit("log", message=f"Opening model {label}: {path}")
         reader = open_model_reader(path)
         grids = reader.list_grids()
+        selected_grid_uuid = ""
         if grids:
             selected_grid_uuid = str(model.get("gridUuid") or "").strip()
             grid = _select_grid(grids, selected_grid_uuid, label, getattr(reader, "backend", ""))
             reader.select_grid(grid.uuid)
+            selected_grid_uuid = grid.uuid
         properties = reader.list_properties()
         summary = _model_summary(label, reader, grids, properties)
         _emit("log", message=summary)
@@ -132,6 +134,7 @@ def load_models(payload: JsonDict) -> None:
                 "backend": getattr(reader, "backend", ""),
                 "label": label,
                 "depthOffset": depth_offset,
+                "gridUuid": selected_grid_uuid,
                 "summary": summary,
                 "grids": [_dataclass_dict(grid) for grid in grids],
                 "properties": [_dataclass_dict(prop) for prop in properties],

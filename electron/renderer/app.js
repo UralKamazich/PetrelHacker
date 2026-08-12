@@ -276,7 +276,10 @@ async function loadModels() {
     state.loadedModels = result.models || [];
     state.loadedModels.forEach(loaded => {
       const model = state.models.find(item => item.label === loaded.label);
-      if (model && loaded.path) model.path = loaded.path;
+      if (model) {
+        if (loaded.path) model.path = loaded.path;
+        loaded.gridUuid = loaded.gridUuid || model.gridUuid || '';
+      }
     });
     renderModels();
     renderProperties();
@@ -1423,13 +1426,18 @@ async function drawSection(options = {}) {
   if (!trajectory) return fail(new Error('Selected trajectory was not found.'));
   const trajectoryUuid = trajectory.uuid;
   const propertyUuid = propertySelection.property.uuid;
+  const configuredModel = state.models.find(item => item.label === model.label);
+  const gridUuid = model.gridUuid
+    || propertySelection.property.supporting_grid_uuid
+    || (configuredModel && configuredModel.gridUuid)
+    || '';
   await ensureSectionWellNameMapped(trajectoryValue);
   const sleeveMarkers = await loadSectionSleeveMarkers(sectionTrajectoryName(trajectory));
   setBusy('Drawing section', 'Sampling model along trajectory');
   try {
     const sectionPayload = {
       path: model.path,
-      gridUuid: model.gridUuid || '',
+      gridUuid,
       propertyUuid,
       trajectoryUuid,
       trajectoryPath: trajectory.source_path || model.path,

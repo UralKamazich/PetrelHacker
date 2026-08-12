@@ -79,8 +79,8 @@ class PetrelProjectReader:
     Native Petrel projects store domain object payloads in a SQLite database
     (`*.ptd/Data.ptd`). This class exposes project contents and the user's
     selected internal grid through the same narrow API used by RESQML and
-    Rescue readers. Straight-pillar geometry and supported property values are
-    decoded natively; companion RESQML remains a fallback for other layouts.
+    Rescue readers. Position pillars and vertical curve pillars are decoded
+    natively; companion RESQML remains a fallback for other layouts.
     """
 
     def __init__(self, path: str | Path):
