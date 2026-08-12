@@ -4,7 +4,7 @@ import argparse
 import gzip
 import hashlib
 from datetime import date, datetime
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 import errno
 import json
 import math
@@ -125,7 +125,19 @@ def load_models(payload: JsonDict) -> None:
             reader.select_grid(grid.uuid)
             selected_grid_uuid = grid.uuid
         properties = reader.list_properties()
-        summary = _model_summary(label, reader, grids, properties)
+        list_horizons = getattr(reader, "list_named_horizons", None)
+        try:
+            named_horizons = list_horizons() if callable(list_horizons) else []
+        except Exception as exc:  # noqa: BLE001
+            named_horizons = []
+            _emit("log", message=f"Warning: cannot read named surfaces from {label}: {exc}")
+        list_trajectories = getattr(reader, "list_well_trajectories", None)
+        try:
+            trajectories = list_trajectories() if callable(list_trajectories) else []
+        except Exception as exc:  # noqa: BLE001
+            trajectories = []
+            _emit("log", message=f"Warning: cannot read well trajectories from {label}: {exc}")
+        summary = _model_summary(label, reader, grids, properties, trajectories, named_horizons)
         _emit("log", message=summary)
         results.append(
             {
@@ -138,6 +150,8 @@ def load_models(payload: JsonDict) -> None:
                 "summary": summary,
                 "grids": [_dataclass_dict(grid) for grid in grids],
                 "properties": [_dataclass_dict(prop) for prop in properties],
+                "trajectories": [_dataclass_dict(trajectory) for trajectory in trajectories],
+                "namedHorizons": [_dataclass_dict(horizon) for horizon in named_horizons],
             }
         )
     if not results:
@@ -477,11 +491,11 @@ def model_section(payload: JsonDict) -> None:
         sample_step=_to_float(payload.get("sampleStep"), 25.0),
         depth_offset=_to_float(payload.get("depthOffset"), 0.0),
         skip_inactive=bool(payload.get("skipInactive", True)),
-        max_stations=max(50, int(payload.get("maxStations") or 1200)),
         extra_md_values=_float_list(payload.get("extraMds")),
+        horizon_sources=[item for item in payload.get("horizonSources") or [] if isinstance(item, dict)],
         progress_callback=progress,
     )
-    result_payload = _dataclass_dict(result)
+    result_payload = _section_result_payload(result)
     if bool(payload.get("saveCache", False)):
         _save_section_cache(cache_key, result_payload)
     _emit("progress", value=100)
@@ -653,7 +667,7 @@ def _section_cache_key(payload: JsonDict) -> str:
     model_path = resolve_model_path(str(payload.get("path", "")).strip())
     trajectory_path = resolve_model_path(str(payload.get("trajectoryPath", "")).strip()) if payload.get("trajectoryPath") else model_path
     data = {
-        "version": 2,
+        "version": 6,
         "model": _file_cache_identity(model_path),
         "trajectory": _file_cache_identity(trajectory_path),
         "gridUuid": str(payload.get("gridUuid", "")).strip(),
@@ -663,8 +677,8 @@ def _section_cache_key(payload: JsonDict) -> str:
         "sampleStep": _to_float(payload.get("sampleStep"), 25.0),
         "depthOffset": _to_float(payload.get("depthOffset"), 0.0),
         "skipInactive": bool(payload.get("skipInactive", True)),
-        "maxStations": max(50, int(payload.get("maxStations") or 1200)),
         "extraMds": [round(value, 4) for value in _float_list(payload.get("extraMds"))],
+        "horizonSources": payload.get("horizonSources") or [],
     }
     raw = json.dumps(data, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -924,7 +938,14 @@ def _select_grid(grids: list[object], grid_uuid: str, label: str, backend: str) 
     return grids[0]
 
 
-def _model_summary(label: str, reader: object, grids: list[object], properties: list[object]) -> str:
+def _model_summary(
+    label: str,
+    reader: object,
+    grids: list[object],
+    properties: list[object],
+    trajectories: list[object],
+    named_horizons: list[object],
+) -> str:
     lines = [f"{label}: model summary", f"  Backend: {getattr(reader, 'backend', '-') or '-'}"]
     for grid in grids:
         ni = getattr(grid, "ni", None)
@@ -936,6 +957,8 @@ def _model_summary(label: str, reader: object, grids: list[object], properties: 
             f"  Grid: {getattr(grid, 'title', '-')}, shape={ni or '?'} x {nj or '?'} x {nk or '?'}{cell_text}"
         )
     lines.append(f"  Property cubes: {len(properties)}")
+    lines.append(f"  Well trajectories: {len(trajectories)}")
+    lines.append(f"  Named surfaces: {len(named_horizons)}")
     max_listed_properties = 30
     for prop in properties[:max_listed_properties]:
         title = getattr(prop, "title", "-")
@@ -989,12 +1012,30 @@ def _first_existing_column(df: pd.DataFrame, names: tuple[str, ...]) -> str | No
 
 def _dataclass_dict(value: Any) -> Any:
     if is_dataclass(value):
-        return _dataclass_dict(asdict(value))
+        return {
+            field.name: _dataclass_dict(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, dict):
         return {str(key): _dataclass_dict(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_dataclass_dict(item) for item in value]
     return _json_value(value)
+
+
+def _section_result_payload(result: Any) -> JsonDict:
+    payload: JsonDict = {}
+    for field in fields(result):
+        value = getattr(result, field.name)
+        if field.name != "rows":
+            payload[field.name] = _dataclass_dict(value)
+    rows = result.rows
+    row_fields = fields(rows[0]) if rows else ()
+    payload["rowColumns"] = {
+        field.name: [_json_value(getattr(row, field.name)) for row in rows]
+        for field in row_fields
+    }
+    return payload
 
 
 def _json_value(value: Any) -> Any:
@@ -1023,7 +1064,7 @@ def _json_value(value: Any) -> Any:
 
 def _emit(event: str, **payload: Any) -> None:
     message = {"event": event, **_dataclass_dict(payload)}
-    print(json.dumps(message, ensure_ascii=True), flush=True)
+    print(json.dumps(message, ensure_ascii=True, separators=(",", ":")), flush=True)
 
 
 def _to_float(value: Any, default: float) -> float:

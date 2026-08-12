@@ -48,6 +48,14 @@ class PropertyInfo:
 
 
 @dataclass(frozen=True)
+class ResqmlNamedHorizon:
+    uuid: str
+    title: str
+    grid_uuid: str
+    k_index: int
+
+
+@dataclass(frozen=True)
 class MdDatumInfo:
     title: str
     well_name: str
@@ -237,6 +245,32 @@ class ResqmlReader:
             for prop in self._properties
             if prop.supporting_grid_uuid in (None, self._selected_grid_uuid)
         ]
+
+    def list_named_horizons(self) -> list[ResqmlNamedHorizon]:
+        candidates: list[tuple[str, str, str, str]] = []
+        for name, kind, root in self._objects:
+            if "SubRepresentation" not in kind:
+                continue
+            if (_child_text(root, "IndexableElement") or "").lower() != "interval edges":
+                continue
+            grid_uuid, _grid_title = _first_data_reference(root, "obj_IjkGridRepresentation")
+            hdf_paths = _children_text(root, "PathInHdfFile")
+            if not grid_uuid or len(hdf_paths) != 1:
+                continue
+            uuid = (root.attrib.get("uuid") or _uuid_from_name(name) or "").lower()
+            title = re.sub(r"\s+Subrepresentation$", "", _title(root), flags=re.IGNORECASE).strip()
+            if uuid and title:
+                candidates.append((uuid, title, grid_uuid, hdf_paths[0]))
+
+        indices = _read_single_hdf_integers(self.h5_path, tuple(item[3] for item in candidates))
+        horizons = [
+            ResqmlNamedHorizon(uuid=uuid, title=title, grid_uuid=grid_uuid, k_index=indices[hdf_path])
+            for uuid, title, grid_uuid, hdf_path in candidates
+            if hdf_path in indices
+        ]
+        if self._selected_grid_uuid is not None:
+            horizons = [item for item in horizons if item.grid_uuid == self._selected_grid_uuid]
+        return sorted(horizons, key=lambda item: (item.k_index, item.title.casefold()))
 
     def list_md_datums(self) -> list[MdDatumInfo]:
         datums: list[MdDatumInfo] = []
@@ -713,6 +747,29 @@ def _read_hdf_infos(
                     continue
                 dataset = h5[path]
                 result[path] = (tuple(int(dim) for dim in dataset.shape), str(dataset.dtype))
+    except Exception:
+        return result
+    return result
+
+
+def _read_single_hdf_integers(h5_path: Path | None, hdf_paths: tuple[str, ...]) -> dict[str, int]:
+    if h5_path is None or not hdf_paths:
+        return {}
+    try:
+        import h5py  # type: ignore[import-not-found]
+        import numpy as np
+    except Exception:
+        return {}
+
+    result: dict[str, int] = {}
+    try:
+        with h5py.File(h5_path, "r") as h5:
+            for path in hdf_paths:
+                if path not in h5:
+                    continue
+                values = np.asarray(h5[path]).reshape(-1)
+                if values.size == 1:
+                    result[path] = int(values[0])
     except Exception:
         return result
     return result

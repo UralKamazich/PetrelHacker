@@ -114,23 +114,27 @@ def unique_well_values(df: pd.DataFrame, well_col: str = "Well") -> list[str]:
     seen: set[str] = set()
     for value in df[well_col]:
         text = _normalize_well_value(value)
-        if not text or text in seen:
+        key = _well_identity_key(text)
+        if not key or key in seen:
             continue
-        seen.add(text)
+        seen.add(key)
         values.append(text)
     return values
 
 
 def well_value_counts(df: pd.DataFrame, well_col: str = "Well") -> dict[str, int]:
-    counts: dict[str, int] = {}
+    counts_by_key: dict[str, int] = {}
+    names_by_key: dict[str, str] = {}
     if well_col not in df.columns:
         return counts
     for value in df[well_col]:
         text = _normalize_well_value(value)
-        if not text:
+        key = _well_identity_key(text)
+        if not key:
             continue
-        counts[text] = counts.get(text, 0) + 1
-    return counts
+        names_by_key.setdefault(key, text)
+        counts_by_key[key] = counts_by_key.get(key, 0) + 1
+    return {names_by_key[key]: count for key, count in counts_by_key.items()}
 
 
 def filter_sleeves_by_wells(
@@ -140,13 +144,13 @@ def filter_sleeves_by_wells(
 ) -> pd.DataFrame:
     if selected_wells is None:
         return df.copy().reset_index(drop=True)
-    selected = {_normalize_well_value(value) for value in selected_wells}
+    selected = {_well_identity_key(_normalize_well_value(value)) for value in selected_wells}
     selected.discard("")
     if not selected:
         return df.iloc[0:0].copy().reset_index(drop=True)
     if well_col not in df.columns:
         raise ValueError("Cannot filter sleeves by wells: Well column is missing.")
-    mask = df[well_col].map(_normalize_well_value).isin(selected)
+    mask = df[well_col].map(lambda value: _well_identity_key(_normalize_well_value(value))).isin(selected)
     return df.loc[mask].copy().reset_index(drop=True)
 
 
@@ -222,6 +226,18 @@ def _normalize_well_value(value: object) -> str:
         if head.isdigit():
             return head
     return text
+
+
+def _well_identity_key(value: str) -> str:
+    translation = str.maketrans(
+        {
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H",
+            "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+            "а": "A", "в": "B", "е": "E", "к": "K", "м": "M", "н": "H",
+            "о": "O", "р": "P", "с": "C", "т": "T", "х": "X",
+        }
+    )
+    return "".join(char for char in value.translate(translation).upper() if char.isalnum())
 
 
 def _read_excel_with_fallback(path: Path) -> pd.DataFrame:

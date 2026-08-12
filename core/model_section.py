@@ -40,6 +40,23 @@ class SectionTrajectoryPoint:
 
 
 @dataclass(frozen=True)
+class SectionHorizonPoint:
+    station_index: int
+    md: float | None
+    distance: float
+    horizontal_distance: float
+    depth: float
+
+
+@dataclass(frozen=True)
+class SectionHorizon:
+    uuid: str
+    title: str
+    k_index: int
+    points: list[SectionHorizonPoint]
+
+
+@dataclass(frozen=True)
 class SectionResult:
     model_path: str
     well_name: str
@@ -50,6 +67,7 @@ class SectionResult:
     cell_count: int
     rows: list[SectionCell]
     trajectory_points: list[SectionTrajectoryPoint]
+    horizons: list[SectionHorizon]
 
 
 def extract_well_section(
@@ -63,8 +81,9 @@ def extract_well_section(
     sample_step: float = 25.0,
     depth_offset: float = 0.0,
     skip_inactive: bool = True,
-    max_stations: int = 1200,
+    max_stations: int | None = None,
     extra_md_values: list[float] | tuple[float, ...] | None = None,
+    horizon_sources: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
     progress_callback=None,
 ) -> SectionResult:
     resolved_path = resolve_model_path(model_path)
@@ -95,8 +114,8 @@ def extract_well_section(
     indexer.build_column_index()
     matched_stations: list[tuple[dict[str, float | None], object | None]] = []
     unique_columns: set[tuple[int, int]] = set()
-    for station in stations:
-        match = indexer.find_column(station["x"], station["y"])
+    matches = indexer.find_columns([(station["x"], station["y"]) for station in stations])
+    for station, match in zip(stations, matches, strict=True):
         matched_stations.append((station, match))
         if match is not None:
             unique_columns.add((match.i, match.j))
@@ -141,6 +160,14 @@ def extract_well_section(
 
     if progress_callback:
         progress_callback(len(stations), len(stations))
+    horizons = _build_section_horizons(
+        stations,
+        reader,
+        grid,
+        resolved_path,
+        depth_offset,
+        horizon_sources,
+    )
     return SectionResult(
         model_path=str(resolved_path),
         well_name=trajectory.well_name,
@@ -161,6 +188,130 @@ def extract_well_section(
             )
             for point in points
         ],
+        horizons=horizons,
+    )
+
+
+def _build_section_horizons(
+    stations: list[dict[str, float | None]],
+    property_reader,
+    property_grid,
+    property_path: Path,
+    property_depth_offset: float,
+    horizon_sources: list[dict[str, object]] | tuple[dict[str, object], ...] | None,
+) -> list[SectionHorizon]:
+    if horizon_sources is None:
+        list_horizons = getattr(property_reader, "list_named_horizons", None)
+        local = list_horizons() if callable(list_horizons) else []
+        sources = [
+            {
+                "path": str(property_path),
+                "gridUuid": property_grid.uuid,
+                "horizonUuid": horizon.uuid,
+                "selectionUuid": horizon.uuid,
+                "depthOffset": property_depth_offset,
+            }
+            for horizon in local
+        ]
+    else:
+        sources = [dict(source) for source in horizon_sources]
+    if not sources:
+        return []
+
+    grouped: dict[tuple[str, str, float], list[dict[str, object]]] = {}
+    for source in sources:
+        path = str(source.get("path") or property_path).strip()
+        grid_uuid = str(source.get("gridUuid") or "").strip()
+        offset = float(source.get("depthOffset") or 0.0)
+        grouped.setdefault((path, grid_uuid, offset), []).append(source)
+
+    result: list[SectionHorizon] = []
+    station_xy = [(float(station["x"]), float(station["y"])) for station in stations]
+    for (path, grid_uuid, offset), group_sources in grouped.items():
+        resolved = resolve_model_path(path)
+        if resolved == property_path and (not grid_uuid or grid_uuid.lower() == property_grid.uuid.lower()):
+            source_reader = property_reader
+            source_grid = property_grid
+        else:
+            source_reader = open_model_reader(resolved)
+            source_grid = _select_grid(source_reader.list_grids(), grid_uuid or None)
+            source_reader.select_grid(source_grid.uuid)
+
+        list_horizons = getattr(source_reader, "list_named_horizons", None)
+        available = {horizon.uuid.lower(): horizon for horizon in (list_horizons() if callable(list_horizons) else [])}
+        selected: list[tuple[dict[str, object], object]] = []
+        for source in group_sources:
+            horizon_uuid = str(source.get("horizonUuid") or "").lower()
+            horizon = available.get(horizon_uuid)
+            if horizon is not None:
+                selected.append((source, horizon))
+        if not selected:
+            continue
+
+        points_by_uuid: dict[str, list[SectionHorizonPoint]] = {
+            str(source.get("selectionUuid") or horizon.uuid): [] for source, horizon in selected
+        }
+        sample_horizons = getattr(source_reader, "get_named_horizon_depths", None)
+        if callable(sample_horizons):
+            horizon_uuids = tuple(horizon.uuid for _source, horizon in selected)
+            for station_index, (station, (x, y)) in enumerate(zip(stations, station_xy, strict=True)):
+                depths = sample_horizons(horizon_uuids, x, y)
+                for source, horizon in selected:
+                    sampled = depths.get(horizon.uuid)
+                    if sampled is not None:
+                        _append_horizon_point(points_by_uuid, source, horizon, station, station_index, float(sampled) + offset)
+        else:
+            indexer = FastGridIndexer(source_reader, source_grid)
+            indexer.build_column_index()
+            matches = indexer.find_columns(station_xy)
+            columns = {(match.i, match.j) for match in matches if match is not None}
+            geometry_by_column = _read_geometry_columns(source_reader, source_grid, columns)
+            for station_index, (station, match) in enumerate(zip(stations, matches, strict=True)):
+                if match is None:
+                    continue
+                geometry = geometry_by_column[(match.i, match.j)]
+                interfaces = _geometry_column_depths_at_xy(
+                    geometry,
+                    float(station["x"]),
+                    float(station["y"]),
+                ).get("TVD_interfaces", [])
+                for source, horizon in selected:
+                    k_index = int(horizon.k_index)
+                    if 0 <= k_index < len(interfaces):
+                        _append_horizon_point(
+                            points_by_uuid,
+                            source,
+                            horizon,
+                            station,
+                            station_index,
+                            float(interfaces[k_index]) + offset,
+                        )
+
+        for source, horizon in selected:
+            selection_uuid = str(source.get("selectionUuid") or horizon.uuid)
+            result.append(
+                SectionHorizon(
+                    uuid=selection_uuid,
+                    title=horizon.title,
+                    k_index=int(horizon.k_index),
+                    points=points_by_uuid[selection_uuid],
+                )
+            )
+    return result
+
+
+def _append_horizon_point(points_by_uuid, source, horizon, station, station_index: int, depth: float) -> None:
+    if not np.isfinite(depth):
+        return
+    selection_uuid = str(source.get("selectionUuid") or horizon.uuid)
+    points_by_uuid[selection_uuid].append(
+        SectionHorizonPoint(
+            station_index=station_index,
+            md=station["md"],
+            distance=station["distance"],
+            horizontal_distance=station["horizontal_distance"],
+            depth=depth,
+        )
     )
 
 
@@ -233,6 +384,27 @@ def _read_section_columns_via_reader(reader, prop, columns: set[tuple[int, int]]
     return cache
 
 
+def _read_geometry_columns(reader, grid, columns: set[tuple[int, int]]):
+    if not isinstance(reader, ResqmlReader):
+        return {column: reader.get_cell_geometry_column(*column) for column in columns}
+    if reader.h5_path is None:
+        raise ValueError("H5 file was not found next to EPC.")
+    try:
+        import h5py  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("h5py is required for section reads.") from exc
+    ni, nj, nk = reader.get_grid_shape()
+    if ni is None or nj is None or nk is None:
+        raise ValueError("Selected grid has incomplete NI/NJ/NK metadata.")
+    points_path = reader._points_hdf_path()
+    with h5py.File(reader.h5_path, "r") as h5:
+        points_dataset = h5[points_path]
+        return {
+            column: _geometry_column_from_dataset(points_dataset, *column, ni, nj, nk)
+            for column in columns
+        }
+
+
 def _safe_float_array(values) -> np.ndarray:
     converted = []
     for value in np.asarray(values, dtype=object).reshape(-1):
@@ -303,16 +475,41 @@ def _geometry_column_depths_at_xy(geometry: dict[str, np.ndarray], x: float, y: 
         return {
             "TVD_top": [float(value) for value in geometry.get("TVD_top", [])],
             "TVD_base": [float(value) for value in geometry.get("TVD_base", [])],
+            "TVD_interfaces": [float(value) for value in geometry.get("TVD_interfaces", [])],
         }
     points = np.asarray(geometry["points"], dtype=float)
-    interface_z = np.asarray([_plane_z_at_xy(interface_points, x, y) for interface_points in points], dtype=float)
+    interface_z = _interface_plane_z_at_xy(points, x, y)
     interface_depth = _z_to_depth(interface_z)
     top_depth = np.minimum(interface_depth[:-1], interface_depth[1:])
     base_depth = np.maximum(interface_depth[:-1], interface_depth[1:])
     return {
         "TVD_top": [float(value) for value in top_depth],
         "TVD_base": [float(value) for value in base_depth],
+        "TVD_interfaces": [float(value) for value in interface_depth],
     }
+
+
+def _interface_plane_z_at_xy(points: np.ndarray, x: float, y: float) -> np.ndarray:
+    corners = np.asarray(points, dtype=float)
+    if corners.ndim != 3 or corners.shape[1:] != (4, 3):
+        return np.asarray([_plane_z_at_xy(interface_points, x, y) for interface_points in corners], dtype=float)
+
+    finite = np.isfinite(corners).all(axis=2)
+    if finite.all():
+        xy = corners[:, :, :2]
+        # Pillar XY normally stays fixed down a column. Reuse one plane
+        # projection for every interface and apply it to all Z values at once.
+        if np.allclose(xy, xy[:1], rtol=0.0, atol=1e-8):
+            matrix = np.column_stack([xy[0, :, 0], xy[0, :, 1], np.ones(4, dtype=float)])
+            try:
+                weights, *_ = np.linalg.lstsq(matrix.T, np.asarray([x, y, 1.0]), rcond=None)
+                values = corners[:, :, 2] @ weights
+                if np.isfinite(values).all():
+                    return np.asarray(values, dtype=float)
+            except Exception:  # noqa: BLE001
+                pass
+
+    return np.asarray([_plane_z_at_xy(interface_points, x, y) for interface_points in corners], dtype=float)
 
 
 def _plane_z_at_xy(interface_points: np.ndarray, x: float, y: float) -> float:
@@ -383,7 +580,7 @@ def _select_property(properties, property_uuid: str):
 def _sample_trajectory(
     points,
     sample_step: float,
-    max_stations: int,
+    max_stations: int | None,
     *,
     extra_md_values: list[float] | tuple[float, ...] | None = None,
 ) -> list[dict[str, float | None]]:
@@ -434,7 +631,7 @@ def _sample_trajectory(
         if len(extra):
             samples = np.concatenate([samples, extra])
             samples = np.unique(samples)
-    if len(samples) > max_stations:
+    if max_stations is not None and len(samples) > max_stations:
         required = np.asarray([], dtype=float)
         if axis_name == "md" and extra_md_values:
             required = np.asarray([value for value in extra_md_values if np.isfinite(value) and start <= value <= stop], dtype=float)

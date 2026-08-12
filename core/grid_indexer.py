@@ -101,6 +101,42 @@ class FastGridIndexer:
         j, i = divmod(flat_index, self.ni)
         return ColumnMatch(i=i, j=j, distance=float(np.sqrt(distances_sq[flat_index])))
 
+    def find_columns(self, xy_values) -> list[ColumnMatch | None]:
+        self._ensure_built()
+        assert self._flat_centers is not None
+        assert self._bbox is not None
+
+        queries = np.asarray(xy_values, dtype=float)
+        if queries.size == 0:
+            return []
+        queries = queries.reshape(-1, 2)
+        xmin, xmax, ymin, ymax = self._bbox
+        inside = (
+            np.isfinite(queries).all(axis=1)
+            & (queries[:, 0] >= xmin)
+            & (queries[:, 0] <= xmax)
+            & (queries[:, 1] >= ymin)
+            & (queries[:, 1] <= ymax)
+        )
+        result: list[ColumnMatch | None] = [None] * len(queries)
+        valid_indices = np.flatnonzero(inside)
+        # Keep each temporary distance matrix bounded for large grids.
+        max_distance_values = 4_000_000
+        query_batch_size = max(1, max_distance_values // max(len(self._flat_centers), 1))
+        for start in range(0, len(valid_indices), query_batch_size):
+            batch_indices = valid_indices[start : start + query_batch_size]
+            delta = queries[batch_indices, None, :] - self._flat_centers[None, :, :]
+            distances_sq = np.einsum("qci,qci->qc", delta, delta)
+            nearest = np.nanargmin(distances_sq, axis=1)
+            for row_index, (query_index, flat_index) in enumerate(zip(batch_indices, nearest, strict=True)):
+                j, i = divmod(int(flat_index), self.ni)
+                result[int(query_index)] = ColumnMatch(
+                    i=i,
+                    j=j,
+                    distance=float(np.sqrt(distances_sq[row_index, flat_index])),
+                )
+        return result
+
     def vertical_cells(self, x: float, y: float) -> list[tuple[int, int, int]]:
         match = self.find_column(x, y)
         if match is None:

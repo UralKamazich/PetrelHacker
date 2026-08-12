@@ -3,6 +3,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import sqlite3
 import struct
@@ -83,6 +84,7 @@ class PetrelLz4Blob:
             reader.close()
             return blocks
 
+    @lru_cache(maxsize=4)
     def _decompress_block(self, block: PetrelLz4Block) -> bytes:
         compressed = _read_blob_range(self.data_path, self._parts, block.compressed_offset, block.compressed_size)
         return _decompress(compressed, self.data_pk)
@@ -115,7 +117,11 @@ def read_first_petrel_lz4_block(data_path: str | Path, data_pk: int) -> bytes:
 
 def read_petrel_lz4_file(path: str | Path, *, max_bytes: int | None = None) -> bytes:
     """Decompress a standalone Petrel LZ4 container such as Model.ptd."""
-    source = Path(path).read_bytes()
+    return read_petrel_lz4_bytes(Path(path).read_bytes(), max_bytes=max_bytes)
+
+
+def read_petrel_lz4_bytes(source: bytes, *, max_bytes: int | None = None) -> bytes:
+    """Decompress a Petrel LZ4 container already loaded in memory."""
     if not source.startswith(PETREL_LZ4_MAGIC):
         raise ValueError(f"Unsupported Petrel file compression header: {source[:4]!r}")
     output = bytearray()

@@ -10,13 +10,14 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
-from core.resqml_reader import GridInfo, PropertyInfo
+from core.resqml_reader import GridInfo, PropertyInfo, WellTrajectoryInfo, WellTrajectoryPoint
 
 
 RESCUE_MODEL_HEADER = b"\x25Rescue Model File\x00"
 RESCUE_GEOMETRY_LABEL = b"Rescue Geometry File"
 RESCUE_PROPERTY_LABEL = b"Rescue Property File"
-PROPERTY_VALUES_OFFSET = 34
+RESCUE_TRIPLET_LABEL = b"Rescue Triplet File"
+PROPERTY_ARRAY_OFFSET = 25
 RESCUE_TRAILER = b"abracadabra jump jump\x00"
 DEFAULT_INVALID_ABS_VALUE_LIMIT = np.float32(1e15)
 
@@ -40,6 +41,28 @@ class _GeometryFile:
     raw_nk: int
 
 
+@dataclass(frozen=True)
+class RescueNamedHorizon:
+    uuid: str
+    title: str
+    grid_uuid: str
+    k_index: int = -1
+
+
+@dataclass(frozen=True)
+class _HorizonFile:
+    file_id: int
+    path: Path
+    title: str
+
+
+@dataclass(frozen=True)
+class _TrajectoryFile:
+    file_id: int
+    path: Path
+    title: str
+
+
 def is_rescue_path(path: str | Path) -> bool:
     candidate = Path(path)
     if candidate.is_dir():
@@ -47,7 +70,7 @@ def is_rescue_path(path: str | Path) -> bool:
     if not candidate.is_file():
         return False
     try:
-        return candidate.read_bytes().startswith(RESCUE_MODEL_HEADER)
+        return _read_file_head(candidate, len(RESCUE_MODEL_HEADER)).startswith(RESCUE_MODEL_HEADER)
     except OSError:
         return False
 
@@ -78,6 +101,13 @@ class RescueReader:
         self._selected_grid_uuid: str | None = None
         self._xy_bounds: tuple[float, float, float, float] | None = None
         self._geometry_file: _GeometryFile | None = None
+        self._horizon_files: dict[str, _HorizonFile] = {}
+        self._decoded_horizon_z: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._decoded_horizon_cache_limit = 64
+        self._horizon_xy: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._horizon_cell_xy: np.ndarray | None = None
+        self._geometry_blocks_by_xy: dict[tuple[float, float], int] | None = None
+        self._trajectory_files: dict[str, _TrajectoryFile] = {}
 
     @property
     def epc_path(self) -> Path:
@@ -114,6 +144,8 @@ class RescueReader:
         self._selected_grid_uuid = grid_uuid
         property_files = self._discover_property_files()
         self._properties = self._parse_properties(property_files)
+        self._horizon_files = self._discover_horizon_files()
+        self._trajectory_files = self._discover_trajectory_files()
 
     def list_grids(self) -> list[GridInfo]:
         return list(self._grids)
@@ -126,8 +158,102 @@ class RescueReader:
     def list_properties(self) -> list[PropertyInfo]:
         return list(self._properties)
 
+    def list_named_horizons(self) -> list[RescueNamedHorizon]:
+        grid_uuid = self._grids[0].uuid if self._grids else ""
+        return [
+            RescueNamedHorizon(uuid=uuid, title=info.title, grid_uuid=grid_uuid)
+            for uuid, info in self._horizon_files.items()
+        ]
+
+    def get_named_horizon_depth(self, horizon_uuid: str, x: float, y: float) -> float | None:
+        return self.get_named_horizon_depths((horizon_uuid,), x, y).get(horizon_uuid)
+
+    def get_named_horizon_depths(
+        self,
+        horizon_uuids: list[str] | tuple[str, ...],
+        x: float,
+        y: float,
+    ) -> dict[str, float]:
+        selected = [uuid for uuid in horizon_uuids if uuid in self._horizon_files]
+        if not selected or self._xy_bounds is None:
+            return {}
+        local_x, local_y, source_indices = self._horizon_sample_points()
+        if local_x.size == 0:
+            return {}
+        xmin, xmax, ymin, ymax = self._xy_bounds
+        query_x = float(x) - (xmin - float(np.nanmin(local_x)))
+        query_y = float(y) - (ymin - float(np.nanmin(local_y)))
+        distances_sq = (local_x - query_x) ** 2 + (local_y - query_y) ** 2
+        nearest = int(np.nanargmin(distances_sq))
+        cell_size = max(
+            abs(xmax - xmin) / max(self._grids[0].ni or 1, 1),
+            abs(ymax - ymin) / max(self._grids[0].nj or 1, 1),
+        )
+        if float(distances_sq[nearest]) > (cell_size * 2.0) ** 2:
+            return {}
+        source_index = int(source_indices[nearest])
+        result: dict[str, float] = {}
+        for horizon_uuid in selected:
+            z = float(self._horizon_z_values(horizon_uuid)[source_index])
+            if math.isfinite(z) and abs(z) < 1e20:
+                result[horizon_uuid] = abs(z)
+        return result
+
     def list_md_datums(self) -> list[object]:
         return []
+
+    def list_well_trajectories(self) -> list[WellTrajectoryInfo]:
+        return [
+            WellTrajectoryInfo(
+                index=index,
+                title=info.title,
+                uuid=uuid,
+                well_name=info.title,
+                trajectory_type="RescueTripletTrajectory",
+                hdf_paths=(str(info.path),),
+                xyz_hdf_path=str(info.path),
+                point_count=_triplet_point_count(info.path),
+            )
+            for index, (uuid, info) in enumerate(self._trajectory_files.items())
+        ]
+
+    def get_well_trajectory_points(self, trajectory_uuid: str) -> list[WellTrajectoryPoint]:
+        info = self._trajectory_files.get(trajectory_uuid)
+        if info is None:
+            raise ValueError(f"Well trajectory UUID not found: {trajectory_uuid}")
+        x_values, y_values, z_values = _decode_triplet_file(info.path)
+        valid = (
+            np.isfinite(x_values)
+            & np.isfinite(y_values)
+            & np.isfinite(z_values)
+            & (np.abs(x_values) < 1e20)
+            & (np.abs(y_values) < 1e20)
+            & (np.abs(z_values) < 1e20)
+        )
+        xyz = np.stack((x_values[valid], y_values[valid], z_values[valid]), axis=1).astype(float)
+        if xyz.size == 0:
+            return []
+        offset_x, offset_y = self._local_xy_offsets()
+        xyz[:, 0] += offset_x
+        xyz[:, 1] += offset_y
+        distances = _cumulative_distances(xyz)
+        horizontal_distances = _cumulative_distances(xyz[:, :2])
+        return [
+            WellTrajectoryPoint(
+                trajectory_uuid=trajectory_uuid,
+                trajectory_title=info.title,
+                well_name=info.title,
+                point_index=index,
+                x=float(values[0]),
+                y=float(values[1]),
+                z=float(values[2]),
+                tvd=-float(values[2]),
+                md=float(distances[index]),
+                distance_along=float(distances[index]),
+                horizontal_distance=float(horizontal_distances[index]),
+            )
+            for index, values in enumerate(xyz)
+        ]
 
     def get_grid_shape(self) -> tuple[int | None, int | None, int | None]:
         self._require_selected_grid()
@@ -142,7 +268,24 @@ class RescueReader:
         ni, nj, nk = self._require_shape()
         if not (0 <= i < ni and 0 <= j < nj):
             raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
-        return np.asarray([self._read_property_value(property_uuid, i, j, k) for k in range(nk)], dtype=object)
+        return self.get_property_columns_values(property_uuid, {(i, j)})[(i, j)]
+
+    def get_property_columns_values(
+        self,
+        property_uuid: str,
+        columns: set[tuple[int, int]],
+    ) -> dict[tuple[int, int], np.ndarray]:
+        self._require_selected_grid()
+        ni, nj, nk = self._require_shape()
+        for i, j in columns:
+            if not (0 <= i < ni and 0 <= j < nj):
+                raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
+        cube = self._decoded_property_values(property_uuid).reshape(nk, nj, ni)
+        scale = _output_value_scale(self._property_info(property_uuid))
+        return {
+            (i, j): np.asarray(cube[::-1, j, i], dtype=float) * scale
+            for i, j in columns
+        }
 
     def get_property_decode_stats(self, property_uuid: str) -> dict[str, float | int | str | None]:
         prop_file = self._property_files.get(property_uuid)
@@ -182,12 +325,7 @@ class RescueReader:
         if not (0 <= i < ni and 0 <= j < nj):
             raise IndexError(f"Column index out of bounds: i={i}, j={j}; shape NI/NJ={ni}/{nj}")
         size_i, size_j = self._cell_xy_size()
-        pillar_values = [
-            self._decoded_geometry_column(i, j),
-            self._decoded_geometry_column(i + 1, j),
-            self._decoded_geometry_column(i, j + 1),
-            self._decoded_geometry_column(i + 1, j + 1),
-        ]
+        pillar_values = self._decoded_cell_geometry_pillars(i, j)
         if any(values is None for values in pillar_values):
             tvd_top = [math.nan] * nk
             tvd_base = [math.nan] * nk
@@ -214,6 +352,15 @@ class RescueReader:
         ni, nj, _nk = self._require_shape()
         if self._xy_bounds is None:
             raise ValueError("Rescue CRS metadata was not found; cannot build XY grid.")
+        if self._horizon_files:
+            points = self._horizon_cell_points()
+            counts = np.count_nonzero(np.isfinite(points), axis=2)
+            centers = np.full((nj, ni, 2), np.nan, dtype=float)
+            np.divide(np.nansum(points, axis=2), counts, out=centers, where=counts > 0)
+            offset_x, offset_y = self._local_xy_offsets()
+            centers[:, :, 0] += offset_x
+            centers[:, :, 1] += offset_y
+            return centers
         xmin, xmax, ymin, ymax = self._xy_bounds
         x_nodes = np.linspace(xmin, xmax, ni + 1, dtype=float)
         y_nodes = np.linspace(ymin, ymax, nj + 1, dtype=float)
@@ -253,7 +400,7 @@ class RescueReader:
         assert self.root_path is not None
         for path in self.root_path.glob("*.bin.*"):
             try:
-                if RESCUE_GEOMETRY_LABEL in path.read_bytes()[:64]:
+                if RESCUE_GEOMETRY_LABEL in _read_file_head(path):
                     return path
             except OSError:
                 continue
@@ -264,7 +411,7 @@ class RescueReader:
         files: dict[int, _PropertyFile] = {}
         for path in self.root_path.glob("*.bin.*"):
             try:
-                head = path.read_bytes()[:64]
+                head = _read_file_head(path)
             except OSError:
                 continue
             if RESCUE_PROPERTY_LABEL not in head:
@@ -275,6 +422,124 @@ class RescueReader:
                 continue
             files[file_id] = _read_property_file_info(file_id, path)
         return files
+
+    def _discover_horizon_files(self) -> dict[str, _HorizonFile]:
+        assert self.root_path is not None
+        assert self.main_path is not None
+        titles = _horizon_titles_from_model(self.main_path.read_bytes())
+        expected_count = 4 * (self._grids[0].ni or 0) * (self._grids[0].nj or 0)
+        triplets: list[tuple[int, Path]] = []
+        for path in self.root_path.glob("*.bin.*"):
+            try:
+                head = _read_file_head(path, 32)
+                file_id = int(path.name.rsplit(".", 1)[1])
+            except (OSError, ValueError):
+                continue
+            if RESCUE_TRIPLET_LABEL not in head or len(head) < 28:
+                continue
+            if int.from_bytes(head[24:28], "big", signed=False) == expected_count:
+                triplets.append((file_id, path))
+        triplets.sort()
+        if len(titles) != len(triplets):
+            return {}
+        return {
+            f"rescue-horizon:{file_id}": _HorizonFile(file_id=file_id, path=path, title=title)
+            for title, (file_id, path) in zip(titles, triplets)
+        }
+
+    def _discover_trajectory_files(self) -> dict[str, _TrajectoryFile]:
+        assert self.root_path is not None
+        assert self.main_path is not None
+        triplets: dict[int, Path] = {}
+        for path in self.root_path.iterdir():
+            try:
+                file_id = int(path.name.rsplit(".", 1)[1])
+                head = _read_file_head(path, 28)
+            except (IndexError, OSError, ValueError):
+                continue
+            if RESCUE_TRIPLET_LABEL in head:
+                triplets[file_id] = path
+        horizon_ids = {info.file_id for info in self._horizon_files.values()}
+        records = _trajectory_records_from_model(
+            self.main_path.read_bytes(),
+            set(triplets) - horizon_ids,
+        )
+        return {
+            f"rescue-trajectory:{file_id}": _TrajectoryFile(file_id=file_id, path=triplets[file_id], title=title)
+            for file_id, title in records
+        }
+
+    def _horizon_sample_points(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self._horizon_xy is not None:
+            return self._horizon_xy
+        first = next(iter(self._horizon_files.values()), None)
+        if first is None:
+            empty = np.asarray([], dtype=float)
+            self._horizon_xy = empty, empty, np.asarray([], dtype=np.int64)
+            return self._horizon_xy
+        x_values, y_values, _z_values = _decode_triplet_file(first.path)
+        valid = (
+            np.isfinite(x_values)
+            & np.isfinite(y_values)
+            & (np.abs(x_values) < 1e20)
+            & (np.abs(y_values) < 1e20)
+        )
+        indices = np.flatnonzero(valid)
+        self._horizon_xy = x_values[indices].astype(float), y_values[indices].astype(float), indices
+        return self._horizon_xy
+
+    def _horizon_cell_points(self) -> np.ndarray:
+        if self._horizon_cell_xy is not None:
+            return self._horizon_cell_xy
+        first = next(iter(self._horizon_files.values()), None)
+        ni, nj, _nk = self._require_shape()
+        if first is None:
+            self._horizon_cell_xy = np.full((nj, ni, 4, 2), np.nan, dtype=float)
+            return self._horizon_cell_xy
+        x_values, y_values, _z_values = _decode_triplet_file(first.path)
+        expected = ni * nj * 4
+        if x_values.size != expected or y_values.size != expected:
+            raise ValueError(
+                f"Unsupported Rescue surface topology: {x_values.size} values; expected {expected}"
+            )
+        points = _reshape_triplet_cell_points(x_values, y_values, ni, nj)
+        points[(~np.isfinite(points)) | (np.abs(points) > 1e20)] = np.nan
+        self._horizon_cell_xy = points
+        return points
+
+    def _geometry_block_index(self) -> dict[tuple[float, float], int]:
+        if self._geometry_blocks_by_xy is not None:
+            return self._geometry_blocks_by_xy
+        geometry_file = self._geometry_file
+        if geometry_file is None:
+            self._geometry_blocks_by_xy = {}
+            return self._geometry_blocks_by_xy
+        result = _triplet_geometry_block_index(
+            self._horizon_cell_points(),
+            len(geometry_file.block_starts),
+        )
+        self._geometry_blocks_by_xy = result
+        return result
+
+    def _horizon_z_values(self, horizon_uuid: str) -> np.ndarray:
+        cached = self._decoded_horizon_z.get(horizon_uuid)
+        if cached is not None:
+            self._decoded_horizon_z.move_to_end(horizon_uuid)
+            return cached
+        _x, _y, values = _decode_triplet_file(self._horizon_files[horizon_uuid].path, z_only=True)
+        self._decoded_horizon_z[horizon_uuid] = values
+        while len(self._decoded_horizon_z) > self._decoded_horizon_cache_limit:
+            self._decoded_horizon_z.popitem(last=False)
+        return values
+
+    def _local_xy_offsets(self) -> tuple[float, float]:
+        if self._xy_bounds is None or not self._horizon_files:
+            return 0.0, 0.0
+        local_x, local_y, _indices = self._horizon_sample_points()
+        if local_x.size == 0:
+            return 0.0, 0.0
+        xmin, _xmax, ymin, _ymax = self._xy_bounds
+        return xmin - float(np.nanmin(local_x)), ymin - float(np.nanmin(local_y))
 
     def _parse_properties(self, property_files: dict[int, _PropertyFile]) -> list[PropertyInfo]:
         assert self.main_path is not None
@@ -324,18 +589,24 @@ class RescueReader:
     def _cell_corner_points(self, i: int, j: int, pillar_z: np.ndarray) -> np.ndarray:
         ni, nj, _nk = self._require_shape()
         assert self._xy_bounds is not None
-        xmin, xmax, ymin, ymax = self._xy_bounds
-        x_nodes = np.linspace(xmin, xmax, ni + 1, dtype=float)
-        y_nodes = np.linspace(ymin, ymax, nj + 1, dtype=float)
-        xy = np.asarray(
-            [
-                [x_nodes[i], y_nodes[j]],
-                [x_nodes[i + 1], y_nodes[j]],
-                [x_nodes[i], y_nodes[j + 1]],
-                [x_nodes[i + 1], y_nodes[j + 1]],
-            ],
-            dtype=float,
-        )
+        if self._horizon_files:
+            xy = self._horizon_cell_points()[j, i].copy()
+            offset_x, offset_y = self._local_xy_offsets()
+            xy[:, 0] += offset_x
+            xy[:, 1] += offset_y
+        else:
+            xmin, xmax, ymin, ymax = self._xy_bounds
+            x_nodes = np.linspace(xmin, xmax, ni + 1, dtype=float)
+            y_nodes = np.linspace(ymin, ymax, nj + 1, dtype=float)
+            xy = np.asarray(
+                [
+                    [x_nodes[i], y_nodes[j]],
+                    [x_nodes[i + 1], y_nodes[j]],
+                    [x_nodes[i], y_nodes[j + 1]],
+                    [x_nodes[i + 1], y_nodes[j + 1]],
+                ],
+                dtype=float,
+            )
         points = np.empty((pillar_z.shape[1], 4, 3), dtype=float)
         points[:, :, :2] = xy[None, :, :]
         points[:, :, 2] = pillar_z[:, ::-1].T
@@ -390,6 +661,50 @@ class RescueReader:
             self._decoded_geometry_columns.popitem(last=False)
         return values
 
+    def _decoded_cell_geometry_pillars(self, i: int, j: int) -> list[np.ndarray | None]:
+        geometry_file = self._geometry_file
+        if geometry_file is None:
+            return [None] * 4
+        if len(geometry_file.block_starts) == geometry_file.raw_ni * geometry_file.raw_nj:
+            return [
+                self._decoded_geometry_column(i, j),
+                self._decoded_geometry_column(i + 1, j),
+                self._decoded_geometry_column(i, j + 1),
+                self._decoded_geometry_column(i + 1, j + 1),
+            ]
+        points = self._horizon_cell_points()[j, i]
+        block_map = self._geometry_block_index()
+        result: list[np.ndarray | None] = []
+        for point in points:
+            if not np.isfinite(point).all():
+                result.append(None)
+                continue
+            block_index = block_map.get((float(point[0]), float(point[1])))
+            result.append(self._decoded_geometry_block(block_index) if block_index is not None else None)
+        return result
+
+    def _decoded_geometry_block(self, block_index: int) -> np.ndarray | None:
+        geometry_file = self._geometry_file
+        if geometry_file is None or not (0 <= block_index < len(geometry_file.block_starts)):
+            return None
+        cached = self._decoded_geometry_columns.get(block_index)
+        if cached is not None:
+            self._decoded_geometry_columns.move_to_end(block_index)
+            return cached
+        start = geometry_file.block_starts[block_index]
+        end = (
+            geometry_file.block_starts[block_index + 1]
+            if block_index + 1 < len(geometry_file.block_starts)
+            else geometry_file.path.stat().st_size
+        )
+        values = _decode_geometry_column_block(geometry_file.path, start, end, geometry_file.raw_nk)
+        if values is None:
+            return None
+        self._decoded_geometry_columns[block_index] = values
+        while len(self._decoded_geometry_columns) > self._decoded_geometry_cache_limit:
+            self._decoded_geometry_columns.popitem(last=False)
+        return values
+
     def _property_info(self, property_uuid: str) -> PropertyInfo:
         for prop in self._properties:
             if prop.uuid == property_uuid:
@@ -400,11 +715,16 @@ class RescueReader:
 def _find_rescue_model_file(path: Path) -> Path | None:
     for candidate in sorted(path.glob("*.bin")):
         try:
-            if candidate.read_bytes().startswith(RESCUE_MODEL_HEADER):
+            if _read_file_head(candidate, len(RESCUE_MODEL_HEADER)).startswith(RESCUE_MODEL_HEADER):
                 return candidate
         except OSError:
             continue
     return None
+
+
+def _read_file_head(path: Path, size: int = 64) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(size)
 
 
 def _read_rescue_geometry_shape(path: Path) -> tuple[int, int, int]:
@@ -432,7 +752,7 @@ def _read_rescue_geometry_file_info(path: Path, ni: int, nj: int, nk: int) -> _G
         if command_pos < len(data) and _read_compact_run_length(data, command_pos, len(data)) is not None:
             starts.append(index)
         position = index + 1
-    if len(starts) != ni * nj:
+    if not starts:
         return None
     return _GeometryFile(path=path, block_starts=tuple(starts), raw_ni=ni, raw_nj=nj, raw_nk=nk)
 
@@ -440,17 +760,25 @@ def _read_rescue_geometry_file_info(path: Path, ni: int, nj: int, nk: int) -> _G
 def _read_property_file_info(file_id: int, path: Path) -> _PropertyFile:
     with path.open("rb") as handle:
         head = handle.read(64)
-        undefined_value = struct.unpack_from(">f", head, 26)[0]
-    marker = _find_trailer_offset(path)
-    end = marker - 2 if marker is not None else path.stat().st_size
-    value_count = max(0, (end - PROPERTY_VALUES_OFFSET) // 4)
+    if len(head) < 30 or RESCUE_PROPERTY_LABEL not in head[:24]:
+        raise ValueError(f"Invalid Rescue property file: {path}")
+    value_count = int.from_bytes(head[PROPERTY_ARRAY_OFFSET : PROPERTY_ARRAY_OFFSET + 4], "big", signed=False)
+    first_code = head[PROPERTY_ARRAY_OFFSET + 4]
+    if first_code == 0xFD:
+        first_run_length = head[PROPERTY_ARRAY_OFFSET + 5]
+    elif first_code in (0xFE, 0xFF):
+        first_run_length = int.from_bytes(
+            head[PROPERTY_ARRAY_OFFSET + 5 : PROPERTY_ARRAY_OFFSET + 9], "big", signed=False
+        )
+    else:
+        first_run_length = first_code
     return _PropertyFile(
         file_id=file_id,
         path=path,
-        values_offset=PROPERTY_VALUES_OFFSET,
+        values_offset=PROPERTY_ARRAY_OFFSET,
         value_count=value_count,
-        undefined_value=undefined_value,
-        first_run_length=int.from_bytes(head[30:34], "big", signed=False),
+        undefined_value=None,
+        first_run_length=first_run_length,
     )
 
 
@@ -461,34 +789,11 @@ def _decode_compact_property_file(
     valid_range: tuple[np.float32, np.float32] | None = None,
 ) -> np.ndarray:
     data = prop_file.path.read_bytes()
-    trailer = data.rfind(RESCUE_TRAILER)
-    end = trailer - 2 if trailer > 0 else len(data)
-    values = np.full(logical_count, np.nan, dtype=np.float32)
-
-    pos = prop_file.values_offset
-    logical = 0
-    run_length = prop_file.first_run_length
-    while pos < end and logical < logical_count:
-        take = min(run_length, logical_count - logical, max(0, (end - pos) // 4))
-        if take:
-            block = np.frombuffer(data, dtype=">f4", count=take, offset=pos).astype(np.float32, copy=False)
-            values[logical : logical + take] = block
-            pos += take * 4
-            logical += take
-        if take < run_length or pos >= end or logical >= logical_count:
-            break
-
-        command = _read_compact_command(data, pos, end, logical_count - logical)
-        if command is None:
-            # Last-resort resync for slightly shifted streams. If we cannot find
-            # a structural command nearby, leave the remaining cells as NaN.
-            break
-        command_pos, skip_count, next_run_length, next_pos = command
-        pos = next_pos
-        logical += min(skip_count, logical_count - logical)
-        run_length = next_run_length
-        if command_pos != pos and run_length < 0:
-            break
+    values, _position = _decode_triplet_array(data, prop_file.values_offset, keep=True)
+    if values.size != logical_count:
+        raise ValueError(
+            f"Rescue property logical size mismatch: decoded {values.size}, expected {logical_count}"
+        )
 
     if prop_file.undefined_value is not None and math.isfinite(prop_file.undefined_value):
         values[values == np.float32(prop_file.undefined_value)] = np.nan
@@ -662,11 +967,6 @@ def _valid_value_range(prop: PropertyInfo) -> tuple[np.float32, np.float32] | No
 
 
 def _output_value_scale(prop: PropertyInfo) -> float:
-    title = prop.title.lower()
-    kind = (prop.property_kind or "").lower()
-    text = f"{title} {kind}"
-    if "density" in text or "dens" in title:
-        return 1000.0
     return 1.0
 
 
@@ -763,6 +1063,169 @@ def _read_xy_bounds_from_crsmeta(root_path: Path | None) -> tuple[float, float, 
             ys = [point[1] for point in points]
             return min(xs), max(xs), min(ys), max(ys)
     return None
+
+
+def _horizon_titles_from_model(main_bytes: bytes) -> list[str]:
+    intervals: list[tuple[str, str]] = []
+    for text, _start, _end in _ascii_string_spans(main_bytes[:2048]):
+        if " - " not in text:
+            continue
+        top, base = (value.strip() for value in text.split(" - ", 1))
+        if not top or not base:
+            continue
+        if intervals and intervals[-1][1] != top:
+            continue
+        intervals.append((top, base))
+    if not intervals:
+        return []
+    return [intervals[0][0], *(base for _top, base in intervals)]
+
+
+def _trajectory_records_from_model(main_bytes: bytes, triplet_ids: set[int]) -> list[tuple[int, str]]:
+    marker = b"\x00\x04EOD\x00"
+    records: list[tuple[int, str]] = []
+    position = 0
+    seen: set[int] = set()
+    while True:
+        marker_offset = main_bytes.find(marker, position)
+        if marker_offset < 0:
+            break
+        position = marker_offset + 1
+        if marker_offset < 4 or marker_offset + len(marker) + 2 > len(main_bytes):
+            continue
+        file_id = int.from_bytes(main_bytes[marker_offset - 4 : marker_offset], "big", signed=False)
+        if file_id not in triplet_ids or file_id in seen:
+            continue
+        length_offset = marker_offset + len(marker)
+        title_length = int.from_bytes(main_bytes[length_offset : length_offset + 2], "big", signed=False)
+        if not (1 <= title_length <= 256):
+            continue
+        title_bytes = main_bytes[length_offset + 2 : length_offset + 2 + title_length].rstrip(b"\x00")
+        try:
+            title = title_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            title = title_bytes.decode("cp1251", errors="replace").strip()
+        if not title or title == "EOD":
+            continue
+        records.append((file_id, title))
+        seen.add(file_id)
+    return records
+
+
+def _triplet_point_count(path: Path) -> int:
+    head = _read_file_head(path, 28)
+    return int.from_bytes(head[24:28], "big", signed=False) if len(head) >= 28 else 0
+
+
+def _cumulative_distances(values: np.ndarray) -> np.ndarray:
+    if len(values) == 0:
+        return np.asarray([], dtype=float)
+    if len(values) == 1:
+        return np.asarray([0.0], dtype=float)
+    segments = np.linalg.norm(np.diff(values, axis=0), axis=1)
+    return np.concatenate((np.asarray([0.0]), np.cumsum(segments)))
+
+
+def _decode_triplet_file(path: Path, *, z_only: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    data = path.read_bytes()
+    if RESCUE_TRIPLET_LABEL not in data[:24]:
+        raise ValueError(f"Not a Rescue triplet file: {path}")
+    position = 24
+    x_values, position = _decode_triplet_array(data, position, keep=not z_only)
+    y_values, position = _decode_triplet_array(data, position, keep=not z_only)
+    z_values, _position = _decode_triplet_array(data, position, keep=True)
+    return x_values, y_values, z_values
+
+
+def _reshape_triplet_cell_points(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    ni: int,
+    nj: int,
+) -> np.ndarray:
+    expected = ni * nj * 4
+    if x_values.size != expected or y_values.size != expected:
+        raise ValueError(f"Unsupported Rescue surface topology: {x_values.size} values; expected {expected}")
+
+    # Rescue serializes the four corners as a (2 * NJ) by (2 * NI)
+    # matrix: two complete corner rows per logical J row and two values
+    # per logical I cell. Convert it to [J, I, corner, XY].
+    stored = np.stack((x_values, y_values), axis=1).astype(float)
+    return stored.reshape(nj, 2, ni, 2, 2).transpose(0, 2, 1, 3, 4).reshape(nj, ni, 4, 2)
+
+
+def _triplet_geometry_block_index(
+    cell_points: np.ndarray,
+    expected_block_count: int,
+) -> dict[tuple[float, float], int]:
+    nj, ni = cell_points.shape[:2]
+    nodes = np.full((nj + 1, ni + 1, 2), np.nan, dtype=float)
+    for corner, (dj, di) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
+        values = cell_points[:, :, corner, :]
+        target = nodes[dj : dj + nj, di : di + ni]
+        fill = np.isfinite(values).all(axis=2) & ~np.isfinite(target).all(axis=2)
+        target[fill] = values[fill]
+
+    valid = np.isfinite(nodes).all(axis=2) & (np.abs(nodes) < 1e20).all(axis=2)
+    if int(np.count_nonzero(valid)) != expected_block_count:
+        raise ValueError(
+            "Rescue sparse geometry does not match surface topology: "
+            f"{expected_block_count} geometry blocks, {int(np.count_nonzero(valid))} surface vertices."
+        )
+
+    # Geometry blocks are serialized with J varying fastest (I-major).
+    result: dict[tuple[float, float], int] = {}
+    block_index = 0
+    for i in range(ni + 1):
+        for j in range(nj + 1):
+            if not valid[j, i]:
+                continue
+            point = nodes[j, i]
+            result[(float(point[0]), float(point[1]))] = block_index
+            block_index += 1
+    return result
+
+
+def _decode_triplet_array(data: bytes, position: int, *, keep: bool) -> tuple[np.ndarray, int]:
+    if position + 4 > len(data):
+        raise ValueError("Truncated Rescue triplet array header.")
+    count = int.from_bytes(data[position : position + 4], "big", signed=False)
+    position += 4
+    values = np.empty(count, dtype=np.float32) if keep else np.asarray([], dtype=np.float32)
+    logical = 0
+    while logical < count:
+        if position >= len(data):
+            raise ValueError("Truncated Rescue triplet array.")
+        code = data[position]
+        position += 1
+        if code in (0xFD, 0xFE):
+            if code == 0xFD:
+                run_length = data[position]
+                position += 1
+            else:
+                run_length = int.from_bytes(data[position : position + 4], "big", signed=False)
+                position += 4
+            if logical + run_length > count or position + run_length * 4 > len(data):
+                raise ValueError("Invalid raw run in Rescue triplet array.")
+            if keep:
+                values[logical : logical + run_length] = np.frombuffer(
+                    data, dtype=">f4", count=run_length, offset=position
+                )
+            position += run_length * 4
+        else:
+            if code == 0xFF:
+                run_length = int.from_bytes(data[position : position + 4], "big", signed=False)
+                position += 4
+            else:
+                run_length = code
+            if logical + run_length > count or position + 4 > len(data):
+                raise ValueError("Invalid fill run in Rescue triplet array.")
+            value = struct.unpack_from(">f", data, position)[0]
+            position += 4
+            if keep:
+                values[logical : logical + run_length] = value
+        logical += run_length
+    return values, position
 
 
 def _property_metadata_from_model(main_bytes: bytes, file_id: int) -> tuple[str | None, str | None, str | None]:

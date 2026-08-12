@@ -79,6 +79,12 @@ def test_unique_well_values_preserves_table_order() -> None:
     assert unique_well_values(df) == ["A", "B", "C"]
 
 
+def test_unique_well_values_merges_formatting_and_alphabet_duplicates() -> None:
+    df = pd.DataFrame({"Well": ["A-101", " a 101 ", "А101", "B-2"]})
+    assert unique_well_values(df) == ["A-101", "B-2"]
+    assert well_value_counts(df) == {"A-101": 3, "B-2": 1}
+
+
 def test_well_value_counts_uses_normalized_well_values() -> None:
     df = pd.DataFrame({"Well": [1.0, "1", "2"]})
     assert well_value_counts(df) == {"1": 2, "2": 1}
@@ -92,6 +98,12 @@ def test_filter_sleeves_by_wells_keeps_selected_wells() -> None:
         {"Well": "A", "Port": 2},
         {"Well": "C", "Port": 1},
     ]
+
+
+def test_filter_sleeves_by_wells_uses_normalized_identity() -> None:
+    df = pd.DataFrame({"Well": ["A-101", "А 101", "B-2"], "Port": [1, 2, 1]})
+    out = filter_sleeves_by_wells(df, ["a101"])
+    assert out["Port"].tolist() == [1, 2]
 
 
 def test_filter_sleeves_by_wells_empty_selection_returns_no_rows() -> None:

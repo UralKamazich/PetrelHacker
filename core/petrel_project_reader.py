@@ -8,6 +8,7 @@ import sqlite3
 import numpy as np
 
 from core.petrel_grid_reader import PetrelGridReader, read_petrel_grid_horizontal_shape
+from core.petrel_horizon_reader import PetrelNamedHorizon, read_petrel_named_horizons
 from core.petrel_model_metadata import read_petrel_object_names, read_petrel_parent_names
 from core.petrel_trajectory_reader import read_petrel_trajectory, read_petrel_trajectory_point_count
 from core.resqml_reader import (
@@ -89,6 +90,7 @@ class PetrelProjectReader:
         self.backend = "petrel-project"
         self._grids: list[GridInfo] = []
         self._properties: list[PropertyInfo] = []
+        self._named_horizons: list[PetrelNamedHorizon] = []
         self._selected_grid_uuid: str | None = None
         self._property_counts: dict[str, int] = {}
         self._property_names: dict[str, tuple[str, ...]] = {}
@@ -128,6 +130,7 @@ class PetrelProjectReader:
         )
         self._grids = self._load_grids()
         self._properties = self._load_properties()
+        self._named_horizons = read_petrel_named_horizons(self.project.project_path)
         self._apply_native_grid_shapes_from_properties()
         self._apply_native_metadata_summary()
         self._enrich_from_companion_resqml()
@@ -159,6 +162,16 @@ class PetrelProjectReader:
             if prop.supporting_grid_uuid and _plain_uuid(prop.supporting_grid_uuid) == selected
         ]
         return scoped or list(self._properties)
+
+    def list_named_horizons(self) -> list[PetrelNamedHorizon]:
+        if self._selected_grid_uuid is None:
+            return list(self._named_horizons)
+        selected = _plain_uuid(self._selected_grid_uuid)
+        return [
+            horizon
+            for horizon in self._named_horizons
+            if _plain_uuid(horizon.grid_uuid) == selected
+        ]
 
     def list_md_datums(self) -> list[object]:
         return []
@@ -289,10 +302,17 @@ class PetrelProjectReader:
     def grid_to_dict(self, grid: GridInfo) -> dict[str, object]:
         result = _grid_to_dict(grid)
         property_names = self._property_names.get(grid.uuid, ())
+        horizon_names = [
+            horizon.title
+            for horizon in self._named_horizons
+            if _plain_uuid(horizon.grid_uuid) == _plain_uuid(grid.uuid)
+        ]
         result.update(
             propertyCount=self._property_counts.get(grid.uuid, 0),
             propertyNames=list(property_names),
             isGeological=grid.uuid == self._geological_grid_uuid,
+            namedHorizonCount=len(horizon_names),
+            namedHorizonNames=horizon_names,
         )
         return result
 

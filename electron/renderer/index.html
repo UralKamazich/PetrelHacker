@@ -216,10 +216,11 @@
               </div>
               <label class="field"><span>Well trajectory</span><select id="section-well"></select></label>
               <label class="field"><span>Property</span><select id="section-property"></select></label>
-              <div class="section-grid-2">
-                <label class="field"><span>Sample step, m</span><input id="section-step" type="number" min="1" step="1" value="25"></label>
-                <label class="field"><span>Max stations</span><input id="section-max-stations" type="number" min="50" step="50" value="1200"></label>
+              <div class="field section-horizon-field" id="section-horizon-field" hidden>
+                <span>Named surfaces</span>
+                <div class="section-horizon-list" id="section-horizons"></div>
               </div>
+              <label class="field"><span>Sample step, m</span><input id="section-step" type="number" min="1" step="1" value="25"></label>
               <label class="check-row">
                 <input type="checkbox" id="section-skip-inactive" checked>
                 <span>Skip inactive cells</span>

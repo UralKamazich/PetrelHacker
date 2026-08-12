@@ -37,6 +37,9 @@ def test_grid_indexer_reads_four_dimensional_points_dataset(tmp_path) -> None:
     match = indexer.find_column(15.0, 10.0)
     assert match is not None
     assert (match.i, match.j) == (1, 0)
+    matches = indexer.find_columns([(15.0, 10.0), (25.0, 30.0), (-1.0, 10.0)])
+    assert [(match.i, match.j) if match else None for match in matches] == [(1, 0), (2, 1), None]
+    assert matches[0].distance == match.distance
 
 
 class _DummyReader:

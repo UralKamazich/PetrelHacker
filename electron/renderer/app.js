@@ -70,7 +70,8 @@ const state = {
   sectionBoundaryFileName: '',
   sectionBoundaryDrag: null,
   sectionAxisDrag: null,
-  sectionAutoDrawTimer: null
+  sectionAutoDrawTimer: null,
+  sectionSelectedHorizons: {}
 };
 
 const $ = id => document.getElementById(id);
@@ -122,10 +123,11 @@ function bindActions() {
   $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable('curve-table')));
   $('load-curve-table').addEventListener('click', loadCurveTable);
   $('draw-curves').addEventListener('click', drawCurves);
-  ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-skip-inactive'].forEach(id => {
+  ['section-property', 'section-well', 'section-step', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', clearSectionAutoBounds);
   });
-  ['section-property', 'section-well', 'section-step', 'section-max-stations', 'section-axis', 'section-skip-inactive'].forEach(id => {
+  $('section-property').addEventListener('change', renderSectionHorizons);
+  ['section-property', 'section-well', 'section-step', 'section-axis', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
   $('section-well').addEventListener('change', scheduleCachedSectionAutoDraw);
@@ -270,7 +272,7 @@ function gridLabel(grid) {
 }
 
 async function loadModels() {
-  setBusy('Loading models', 'Reading grids and property cubes');
+  setBusy('Loading models', 'Reading properties, wells, and named surfaces');
   try {
     const result = await window.petrel.run('load-models', { models: requestModels() });
     state.loadedModels = result.models || [];
@@ -284,8 +286,13 @@ async function loadModels() {
     renderModels();
     renderProperties();
     renderSectionModels();
+    state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+    await refreshSectionSavedWellsFromBoundaryFile();
+    fillSectionWells(state.sectionTrajectories);
+    const surfaceCount = sectionHorizonOptions().length;
+    $('section-summary').textContent = `Wells: ${state.sectionTrajectories.length}, surfaces: ${surfaceCount}`;
     saveState();
-    setReady(`Loaded ${state.loadedModels.length} model(s)`);
+    setReady(`Loaded ${state.loadedModels.length} model(s), ${state.sectionTrajectories.length} wells, ${surfaceCount} surfaces`);
   } catch (error) {
     fail(error);
   }
@@ -518,7 +525,7 @@ function showWellMatchingModal(fracWells, models) {
 function renderWellMatchingRows(overlay, fracWells, trajectories) {
   const root = overlay.querySelector('#well-match-table');
   const trajectoryOptions = modelTrajectoryOptions(trajectories);
-  const rows = fracWells
+  const rows = uniqueNames(fracWells)
     .slice()
     .sort((left, right) => String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' }))
     .map(fracWell => {
@@ -547,21 +554,44 @@ function renderWellMatchingRows(overlay, fracWells, trajectories) {
 }
 
 function modelTrajectoryOptions(trajectories) {
-  const nameCounts = new Map();
-  (trajectories || []).forEach(item => {
-    const name = sectionTrajectoryName(item);
-    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
-  });
-  return (trajectories || [])
+  return deduplicateTrajectories(trajectories)
     .slice()
     .sort((left, right) => sectionTrajectoryName(left).localeCompare(sectionTrajectoryName(right), undefined, { numeric: true, sensitivity: 'base' }))
     .map(item => {
       const name = sectionTrajectoryName(item);
       return {
         value: name,
-        label: (nameCounts.get(name) || 0) > 1 ? `${name} (${item.point_count || '?'} pts)` : name
+        label: name
       };
     });
+}
+
+function uniqueNames(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const key = normalizeLookupTextSafe(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function deduplicateTrajectories(trajectories) {
+  const result = [];
+  const indexByName = new Map();
+  for (const trajectory of trajectories || []) {
+    const key = normalizeLookupTextSafe(sectionTrajectoryName(trajectory)) || trajectory.uuid;
+    if (!indexByName.has(key)) {
+      indexByName.set(key, result.length);
+      result.push(trajectory);
+      continue;
+    }
+    const index = indexByName.get(key);
+    if (Number(trajectory.point_count || 0) > Number(result[index].point_count || 0)) result[index] = trajectory;
+  }
+  return result;
 }
 
 function modelWellNameForFracWell(fracWell, trajectories) {
@@ -681,6 +711,81 @@ function renderSectionProperties() {
   const selected = $('section-property').value;
   const options = sectionPropertyOptions();
   fillSelectOptions('section-property', options, options.some(option => option.value === selected) ? selected : (options[0] && options[0].value));
+  renderSectionHorizons();
+}
+
+function renderSectionHorizons() {
+  const field = $('section-horizon-field');
+  const root = $('section-horizons');
+  if (!field || !root) return;
+  const options = sectionHorizonOptions();
+  field.hidden = !options.length;
+  root.innerHTML = '';
+  if (!options.length) return;
+  const key = sectionHorizonSelectionKey();
+  const selected = new Set(state.sectionSelectedHorizons[key] || []);
+  options.forEach(option => {
+    const label = document.createElement('label');
+    label.className = 'section-horizon-item';
+    label.innerHTML = `<input type="checkbox" value="${escapeHtml(option.value)}" ${selected.has(option.value) ? 'checked' : ''}><span>${escapeHtml(option.label)}</span>`;
+    root.appendChild(label);
+  });
+  root.querySelectorAll('input').forEach(input => {
+    input.addEventListener('change', () => {
+      state.sectionSelectedHorizons[key] = Array.from(root.querySelectorAll('input:checked')).map(item => item.value);
+      saveState();
+      if (!state.sectionResult) return;
+      const loaded = new Set((state.sectionResult.horizons || []).map(horizon => horizon.uuid));
+      const missing = state.sectionSelectedHorizons[key].some(uuid => !loaded.has(uuid));
+      if (missing) drawSection().catch(fail);
+      else paintSection(state.sectionResult);
+    });
+  });
+}
+
+function sectionHorizonSelectionKey() {
+  return 'all-models';
+}
+
+function sectionHorizonValue(model, horizon) {
+  return `${model.label || ''}::${model.path || ''}::${model.gridUuid || horizon.grid_uuid || ''}::${horizon.uuid || ''}`;
+}
+
+function sectionHorizonOptions() {
+  const options = [];
+  const seen = new Set();
+  for (const model of state.loadedModels || []) {
+    for (const horizon of model.namedHorizons || []) {
+      const key = normalizeLookupTextSafe(horizon.title) || sectionHorizonValue(model, horizon);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push({
+        value: sectionHorizonValue(model, horizon),
+        label: horizon.title,
+        model,
+        horizon
+      });
+    }
+  }
+  return options;
+}
+
+function selectedSectionHorizonUuids() {
+  return new Set(state.sectionSelectedHorizons[sectionHorizonSelectionKey()] || []);
+}
+
+function selectedSectionHorizonSources() {
+  const selected = selectedSectionHorizonUuids();
+  return sectionHorizonOptions()
+    .filter(option => selected.has(option.value))
+    .map(option => ({
+      path: option.model.path,
+      gridUuid: option.model.gridUuid || option.horizon.grid_uuid || '',
+      horizonUuid: option.horizon.uuid,
+      selectionUuid: option.value,
+      sourceModel: option.model.label,
+      depthOffset: Number(option.model.depthOffset || 0)
+    }));
 }
 
 function sectionPropertyOptions() {
@@ -1199,7 +1304,7 @@ function plotEmptyIn(plotId, text) {
 
 async function loadSectionWells() {
   if (!state.loadedModels.length) return fail(new Error('Load models first.'));
-  setBusy('Loading wells', 'Reading RESQML trajectories');
+  setBusy('Loading wells', 'Reading trajectories from all models');
   try {
     state.sectionUseExtractionSelection = false;
     renderSectionProperties();
@@ -1249,16 +1354,29 @@ async function ensureExtractionWellsLoaded() {
 }
 
 async function loadSectionTrajectories(model) {
+  if (Array.isArray(model.trajectories)) {
+    return annotateSectionTrajectories(model.trajectories, model);
+  }
   const result = await window.petrel.run('well-trajectories', { path: model.path, includePoints: false });
   return annotateSectionTrajectories(result.trajectories || [], model);
 }
 
 async function loadSectionTrajectoriesFromModels(models) {
   const all = [];
+  const indexByName = new Map();
   for (const model of models || []) {
     if (!model || !model.path) continue;
     try {
-      all.push(...await loadSectionTrajectories(model));
+      for (const trajectory of await loadSectionTrajectories(model)) {
+        const key = normalizeLookupTextSafe(sectionTrajectoryName(trajectory)) || `${trajectory.source_path || ''}::${trajectory.uuid || ''}`;
+        if (!indexByName.has(key)) {
+          indexByName.set(key, all.length);
+          all.push(trajectory);
+          continue;
+        }
+        const index = indexByName.get(key);
+        if (Number(trajectory.point_count || 0) > Number(all[index].point_count || 0)) all[index] = trajectory;
+      }
     } catch (error) {
       appendLog(`Warning: cannot load trajectories from ${model.label}: ${error.message}`);
     }
@@ -1333,7 +1451,7 @@ function fillSectionWells(trajectories) {
     const section = state.sectionCachedWells && state.sectionCachedWells[value] ? ' [section]' : '';
     return {
       value,
-      label: (hasDuplicates ? `${name}${source} (${item.point_count || '?'} pts)` : `${name}${source}`) + points + section
+      label: `${name}${source}${hasDuplicates ? ` (${item.point_count || '?'} pts)` : ''}${points}${section}`
     };
   });
   const selected = options.some(option => option.value === previous) ? previous : (options[0] && options[0].value);
@@ -1442,13 +1560,13 @@ async function drawSection(options = {}) {
       trajectoryUuid,
       trajectoryPath: trajectory.source_path || model.path,
       sampleStep: Number($('section-step').value || 25),
-      maxStations: Number($('section-max-stations').value || 1200),
       depthOffset: Number(model.depthOffset || 0),
       skipInactive: $('section-skip-inactive').checked,
       extraMds: sleeveMarkers.map(marker => numericCell(marker.md)).filter(Number.isFinite),
+      horizonSources: selectedSectionHorizonSources(),
       cacheOnly
     };
-    const result = await window.petrel.run('model-section', sectionPayload);
+    const result = unpackSectionResult(await window.petrel.run('model-section', sectionPayload));
     delete sectionPayload.cacheOnly;
     state.currentSectionPayload = sectionPayload;
     result.sleeveMarkers = sleeveMarkers;
@@ -2084,6 +2202,7 @@ function renderSectionLayerMesh(common, result) {
   const mesh = buildSectionLayerMesh(common.validRows, common.axis, common.depthMin, common.depthMax, common.valueMin, common.valueMax, common.xMin, common.xMax);
   mesh.trajectory = sectionTrajectoryPoints(result.rows || [], common);
   mesh.sleeves = sectionSleevePoints(result.rows || [], common, result.sleeveMarkers || [], result);
+  mesh.horizons = sectionHorizonLines(result, common);
   state.sectionMesh = { common, result, mesh };
   drawSectionLayerMesh(canvas, mesh, common, result);
   canvas.addEventListener('mousedown', event => {
@@ -2211,11 +2330,60 @@ function drawSectionLayerMesh(canvas, mesh, common, result) {
   }
   ctx.restore();
 
+  drawSectionMeshHorizons(ctx, frame, mesh);
   drawSectionMeshTrajectory(ctx, frame, mesh);
   drawSectionMeshSleeves(ctx, frame, mesh);
   drawSectionMeshBoundaries(ctx, frame, mesh);
   drawSectionMeshAxes(ctx, frame, mesh, common, result);
   drawSectionMeshColorbar(ctx, frame, mesh, result);
+}
+
+function sectionHorizonLines(result, common) {
+  const selected = selectedSectionHorizonUuids();
+  if (!selected.size) return [];
+  return (result.horizons || [])
+    .filter(horizon => selected.has(horizon.uuid))
+    .map(horizon => ({
+      ...horizon,
+      points: (horizon.points || [])
+        .map(point => ({
+          x: numericCell(point[common.axis]),
+          depth: numericCell(point.depth),
+          station: Number(point.station_index)
+        }))
+        .filter(point => Number.isFinite(point.x) && Number.isFinite(point.depth))
+        .sort((left, right) => left.x - right.x || left.station - right.station)
+    }))
+    .filter(horizon => horizon.points.length > 1);
+}
+
+function drawSectionMeshHorizons(ctx, frame, mesh) {
+  const palette = ['#111827', '#d97706', '#047857', '#1d4ed8', '#be123c', '#6d28d9'];
+  const horizons = mesh.horizons || [];
+  if (!horizons.length) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(frame.left, frame.top, frame.width, frame.height);
+  ctx.clip();
+  ctx.font = '600 10px Arial, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  horizons.forEach((horizon, index) => {
+    const color = palette[index % palette.length];
+    const points = horizon.points
+      .filter(point => point.x >= mesh.xMin && point.x <= mesh.xMax && point.depth >= mesh.yMin && point.depth <= mesh.yMax)
+      .map(point => sectionMeshToScreen(point.x, point.depth, frame, mesh));
+    if (points.length < 2) return;
+    drawPolyline(ctx, points, '#ffffff', 5, 0.9);
+    drawPolyline(ctx, points, color, 2.2, 1);
+    const labelPoint = points[points.length - 1];
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeText(horizon.title, labelPoint.x - 5, labelPoint.y - 3);
+    ctx.fillStyle = color;
+    ctx.fillText(horizon.title, labelPoint.x - 5, labelPoint.y - 3);
+  });
+  ctx.restore();
 }
 
 function sectionMeshFrame(width, height) {
@@ -2713,7 +2881,29 @@ async function saveCurrentSectionCache() {
 function sectionCacheResultPayload(result) {
   const payload = Object.assign({}, result || {});
   delete payload.event;
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  if (rows.length) {
+    const keys = Object.keys(rows[0]);
+    payload.rowColumns = Object.fromEntries(keys.map(key => [key, rows.map(row => row[key])]));
+    delete payload.rows;
+  }
   return payload;
+}
+
+function unpackSectionResult(result) {
+  if (!result || Array.isArray(result.rows) || !result.rowColumns) return result;
+  const columns = result.rowColumns;
+  const keys = Object.keys(columns);
+  const rowCount = keys.length && Array.isArray(columns[keys[0]]) ? columns[keys[0]].length : 0;
+  const rows = new Array(rowCount);
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = {};
+    for (const key of keys) row[key] = columns[key][index];
+    rows[index] = row;
+  }
+  result.rows = rows;
+  delete result.rowColumns;
+  return result;
 }
 
 async function clearSectionCache() {
@@ -3472,13 +3662,13 @@ function saveState() {
     sectionBoundaryFileName: $('section-boundary-file').value,
     sectionSceneSettings: state.sectionSceneSettings,
     sectionStep: $('section-step').value,
-    sectionMaxStations: $('section-max-stations').value,
     sectionAxis: $('section-axis').value,
     sectionSkipInactive: $('section-skip-inactive').checked,
     sectionBoundaryGap: $('section-boundary-gap').value,
     sectionMinLayer: $('section-min-layer').value,
     sectionShowBoundaries: $('section-show-boundaries').checked,
-    sectionBarrierThickness: $('section-barrier-thickness').checked
+    sectionBarrierThickness: $('section-barrier-thickness').checked,
+    sectionSelectedHorizons: state.sectionSelectedHorizons
   };
   localStorage.setItem('petrelhacker.state', JSON.stringify(data));
 }
@@ -3506,6 +3696,7 @@ function restoreState() {
       $('section-boundary-file').value = state.sectionBoundaryFileName;
     }
     if (data.sectionSceneSettings && typeof data.sectionSceneSettings === 'object') state.sectionSceneSettings = data.sectionSceneSettings;
+    if (data.sectionSelectedHorizons && typeof data.sectionSelectedHorizons === 'object') state.sectionSelectedHorizons = data.sectionSelectedHorizons;
     if (data.curveSettings && typeof data.curveSettings === 'object') state.curveSettings = data.curveSettings;
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
@@ -3520,7 +3711,6 @@ function restoreState() {
     $('curve-path').value = data.curvePath || '';
     applySavedCurveRanges();
     if (data.sectionStep) $('section-step').value = data.sectionStep;
-    if (data.sectionMaxStations) $('section-max-stations').value = data.sectionMaxStations;
     if (data.sectionAxis) $('section-axis').value = data.sectionAxis;
     if (data.sectionSkipInactive !== undefined) $('section-skip-inactive').checked = Boolean(data.sectionSkipInactive);
     if (data.sectionBoundaryGap !== undefined) $('section-boundary-gap').value = data.sectionBoundaryGap;
