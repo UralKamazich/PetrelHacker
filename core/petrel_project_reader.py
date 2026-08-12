@@ -5,12 +5,15 @@ from pathlib import Path
 import re
 import sqlite3
 
+from core.petrel_grid_reader import PetrelGridReader
 from core.resqml_reader import GridInfo, PropertyInfo, ResqmlReader
+from core.petrel_property_reader import PetrelPropertyReader
 
 
 PETREL_PROJECT_SUFFIX = ".pet"
 PETREL_PROJECT_DATA = "Data.ptd"
 GEOLOGICAL_PROPERTY_MARKERS = ("PORO", "PERM", "NTG")
+MILLIDARCY_TO_SQUARE_METRES = 9.869233e-16
 
 
 @dataclass(frozen=True)
@@ -64,11 +67,10 @@ class PetrelProjectReader:
     """Reader facade for native Petrel projects backed by Data.ptd.
 
     Native Petrel projects store domain object payloads in a SQLite database
-    (`*.ptd/Data.ptd`). This class currently exposes project contents and the
-    user's selected internal grid through the same narrow metadata API used by
-    RESQML and Rescue readers. Geometry/value decoding is intentionally kept
-    behind explicit methods so extraction fails clearly until that parser is
-    implemented for the selected project payloads.
+    (`*.ptd/Data.ptd`). This class exposes project contents and the user's
+    selected internal grid through the same narrow API used by RESQML and
+    Rescue readers. Straight-pillar geometry and supported property values are
+    decoded natively; companion RESQML remains a fallback for other layouts.
     """
 
     def __init__(self, path: str | Path):
@@ -84,6 +86,8 @@ class PetrelProjectReader:
         self._companion_epc_path: Path | None = None
         self._companion_readers: dict[str, ResqmlReader] = {}
         self._column_centers_cache: dict[str, object] = {}
+        self._native_grid_readers: dict[str, PetrelGridReader] = {}
+        self._native_property_readers: dict[str, PetrelPropertyReader] = {}
 
     @property
     def epc_path(self) -> Path:
@@ -118,6 +122,9 @@ class PetrelProjectReader:
         companion = self._selected_companion_reader(required=False)
         if companion is not None:
             companion.select_grid(_plain_uuid(grid_uuid))
+        native = self._native_grid_reader(required=False)
+        if native is not None:
+            self._apply_native_grid_shape(native)
 
     def list_properties(self) -> list[PropertyInfo]:
         if self._selected_grid_uuid is None:
@@ -139,12 +146,31 @@ class PetrelProjectReader:
         return grid.ni, grid.nj, grid.nk
 
     def get_property_value(self, property_uuid: str, i: int, j: int, k: int):
+        native = self._native_property_reader(property_uuid, required=False)
+        if native is not None:
+            value = native.get_value(i, j, k)
+            return _scale_native_property_value(self._property_by_uuid(property_uuid), value)
         reader = self._selected_companion_reader()
         return reader.get_property_value(_plain_uuid(property_uuid), i, j, k)
 
     def get_property_column_values(self, property_uuid: str, i: int, j: int):
+        native = self._native_property_reader(property_uuid, required=False)
+        if native is not None:
+            values = native.get_column_values(i, j)
+            return values * _native_property_scale(self._property_by_uuid(property_uuid))
         reader = self._selected_companion_reader()
         return reader.get_property_column_values(_plain_uuid(property_uuid), i, j)
+
+    def get_property_columns_values(self, property_uuid: str, columns: set[tuple[int, int]]):
+        native = self._native_property_reader(property_uuid, required=False)
+        if native is not None:
+            scale = _native_property_scale(self._property_by_uuid(property_uuid))
+            return {column: values * scale for column, values in native.get_columns_values(columns).items()}
+        reader = self._selected_companion_reader()
+        return {
+            column: reader.get_property_column_values(_plain_uuid(property_uuid), *column)
+            for column in columns
+        }
 
     def get_column_centers_xy(self):
         if self._selected_grid_uuid is None:
@@ -152,6 +178,11 @@ class PetrelProjectReader:
         cached = self._column_centers_cache.get(self._selected_grid_uuid)
         if cached is not None:
             return cached
+        native = self._native_grid_reader(required=False)
+        if native is not None:
+            centers = native.get_column_centers_xy()
+            self._column_centers_cache[self._selected_grid_uuid] = centers
+            return centers
         from core.grid_indexer import FastGridIndexer
 
         reader = self._selected_companion_reader()
@@ -171,6 +202,9 @@ class PetrelProjectReader:
         return points[k : k + 2]
 
     def get_cell_geometry_column(self, i: int, j: int):
+        native = self._native_grid_reader(required=False)
+        if native is not None:
+            return native.get_cell_geometry_column(i, j)
         import h5py
 
         from core.model_section import _geometry_column_from_dataset
@@ -186,6 +220,9 @@ class PetrelProjectReader:
             return _geometry_column_from_dataset(h5[points_path], i, j, ni, nj, nk)
 
     def get_cell_active_column(self, i: int, j: int):
+        native = self._native_grid_reader(required=False)
+        if native is not None:
+            return native.get_cell_active_column(i, j)
         return self._selected_companion_reader().get_cell_active_column(i, j)
 
     def grid_to_dict(self, grid: GridInfo) -> dict[str, object]:
@@ -349,6 +386,93 @@ class PetrelProjectReader:
             raise NotImplementedError(_unsupported_decode_message())
         return reader
 
+    def _native_property_reader(
+        self,
+        property_uuid: str,
+        *,
+        required: bool = True,
+    ) -> PetrelPropertyReader | None:
+        normalized = _plain_uuid(property_uuid)
+        prop = next((item for item in self._properties if _plain_uuid(item.uuid) == normalized), None)
+        if prop is None:
+            raise ValueError(f"Petrel property UUID not found: {property_uuid}")
+        cached = self._native_property_readers.get(prop.uuid)
+        if cached is not None:
+            return cached
+        data_pk = _data_pk_from_paths(prop.hdf_paths)
+        if data_pk is None:
+            if required:
+                raise ValueError(f"Petrel property has no Data.ptd object reference: {prop.title}")
+            return None
+        try:
+            native = PetrelPropertyReader(self.data_path, data_pk, prop.property_type or "")
+        except ValueError:
+            if required:
+                raise
+            return None
+        selected_shape = self.get_grid_shape()
+        native_shape = (native.layout.ni, native.layout.nj, native.layout.nk)
+        if all(selected_shape) and native_shape != selected_shape:
+            if required:
+                raise ValueError(
+                    f"Petrel property shape {native_shape} does not match selected grid {selected_shape}"
+                )
+            return None
+        self._native_property_readers[prop.uuid] = native
+        return native
+
+    def _native_grid_reader(self, *, required: bool = True) -> PetrelGridReader | None:
+        self._require_selected_grid()
+        assert self._selected_grid_uuid is not None
+        cached = self._native_grid_readers.get(self._selected_grid_uuid)
+        if cached is not None:
+            return cached
+        grid = next(item for item in self._grids if item.uuid == self._selected_grid_uuid)
+        data_pk = _data_pk_from_paths(grid.hdf_paths)
+        if data_pk is None:
+            if required:
+                raise ValueError(f"Petrel grid has no Data.ptd object reference: {grid.title}")
+            return None
+        try:
+            native = PetrelGridReader(self.data_path, data_pk)
+        except ValueError:
+            if required:
+                raise
+            return None
+        selected_shape = self.get_grid_shape()
+        native_shape = (native.layout.ni, native.layout.nj, native.layout.nk)
+        if all(selected_shape) and native_shape != selected_shape:
+            if required:
+                raise ValueError(f"Native Petrel grid shape {native_shape} does not match {selected_shape}")
+            return None
+        self._native_grid_readers[self._selected_grid_uuid] = native
+        return native
+
+    def _property_by_uuid(self, property_uuid: str) -> PropertyInfo:
+        normalized = _plain_uuid(property_uuid)
+        prop = next((item for item in self._properties if _plain_uuid(item.uuid) == normalized), None)
+        if prop is None:
+            raise ValueError(f"Petrel property UUID not found: {property_uuid}")
+        return prop
+
+    def _apply_native_grid_shape(self, native: PetrelGridReader) -> None:
+        shape = (native.layout.ni, native.layout.nj, native.layout.nk)
+        self._grids = [
+            GridInfo(
+                index=grid.index,
+                title=grid.title,
+                uuid=grid.uuid,
+                ni=shape[0],
+                nj=shape[1],
+                nk=shape[2],
+                grid_type=grid.grid_type,
+                hdf_paths=grid.hdf_paths,
+            )
+            if grid.uuid == self._selected_grid_uuid
+            else grid
+            for grid in self._grids
+        ]
+
 
 def describe_petrel_project(path: str | Path) -> dict[str, object]:
     reader = PetrelProjectReader(path)
@@ -424,6 +548,25 @@ def _petrel_droid(value: str) -> str:
 def _has_geological_properties(names: list[str]) -> bool:
     normalized = [name.upper() for name in names]
     return any(any(marker in name for marker in GEOLOGICAL_PROPERTY_MARKERS) for name in normalized)
+
+
+def _data_pk_from_paths(paths: tuple[str, ...]) -> int | None:
+    for path in paths:
+        match = re.search(r"data_pk=(\d+)", path)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _native_property_scale(prop: PropertyInfo) -> float:
+    title = prop.title.upper()
+    return MILLIDARCY_TO_SQUARE_METRES if title == "PERM" or title.startswith("PERM_") else 1.0
+
+
+def _scale_native_property_value(prop: PropertyInfo, value):
+    if value == "":
+        return value
+    return value * _native_property_scale(prop)
 
 
 def _format_bytes(value: int) -> str:

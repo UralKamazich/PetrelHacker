@@ -1,6 +1,7 @@
 PySide6
 resqpy
 h5py
+lz4
 numpy
 pandas
 openpyxl

@@ -215,9 +215,16 @@ def _read_section_columns(reader, prop, grid, columns: set[tuple[int, int]]):
 
 
 def _read_section_columns_via_reader(reader, prop, columns: set[tuple[int, int]]):
+    get_columns = getattr(reader, "get_property_columns_values", None)
+    values_by_column = get_columns(prop.uuid, columns) if callable(get_columns) else None
     cache = {}
     for i, j in columns:
-        values = _safe_float_array(reader.get_property_column_values(prop.uuid, i, j))
+        source_values = (
+            values_by_column[(i, j)]
+            if values_by_column is not None
+            else reader.get_property_column_values(prop.uuid, i, j)
+        )
+        values = _safe_float_array(source_values)
         geometry = reader.get_cell_geometry_column(i, j)
         active = reader.get_cell_active_column(i, j)
         active_values = np.asarray(active, dtype=bool).reshape(-1) if active is not None else None
