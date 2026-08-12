@@ -208,13 +208,14 @@ class ResqmlReader:
         candidate = self.epc_path.with_suffix(".h5")
         return candidate if candidate.exists() else None
 
-    def open(self, *, include_properties: bool = True) -> None:
+    def open(self, *, include_properties: bool = True, validate_with_resqpy: bool = True) -> None:
         if not self.epc_path.exists():
             raise FileNotFoundError(f"EPC file does not exist: {self.epc_path}")
         if not zipfile.is_zipfile(self.epc_path):
             raise ValueError(f"EPC is not a readable ZIP package: {self.epc_path}")
 
-        self._try_open_with_resqpy()
+        if validate_with_resqpy:
+            self._try_open_with_resqpy()
         self._load_xml_objects()
         self._grids = self._parse_grids()
         self._properties = self._parse_properties() if include_properties else []

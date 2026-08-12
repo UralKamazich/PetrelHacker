@@ -25,7 +25,7 @@ from core.property_extractor import (
     _relative_depth as _depth_relative_depth,
     transform_property_value,
 )
-from core.resqml_reader import PropertyInfo
+from core.resqml_reader import GridInfo, PropertyInfo
 
 
 PORT_DEPTH_COLUMN = "TVDSS_PORT"
@@ -39,6 +39,7 @@ class ExtractionModelSpec:
     selected_property_uuids: list[str] = field(default_factory=list)
     depth_offset: float = 0.0
     label: str = ""
+    grid_uuid: str | None = None
 
 
 @dataclass
@@ -94,7 +95,7 @@ class MultiModelPropertyExtractor:
             grids = reader.list_grids()
             if not grids:
                 raise ValueError(f"No grids found in model {model_index}: {spec.path}")
-            grid = grids[0]
+            grid = _select_grid(grids, spec.grid_uuid, model_index)
             reader.select_grid(grid.uuid)
             if getattr(reader, "backend", "") == "rescue":
                 _log(
@@ -534,6 +535,19 @@ def _is_discrete_property(prop: PropertyInfo) -> bool:
     return "discrete" in text or "categorical" in text or "lith" in text or "facies" in text
 
 
+def _select_grid(grids: list[GridInfo], grid_uuid: str | None, model_index: int) -> GridInfo:
+    if grid_uuid:
+        normalized = grid_uuid.lower()
+        for grid in grids:
+            if grid.uuid.lower() == normalized:
+                return grid
+        raise ValueError(f"Selected grid was not found in model {model_index}: {grid_uuid}")
+    if len(grids) > 1:
+        titles = ", ".join(grid.title or grid.uuid for grid in grids[:5])
+        raise ValueError(f"Model {model_index} has multiple grids. Select one internal model: {titles}")
+    return grids[0]
+
+
 def _blank_values(context: ModelContext) -> dict[str, str]:
     return {name: "" for name in context.output_names.values()}
 
@@ -802,7 +816,7 @@ def _offset_geometry(geometry: dict[str, list[float]], offset: float) -> dict[st
 
 def _selected_properties(properties: list[PropertyInfo], selected_uuids: list[str]) -> list[PropertyInfo]:
     selected = {uuid.lower() for uuid in selected_uuids}
-    return [prop for prop in properties if prop.uuid in selected]
+    return [prop for prop in properties if prop.uuid.lower() in selected]
 
 
 def _well_depth_datums_from_reader(reader: object) -> dict[str, float]:

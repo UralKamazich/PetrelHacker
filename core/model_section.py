@@ -56,6 +56,7 @@ def extract_well_section(
     model_path: str | Path,
     property_uuid: str,
     *,
+    grid_uuid: str | None = None,
     trajectory_model_path: str | Path | None = None,
     well_name: str | None = None,
     trajectory_uuid: str | None = None,
@@ -75,11 +76,12 @@ def extract_well_section(
     grids = reader.list_grids()
     if not grids:
         raise ValueError("No grids found in model.")
-    reader.select_grid(grids[0].uuid)
+    grid = _select_grid(grids, grid_uuid)
+    reader.select_grid(grid.uuid)
 
     trajectory_reader = reader if isinstance(reader, ResqmlReader) and resolved_trajectory_path == resolved_path else ResqmlReader(resolved_trajectory_path)
     if trajectory_reader is not reader:
-        trajectory_reader.open(include_properties=False)
+        trajectory_reader.open(include_properties=False, validate_with_resqpy=False)
 
     trajectory = _select_trajectory(trajectory_reader.list_well_trajectories(), well_name, trajectory_uuid)
     prop = _select_property(reader.list_properties(), property_uuid)
@@ -88,7 +90,7 @@ def extract_well_section(
         raise ValueError(f"Trajectory has fewer than two points: {trajectory.well_name}")
 
     stations = _sample_trajectory(points, sample_step, max_stations, extra_md_values=extra_md_values)
-    indexer = FastGridIndexer(reader, grids[0])
+    indexer = FastGridIndexer(reader, grid)
     indexer.build_column_index()
     matched_stations: list[tuple[dict[str, float | None], object | None]] = []
     unique_columns: set[tuple[int, int]] = set()
@@ -98,7 +100,7 @@ def extract_well_section(
         if match is not None:
             unique_columns.add((match.i, match.j))
 
-    column_cache = _read_section_columns(reader, prop, grids[0], unique_columns)
+    column_cache = _read_section_columns(reader, prop, grid, unique_columns)
     rows: list[SectionCell] = []
 
     for station_index, (station, match) in enumerate(matched_stations):
@@ -159,6 +161,18 @@ def extract_well_section(
             for point in points
         ],
     )
+
+
+def _select_grid(grids, grid_uuid: str | None):
+    if grid_uuid:
+        normalized = grid_uuid.lower()
+        for grid in grids:
+            if grid.uuid.lower() == normalized:
+                return grid
+        raise ValueError(f"Selected grid UUID was not found: {grid_uuid}")
+    if len(grids) > 1:
+        raise ValueError("Model contains multiple grids. Select an internal model before drawing a section.")
+    return grids[0]
 
 
 def _read_section_columns(reader, prop, grid, columns: set[tuple[int, int]]):
@@ -353,7 +367,7 @@ def _select_trajectory(
 def _select_property(properties, property_uuid: str):
     normalized = property_uuid.lower()
     for prop in properties:
-        if prop.uuid == normalized:
+        if prop.uuid.lower() == normalized:
             return prop
     raise ValueError(f"Property UUID not found: {property_uuid}")
 

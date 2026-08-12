@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.petrel_project_reader import PetrelProjectReader, is_petrel_project_path
 from core.resqml_reader import ResqmlReader
 from core.rescue_reader import RescueReader, is_rescue_path
 
 
 def open_model_reader(path: str | Path):
     model_path = resolve_model_path(path)
-    reader = RescueReader(model_path) if is_rescue_path(model_path) else ResqmlReader(model_path)
+    if is_petrel_project_path(model_path):
+        reader = PetrelProjectReader(model_path)
+    elif is_rescue_path(model_path):
+        reader = RescueReader(model_path)
+    else:
+        reader = ResqmlReader(model_path)
     reader.open()
     return reader
 
@@ -19,6 +25,9 @@ def resolve_model_path(path: str | Path) -> Path:
         return model_path
 
     if not model_path.is_dir():
+        return model_path
+
+    if is_petrel_project_path(model_path):
         return model_path
 
     rescue_file = _find_rescue_bin(model_path)

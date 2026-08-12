@@ -179,11 +179,28 @@ function renderModels() {
   const root = $('model-stack');
   root.innerHTML = '';
   state.models.forEach((model, index) => {
+    const grids = Array.isArray(model.internalGrids) ? model.internalGrids : [];
+    const gridSelect = grids.length > 1 ? `
+      <label class="field model-grid-field">
+        <span>Petrel model</span>
+        <select data-model-grid="${index}">
+          <option value="" ${model.gridUuid ? '' : 'selected'}>Select Petrel model</option>
+          ${grids.map(grid => `<option value="${escapeHtml(grid.uuid)}" ${grid.uuid === model.gridUuid ? 'selected' : ''}>${escapeHtml(gridLabel(grid))}</option>`).join('')}
+        </select>
+      </label>
+    ` : '';
+    const sourceNote = model.sourceKind === 'petrel-project'
+      ? `<div class="model-source-note">${grids.length} Petrel model(s), ${Number(model.propertyCount || 0)} propert${Number(model.propertyCount || 0) === 1 ? 'y' : 'ies'}</div>`
+      : '';
     const card = document.createElement('div');
-    card.className = 'model-card';
+    card.className = `model-card${gridSelect ? ' has-grid-select' : ''}`;
     card.innerHTML = `
       <div class="model-badge">${model.label}</div>
-      <label class="field"><span>Model folder</span><input type="text" value="${escapeHtml(model.path)}" data-model-path="${index}" placeholder="Select folder with .epc or .bin model"></label>
+      <div class="model-path-stack">
+        <label class="field"><span>Model file / folder</span><input type="text" value="${escapeHtml(model.path)}" data-model-path="${index}" placeholder="Select .pet, .epc, Rescue .bin, or folder"></label>
+        ${gridSelect}
+        ${sourceNote}
+      </div>
       <label class="field"><span>Depth shift, m</span><input type="number" step="0.1" value="${model.depthOffset}" data-model-offset="${index}"></label>
       <button class="icon-button" data-model-browse="${index}">...</button>
     `;
@@ -201,16 +218,55 @@ function renderModels() {
       saveState();
     });
   });
+  root.querySelectorAll('[data-model-grid]').forEach(select => {
+    select.addEventListener('change', () => {
+      state.models[Number(select.dataset.modelGrid)].gridUuid = select.value;
+      saveState();
+    });
+  });
   root.querySelectorAll('[data-model-browse]').forEach(button => {
     button.addEventListener('click', async () => {
       const index = Number(button.dataset.modelBrowse);
       const selected = await window.petrel.openModel({ dialogKey: 'models' });
       if (!selected) return;
       state.models[index].path = selected;
+      await inspectModelSource(index);
       renderModels();
       saveState();
     });
   });
+}
+
+async function inspectModelSource(index) {
+  const model = state.models[index];
+  model.internalGrids = [];
+  model.sourceKind = '';
+  model.propertyCount = 0;
+  model.gridUuid = '';
+  try {
+    const info = await window.petrel.run('model-source-info', { path: model.path });
+    model.path = info.path || model.path;
+    model.sourceKind = info.kind || '';
+    model.internalGrids = Array.isArray(info.grids) ? info.grids : [];
+    model.propertyCount = Number(info.propertyCount || 0);
+    if (model.internalGrids.length === 1) {
+      model.gridUuid = model.internalGrids[0].uuid || '';
+    }
+  } catch (error) {
+    appendLog(`Model source inspect failed: ${error.message}`);
+  }
+}
+
+function gridLabel(grid) {
+  const title = grid.title || grid.uuid || 'Petrel model';
+  const type = grid.gridType || grid.grid_type || '';
+  const shape = [grid.ni, grid.nj, grid.nk].every(value => value)
+    ? ` ${grid.ni} x ${grid.nj} x ${grid.nk}`
+    : '';
+  const properties = Array.isArray(grid.propertyNames) && grid.propertyNames.length
+    ? ` - ${grid.propertyNames.join(', ')}`
+    : '';
+  return `${title}${type ? ` - ${type}` : ''}${shape}${properties}`;
 }
 
 async function loadModels() {
@@ -1373,6 +1429,7 @@ async function drawSection(options = {}) {
   try {
     const sectionPayload = {
       path: model.path,
+      gridUuid: model.gridUuid || '',
       propertyUuid,
       trajectoryUuid,
       trajectoryPath: trajectory.source_path || model.path,
@@ -3161,7 +3218,12 @@ function handleBackendEvent(message) {
 function requestModels() {
   return state.models
     .filter(model => model.path && model.path.trim())
-    .map(model => ({ label: model.label, path: model.path.trim(), depthOffset: Number(model.depthOffset || 0) }));
+    .map(model => ({
+      label: model.label,
+      path: model.path.trim(),
+      depthOffset: Number(model.depthOffset || 0),
+      gridUuid: model.gridUuid || ''
+    }));
 }
 
 function shouldAutoSelect(title) {

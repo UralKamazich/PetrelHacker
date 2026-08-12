@@ -28,6 +28,7 @@ from core.model_section import extract_well_section
 from core.model_reader import open_model_reader, resolve_model_path
 from core.multi_model_extractor import ExtractionModelSpec, MultiModelPropertyExtractor
 from core.output_planner import choose_output_plan
+from core.petrel_project_reader import describe_petrel_project, is_petrel_project_path
 from core.property_extractor import ExtractionSettings, write_extraction_log
 from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import (
@@ -53,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         "command",
         choices=(
             "load-models",
+            "model-source-info",
             "preview-sleeves",
             "suggest-output",
             "extract",
@@ -74,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = _read_payload()
         handlers: dict[str, Callable[[JsonDict], None]] = {
             "load-models": load_models,
+            "model-source-info": model_source_info,
             "preview-sleeves": preview_sleeves,
             "suggest-output": suggest_output,
             "extract": extract,
@@ -116,7 +119,9 @@ def load_models(payload: JsonDict) -> None:
         reader = open_model_reader(path)
         grids = reader.list_grids()
         if grids:
-            reader.select_grid(grids[0].uuid)
+            selected_grid_uuid = str(model.get("gridUuid") or "").strip()
+            grid = _select_grid(grids, selected_grid_uuid, label, getattr(reader, "backend", ""))
+            reader.select_grid(grid.uuid)
         properties = reader.list_properties()
         summary = _model_summary(label, reader, grids, properties)
         _emit("log", message=summary)
@@ -135,6 +140,25 @@ def load_models(payload: JsonDict) -> None:
     if not results:
         raise ValueError("Select at least one model path.")
     _emit("result", models=results)
+
+
+def model_source_info(payload: JsonDict) -> None:
+    path = str(payload.get("path", "")).strip()
+    if not path:
+        raise ValueError("Model path is empty.")
+    model_path = resolve_model_path(path)
+    if is_petrel_project_path(model_path):
+        _emit("result", **describe_petrel_project(model_path))
+        return
+    reader = open_model_reader(model_path)
+    _emit(
+        "result",
+        kind=getattr(reader, "backend", "model"),
+        path=str(reader.epc_path),
+        h5Path=str(reader.h5_path) if reader.h5_path else None,
+        grids=[_dataclass_dict(grid) for grid in reader.list_grids()],
+        propertyCount=len(reader.list_properties()),
+    )
 
 
 def preview_sleeves(payload: JsonDict) -> None:
@@ -220,6 +244,7 @@ def extract(payload: JsonDict) -> None:
                 selected_property_uuids=selected,
                 depth_offset=_to_float(model.get("depthOffset"), 0.0),
                 label=str(model.get("label") or f"M{index}"),
+                grid_uuid=str(model.get("gridUuid") or "").strip() or None,
             )
         )
     if not specs:
@@ -387,7 +412,7 @@ def well_trajectories(payload: JsonDict) -> None:
     model_path = resolve_model_path(path)
     if Path(model_path).suffix.lower() == ".epc":
         reader = ResqmlReader(model_path)
-        reader.open(include_properties=False)
+        reader.open(include_properties=False, validate_with_resqpy=False)
     else:
         reader = open_model_reader(model_path)
     if not hasattr(reader, "list_well_trajectories"):
@@ -442,6 +467,7 @@ def model_section(payload: JsonDict) -> None:
     result = extract_well_section(
         path,
         property_uuid,
+        grid_uuid=_empty_to_none(payload.get("gridUuid")),
         trajectory_model_path=_empty_to_none(payload.get("trajectoryPath")),
         well_name=_empty_to_none(payload.get("wellName")),
         trajectory_uuid=_empty_to_none(payload.get("trajectoryUuid")),
@@ -624,9 +650,10 @@ def _section_cache_key(payload: JsonDict) -> str:
     model_path = resolve_model_path(str(payload.get("path", "")).strip())
     trajectory_path = resolve_model_path(str(payload.get("trajectoryPath", "")).strip()) if payload.get("trajectoryPath") else model_path
     data = {
-        "version": 1,
+        "version": 2,
         "model": _file_cache_identity(model_path),
         "trajectory": _file_cache_identity(trajectory_path),
+        "gridUuid": str(payload.get("gridUuid", "")).strip(),
         "propertyUuid": str(payload.get("propertyUuid", "")).strip(),
         "wellName": _empty_to_none(payload.get("wellName")),
         "trajectoryUuid": _empty_to_none(payload.get("trajectoryUuid")),
@@ -882,6 +909,18 @@ def _models(payload: JsonDict) -> list[JsonDict]:
     return [{"path": path}] if path else []
 
 
+def _select_grid(grids: list[object], grid_uuid: str, label: str, backend: str) -> object:
+    if grid_uuid:
+        for grid in grids:
+            if getattr(grid, "uuid", None) == grid_uuid:
+                return grid
+        raise ValueError(f"Selected grid was not found for {label}: {grid_uuid}")
+    if backend == "petrel-project" and len(grids) > 1:
+        titles = ", ".join(getattr(grid, "title", getattr(grid, "uuid", "?")) for grid in grids[:5])
+        raise ValueError(f"{label}: select one internal Petrel model before loading. Available: {titles}")
+    return grids[0]
+
+
 def _model_summary(label: str, reader: object, grids: list[object], properties: list[object]) -> str:
     lines = [f"{label}: model summary", f"  Backend: {getattr(reader, 'backend', '-') or '-'}"]
     for grid in grids:
@@ -894,12 +933,15 @@ def _model_summary(label: str, reader: object, grids: list[object], properties: 
             f"  Grid: {getattr(grid, 'title', '-')}, shape={ni or '?'} x {nj or '?'} x {nk or '?'}{cell_text}"
         )
     lines.append(f"  Property cubes: {len(properties)}")
-    for prop in properties:
+    max_listed_properties = 30
+    for prop in properties[:max_listed_properties]:
         title = getattr(prop, "title", "-")
         kind = getattr(prop, "property_kind", None)
         uom = getattr(prop, "uom", None)
         tail = ", ".join(value for value in [f"kind={kind}" if kind else "", f"uom={uom}" if uom else ""] if value)
         lines.append(f"    - {title}" + (f" ({tail})" if tail else ""))
+    if len(properties) > max_listed_properties:
+        lines.append(f"    ... {len(properties) - max_listed_properties} more")
     return "\n".join(lines)
 
 

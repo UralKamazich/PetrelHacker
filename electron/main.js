@@ -137,13 +137,17 @@ ipcMain.handle('dialog:open-file', async (_event, options) => {
 ipcMain.handle('dialog:open-model', async (_event, options) => {
   const key = options && options.dialogKey ? String(options.dialogKey) : 'models';
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select model folder',
-    buttonLabel: 'Select model folder',
-    properties: ['openDirectory'],
+    title: 'Select model file or folder',
+    buttonLabel: 'Select model',
+    properties: ['openFile', 'openDirectory'],
+    filters: [
+      { name: 'Petrel / RESQML / Rescue', extensions: ['pet', 'epc', 'bin'] },
+      { name: 'All files', extensions: ['*'] }
+    ],
     defaultPath: dialogDefaultPath(options, key)
   });
   if (result.canceled || !result.filePaths.length) return null;
-  saveDialogDirectory(key, result.filePaths[0], true);
+  saveDialogDirectory(key, result.filePaths[0], false);
   return result.filePaths[0];
 });
 

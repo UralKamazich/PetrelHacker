@@ -324,6 +324,10 @@ select {
   background: var(--panel-2);
 }
 
+.model-card.has-grid-select {
+  align-items: start;
+}
+
 .model-badge {
   display: grid;
   place-items: center;
@@ -339,8 +343,27 @@ select {
   margin-bottom: 0;
 }
 
-#view-extract .model-card .field span {
+#view-extract .model-card > .field span,
+#view-extract .model-path-stack > .field:first-child span {
   display: none;
+}
+
+.model-path-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.model-grid-field span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.model-source-note {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .mapping-grid,
