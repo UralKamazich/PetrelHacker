@@ -43,6 +43,7 @@ from core.sleeves_loader import (
     well_value_counts,
 )
 from core.table_io import read_table
+from core.trajectory_analysis import analyze_trajectory, interpolate_trajectory_xy
 
 
 JsonDict = dict[str, Any]
@@ -62,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             "metrics",
             "curve-data",
             "well-trajectories",
+            "trajectory-analysis",
+            "calculate-sleeve-coordinates",
             "model-section",
             "sleeve-markers",
             "load-section-boundaries",
@@ -84,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             "metrics": metrics,
             "curve-data": curve_data,
             "well-trajectories": well_trajectories,
+            "trajectory-analysis": trajectory_analysis,
+            "calculate-sleeve-coordinates": calculate_sleeve_coordinates,
             "model-section": model_section,
             "sleeve-markers": sleeve_markers,
             "load-section-boundaries": load_section_boundaries,
@@ -194,6 +199,7 @@ def preview_sleeves(payload: JsonDict) -> None:
             rows=0,
             wells=[],
             preview=[],
+            coordinateStats=None,
             headersOnly=True,
         )
         return
@@ -204,6 +210,23 @@ def preview_sleeves(payload: JsonDict) -> None:
     warnings = validate_sleeves_table(normalized)
     wells = unique_well_values(normalized)
     counts = well_value_counts(normalized)
+    x_values = pd.to_numeric(normalized["X"], errors="coerce") if "X" in normalized.columns else pd.Series(index=normalized.index, dtype=float)
+    y_values = pd.to_numeric(normalized["Y"], errors="coerce") if "Y" in normalized.columns else pd.Series(index=normalized.index, dtype=float)
+    md_values = pd.to_numeric(normalized["MD"], errors="coerce") if "MD" in normalized.columns else pd.Series(index=normalized.index, dtype=float)
+    valid_xy = x_values.notna() & y_values.notna()
+    normalized_well_keys = normalized["Well"].map(_normalize_text) if "Well" in normalized.columns else pd.Series(index=normalized.index, dtype=str)
+    well_summaries = []
+    for well in wells:
+        mask = normalized_well_keys == _normalize_text(well)
+        well_summaries.append(
+            {
+                "name": well,
+                "count": counts.get(well, 0),
+                "validXY": int((valid_xy & mask).sum()),
+                "missingXY": int((~valid_xy & mask).sum()),
+                "validMD": int((md_values.notna() & mask).sum()),
+            }
+        )
     _emit(
         "result",
         columns=[str(column) for column in raw.columns],
@@ -211,8 +234,13 @@ def preview_sleeves(payload: JsonDict) -> None:
         columnMapping=requested_mapping,
         warnings=warnings,
         rows=len(normalized),
-        wells=[{"name": well, "count": counts.get(well, 0)} for well in wells],
+        wells=well_summaries,
         preview=_records(normalized.head(100)),
+        coordinateStats={
+            "validXY": int(valid_xy.sum()),
+            "missingXY": int(len(normalized) - valid_xy.sum()),
+            "validMD": int(md_values.notna().sum()),
+        },
     )
 
 
@@ -456,6 +484,184 @@ def well_trajectories(payload: JsonDict) -> None:
         trajectories=[_dataclass_dict(trajectory) for trajectory in trajectories],
         points=points,
     )
+
+
+def trajectory_analysis(payload: JsonDict) -> None:
+    assignments = payload.get("assignments") or []
+    if not isinstance(assignments, list):
+        raise ValueError("Trajectory assignments must be a list.")
+    readers: dict[str, object] = {}
+    results: list[JsonDict] = []
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        path = str(assignment.get("path", "")).strip()
+        trajectory_uuid = str(assignment.get("trajectoryUuid", "")).strip()
+        if not path or not trajectory_uuid:
+            continue
+        try:
+            reader = readers.get(path)
+            if reader is None:
+                reader = _open_trajectory_reader(path)
+                readers[path] = reader
+            trajectories = reader.list_well_trajectories()
+            trajectory = next((item for item in trajectories if str(item.uuid) == trajectory_uuid), None)
+            if trajectory is None:
+                raise ValueError("Trajectory was not found in the selected model.")
+            points = reader.get_well_trajectory_points(trajectory_uuid)
+            altitude = _trajectory_altitude(reader, trajectory, points)
+            results.append(
+                {
+                    "key": assignment.get("key"),
+                    "trajectoryUuid": trajectory_uuid,
+                    **analyze_trajectory(points, altitude=altitude),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            results.append({"key": assignment.get("key"), "trajectoryUuid": trajectory_uuid, "error": str(exc)})
+    _emit("result", analyses=results)
+
+
+def calculate_sleeve_coordinates(payload: JsonDict) -> None:
+    source_path = str(payload.get("path", "")).strip()
+    output_path = str(payload.get("outputPath") or source_path).strip()
+    frac_well = str(payload.get("wellName", "")).strip()
+    model_path = str(payload.get("modelPath", "")).strip()
+    trajectory_uuid = str(payload.get("trajectoryUuid", "")).strip()
+    overwrite_existing = bool(payload.get("overwriteExisting", False))
+    if not source_path:
+        raise ValueError("Frac-list path is required.")
+    if not frac_well or not model_path or not trajectory_uuid:
+        raise ValueError("Select a model and trajectory for the well first.")
+
+    raw = read_sleeves_table_raw(source_path)
+    mapping = payload.get("columnMapping") or guess_sleeves_column_mapping(list(raw.columns))
+    normalized = apply_sleeves_column_mapping(raw, mapping)
+    if "Well" not in normalized.columns or "MD" not in normalized.columns:
+        raise ValueError("Frac-list must contain mapped Well and MD columns to calculate X/Y.")
+
+    reader = _open_trajectory_reader(model_path)
+    points = reader.get_well_trajectory_points(trajectory_uuid)
+    well_rows = normalized[normalized["Well"].map(_normalize_text) == _normalize_text(frac_well)]
+    if well_rows.empty:
+        raise ValueError(f"Well was not found in frac-list: {frac_well}")
+
+    coordinates: dict[int, tuple[float | None, float | None]] = {}
+    outside: list[JsonDict] = []
+    existing_skipped = 0
+    for index in well_rows.index:
+        current_x = _to_float(normalized.at[index, "X"], math.nan) if "X" in normalized.columns else math.nan
+        current_y = _to_float(normalized.at[index, "Y"], math.nan) if "Y" in normalized.columns else math.nan
+        write_x = overwrite_existing or not math.isfinite(current_x)
+        write_y = overwrite_existing or not math.isfinite(current_y)
+        if not write_x and not write_y:
+            existing_skipped += 1
+            continue
+        md = _to_float(normalized.at[index, "MD"], math.nan)
+        xy = interpolate_trajectory_xy(points, md)
+        if xy is None:
+            outside.append({"row": int(index) + 2, "md": _json_value(normalized.at[index, "MD"])})
+            continue
+        coordinates[int(index)] = (xy[0] if write_x else None, xy[1] if write_y else None)
+    if not coordinates:
+        if existing_skipped:
+            _emit(
+                "result",
+                outputPath=output_path,
+                wellName=frac_well,
+                rowsUpdated=0,
+                rowsExistingSkipped=existing_skipped,
+                rowsOutsideTrajectory=len(outside),
+                outside=outside[:20],
+            )
+            return
+        raise ValueError("No sleeve coordinates could be calculated. Check MD values and trajectory range.")
+
+    _write_sleeve_coordinates(source_path, output_path, raw, mapping, coordinates)
+    _emit(
+        "result",
+        outputPath=output_path,
+        wellName=frac_well,
+        rowsUpdated=len(coordinates),
+        rowsExistingSkipped=existing_skipped,
+        rowsOutsideTrajectory=len(outside),
+        outside=outside[:20],
+    )
+
+
+def _trajectory_altitude(reader: object, trajectory: object, points: list[object]) -> float | None:
+    well_key = _normalize_text(getattr(trajectory, "well_name", ""))
+    try:
+        datums = reader.list_md_datums()
+    except Exception:  # noqa: BLE001
+        datums = []
+    for datum in datums or []:
+        if _normalize_text(getattr(datum, "well_name", "")) != well_key:
+            continue
+        value = _to_float(getattr(datum, "z", None), math.nan)
+        if math.isfinite(value):
+            return value
+    if points:
+        value = _to_float(getattr(points[0], "z", None), math.nan)
+        return value if math.isfinite(value) else None
+    return None
+
+
+def _open_trajectory_reader(path: str) -> object:
+    model_path = resolve_model_path(path)
+    if Path(model_path).suffix.lower() == ".epc":
+        reader = ResqmlReader(model_path)
+        reader.open(include_properties=False, validate_with_resqpy=False)
+        return reader
+    return open_model_reader(model_path)
+
+
+def _write_sleeve_coordinates(
+    source_path: str,
+    output_path: str,
+    raw: pd.DataFrame,
+    mapping: dict[str, str],
+    coordinates: dict[int, tuple[float | None, float | None]],
+) -> None:
+    x_column = str(mapping.get("X") or "X")
+    y_column = str(mapping.get("Y") or "Y")
+    source_suffix = Path(source_path).suffix.lower()
+    output_suffix = Path(output_path).suffix.lower()
+    if source_suffix in {".xlsx", ".xlsm"} and output_suffix in {".xlsx", ".xlsm"}:
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("openpyxl is required to save calculated coordinates.") from exc
+        workbook = load_workbook(source_path)
+        sheet = workbook.worksheets[0]
+        headers = [str(cell.value) if cell.value is not None else "" for cell in sheet[1]]
+        column_indices = {header: index + 1 for index, header in enumerate(headers) if header}
+        for column in (x_column, y_column):
+            if column not in column_indices:
+                column_indices[column] = sheet.max_column + 1
+                sheet.cell(row=1, column=column_indices[column], value=column)
+        for index, (x, y) in coordinates.items():
+            if x is not None:
+                sheet.cell(row=index + 2, column=column_indices[x_column], value=x)
+            if y is not None:
+                sheet.cell(row=index + 2, column=column_indices[y_column], value=y)
+        workbook.save(output_path)
+        return
+
+    out = raw.copy()
+    if x_column not in out.columns:
+        out[x_column] = None
+    if y_column not in out.columns:
+        out[y_column] = None
+    for index, (x, y) in coordinates.items():
+        if x is not None:
+            out.at[index, x_column] = x
+        if y is not None:
+            out.at[index, y_column] = y
+    if output_suffix == ".csv":
+        out.to_csv(output_path, index=False)
+    else:
+        out.to_excel(output_path, index=False)
 
 
 def model_section(payload: JsonDict) -> None:

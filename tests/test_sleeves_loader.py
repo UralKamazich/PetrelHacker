@@ -53,6 +53,12 @@ def test_guess_sleeves_column_mapping_uses_aliases() -> None:
     }
 
 
+def test_guess_sleeves_column_mapping_supports_russian_well_and_port_names() -> None:
+    assert guess_sleeves_column_mapping(["Скважина", "Муфта"]) == {"Well": "Скважина", "Port": "Муфта"}
+    assert guess_sleeves_column_mapping(["скважина", "порт"]) == {"Well": "скважина", "Port": "порт"}
+    assert guess_sleeves_column_mapping(["well", "стадия"]) == {"Well": "well", "Port": "стадия"}
+
+
 def test_apply_sleeves_column_mapping_creates_canonical_columns() -> None:
     df = pd.DataFrame({"Скважина": ["A"], "Муфта": [1], "East": [10.0], "North": [20.0]})
     out = apply_sleeves_column_mapping(df, {"Well": "Скважина", "Port": "Муфта", "X": "East", "Y": "North"})

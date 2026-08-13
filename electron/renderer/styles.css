@@ -160,6 +160,24 @@ select {
   color: var(--muted);
 }
 
+.view-header-actions,
+.well-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wells-table-panel .panel-title {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  align-items: center;
+}
+
+.well-list-actions {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+
 .layout-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -192,6 +210,10 @@ select {
 
 .span-9 {
   grid-column: span 9;
+}
+
+.span-12 {
+  grid-column: span 12;
 }
 
 .panel {
@@ -315,7 +337,7 @@ select {
 
 .model-card {
   display: grid;
-  grid-template-columns: 44px 1fr 96px 34px;
+  grid-template-columns: 44px 1fr 96px 34px 34px;
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -324,8 +346,22 @@ select {
   background: var(--panel-2);
 }
 
+.model-clear-button {
+  background: #fee2e2;
+  color: #b42318;
+  font-weight: 800;
+}
+
+.model-clear-button:hover {
+  background: #fecaca;
+}
+
 .model-card.has-grid-select {
   align-items: start;
+}
+
+.model-card > .icon-button {
+  align-self: start;
 }
 
 .model-badge {
@@ -339,12 +375,12 @@ select {
   font-weight: 800;
 }
 
-#view-extract .model-card .field {
+#view-models .model-card .field {
   margin-bottom: 0;
 }
 
-#view-extract .model-card > .field span,
-#view-extract .model-path-stack > .field:first-child span {
+#view-models .model-card > .field span,
+#view-models .model-path-stack > .field:first-child span {
   display: none;
 }
 
@@ -400,6 +436,157 @@ select {
 
 .mapping-field {
   margin-bottom: 0;
+}
+
+.panel-subtitle {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.well-stats,
+.extraction-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.well-stat,
+.extraction-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  min-height: 68px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.well-stat span,
+.extraction-summary-grid span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.well-stat strong,
+.extraction-summary-grid strong {
+  color: #0f172a;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.well-list-search {
+  width: min(180px, 22vw);
+}
+
+.well-overwrite-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #344054;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.well-overwrite-option input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+}
+
+.wells-layout {
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+}
+
+.wells-layout > .panel {
+  grid-column: auto;
+}
+
+.well-table-head,
+.wells-page-list .well-item {
+  display: grid;
+  grid-template-columns: 26px 130px 60px 70px 100px 170px 76px 96px 82px;
+  gap: 8px;
+  align-items: center;
+}
+
+.well-table-scroll {
+  max-height: calc(100vh - 185px);
+  overflow: auto;
+}
+
+.well-table-head {
+  width: 906px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.well-table-scroll > .wells-page-list {
+  width: 906px;
+  max-height: none;
+  min-height: 460px;
+  padding-top: 7px;
+  overflow: clip;
+}
+
+.well-match-state {
+  overflow: hidden;
+  color: #047857;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.well-match-state.unmatched {
+  color: #b45309;
+}
+
+.wells-page-list .well-item {
+  min-height: 42px;
+  padding: 5px 8px;
+}
+
+.wells-page-list .well-item select {
+  min-height: 29px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.well-trajectory-metric,
+.well-xy-state {
+  color: #344054;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.well-xy-state.incomplete {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.calculate-xy-button {
+  min-height: 29px;
+  padding: 4px 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.extraction-source {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .well-list,
@@ -553,8 +740,9 @@ select {
   padding: 0;
 }
 
-#view-extract .property-table {
-  max-height: 230px;
+#view-models .property-table {
+  max-height: calc(100vh - 390px);
+  min-height: 220px;
 }
 
 .progress-shell {

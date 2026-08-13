@@ -71,7 +71,9 @@ const state = {
   sectionBoundaryDrag: null,
   sectionAxisDrag: null,
   sectionAutoDrawTimer: null,
-  sectionSelectedHorizons: {}
+  sectionSelectedHorizons: {},
+  wellAssignments: {},
+  wellTrajectoryAnalyses: {}
 };
 
 const $ = id => document.getElementById(id);
@@ -84,6 +86,7 @@ function init() {
   restoreState();
   bindNavigation();
   bindActions();
+  updateWorkflowSummaries();
   window.petrel.onBackendEvent(handleBackendEvent);
 }
 
@@ -101,17 +104,18 @@ function bindNavigation() {
 function bindActions() {
   $('load-models').addEventListener('click', loadModels);
   $('load-sleeves').addEventListener('click', loadSleeves);
-  $('match-wells').addEventListener('click', openWellMatchingModal);
+  $('load-well-matches').addEventListener('click', () => loadWellMatchingJson().catch(fail));
+  $('save-well-matches').addEventListener('click', () => saveWellMatchingJson().catch(fail));
   $('run-extraction').addEventListener('click', runExtraction);
   $('browse-sleeves').addEventListener('click', browseSleeves);
-  $('sleeves-path').addEventListener('change', loadSleevesHeaders);
   $('browse-output').addEventListener('click', browseExtractionOutput);
   ['output-path', 'skip-inactive', 'write-diagnostics', 'parallel-workers'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
-  $('well-dropdown-button').addEventListener('click', toggleWellDropdown);
   $('select-all-wells').addEventListener('click', () => setAllWells(true));
   $('clear-wells').addEventListener('click', () => setAllWells(false));
+  $('calculate-selected-xy').addEventListener('click', calculateSelectedWellCoordinates);
+  $('overwrite-sleeve-xy').addEventListener('change', saveState);
   $('well-search').addEventListener('input', renderWells);
   $('select-all-properties').addEventListener('click', () => setAllProperties(true));
   $('clear-properties').addEventListener('click', () => setAllProperties(false));
@@ -171,10 +175,6 @@ function bindActions() {
     if (state.sectionResult) paintSection(state.sectionResult);
   });
   window.addEventListener('mouseup', stopSectionDrag);
-  document.addEventListener('click', event => {
-    const dropdown = document.querySelector('.well-dropdown');
-    if (dropdown && !dropdown.contains(event.target)) closeWellDropdown();
-  });
 }
 
 function renderModels() {
@@ -204,7 +204,8 @@ function renderModels() {
         ${sourceNote}
       </div>
       <label class="field"><span>Depth shift, m</span><input type="number" step="0.1" value="${model.depthOffset}" data-model-offset="${index}"></label>
-      <button class="icon-button" data-model-browse="${index}">...</button>
+      <button class="icon-button" data-model-browse="${index}" type="button" title="Select model">...</button>
+      <button class="icon-button model-clear-button" data-model-clear="${index}" type="button" title="Clear model" aria-label="Clear ${escapeHtml(model.label)}">x</button>
     `;
     root.appendChild(card);
   });
@@ -237,6 +238,57 @@ function renderModels() {
       saveState();
     });
   });
+  root.querySelectorAll('[data-model-clear]').forEach(button => {
+    button.addEventListener('click', () => {
+      clearModelSelection(Number(button.dataset.modelClear)).catch(fail);
+    });
+  });
+}
+
+async function clearModelSelection(index) {
+  const model = state.models[index];
+  if (!model) return;
+  const oldPath = model.path;
+  const removed = state.loadedModels.find(item => item.label === model.label) || null;
+  model.path = '';
+  model.depthOffset = 0;
+  model.internalGrids = [];
+  model.sourceKind = '';
+  model.propertyCount = 0;
+  model.gridUuid = '';
+  state.loadedModels = state.loadedModels.filter(item => item.label !== model.label);
+
+  const removedTrajectoryNames = new Set((removed && removed.trajectories || []).map(sectionTrajectoryName));
+  Object.keys(state.sectionWellNameMap || {}).forEach(name => {
+    if (removedTrajectoryNames.has(name)) delete state.sectionWellNameMap[name];
+  });
+  Object.keys(state.wellAssignments || {}).forEach(key => {
+    if (state.wellAssignments[key].modelLabel === model.label) {
+      delete state.wellAssignments[key];
+      delete state.wellTrajectoryAnalyses[key];
+    }
+  });
+
+  if (oldPath && state.currentSectionContext && state.currentSectionContext.modelPath === oldPath) {
+    state.sectionResult = null;
+    state.sectionRows = [];
+    state.sectionMesh = null;
+    state.sectionBoundaries = [];
+    state.currentSectionContext = null;
+    state.currentSectionPayload = null;
+    $('section-plot').innerHTML = '';
+    clearSectionCellInspector($('section-cell-inspector'));
+  }
+
+  state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+  renderModels();
+  renderProperties();
+  renderSectionModels();
+  fillSectionWells(state.sectionTrajectories);
+  renderWells();
+  updateWorkflowSummaries();
+  saveState();
+  setReady(`${model.label} cleared`);
 }
 
 async function inspectModelSource(index) {
@@ -287,8 +339,12 @@ async function loadModels() {
     renderProperties();
     renderSectionModels();
     state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+    ensureWellAssignments();
+    await refreshWellTrajectoryAnalyses();
     await refreshSectionSavedWellsFromBoundaryFile();
     fillSectionWells(state.sectionTrajectories);
+    renderWells();
+    updateWorkflowSummaries();
     const surfaceCount = sectionHorizonOptions().length;
     $('section-summary').textContent = `Wells: ${state.sectionTrajectories.length}, surfaces: ${surfaceCount}`;
     saveState();
@@ -306,6 +362,8 @@ async function loadSleeves() {
     const result = await window.petrel.run('preview-sleeves', { path, columnMapping: currentColumnMapping() });
     state.sleeves = result;
     state.selectedWells = selectedWellsForLoadedSleeves(result.wells || []);
+    ensureWellAssignments();
+    await refreshWellTrajectoryAnalyses();
     renderMapping(result);
     renderWells();
     if (!$('output-path').value.trim()) {
@@ -351,6 +409,7 @@ async function browseSleeves() {
   if (selected !== previous) {
     clearSleevesDependentState();
   }
+  $('sleeves-name').value = basename(selected);
   await loadSleevesHeaders();
 }
 
@@ -362,10 +421,13 @@ function clearSleevesDependentState() {
   state.currentSectionContext = null;
   state.currentSectionPayload = null;
   $('section-boundary-file').value = '';
+  $('sleeves-name').value = '';
   renderEmptyMapping();
   $('well-list').innerHTML = '';
   $('well-summary').textContent = 'No sleeves loaded';
   $('output-path').value = '';
+  state.wellTrajectoryAnalyses = {};
+  updateWorkflowSummaries();
 }
 
 function selectedWellsForLoadedSleeves(wells) {
@@ -432,12 +494,35 @@ function renderWells() {
   root.innerHTML = '';
   const query = $('well-search').value.trim().toLowerCase();
   wells
+    .slice()
+    .sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { numeric: true, sensitivity: 'base' }))
     .filter(well => !query || well.name.toLowerCase().indexOf(query) >= 0)
     .forEach(well => {
-    const row = document.createElement('label');
+    const row = document.createElement('div');
     row.className = 'well-item';
     const checked = state.selectedWells.indexOf(well.name) >= 0 ? 'checked' : '';
-    row.innerHTML = `<input type="checkbox" ${checked} data-well="${escapeHtml(well.name)}"><span>${escapeHtml(well.name)}</span><span class="muted">${well.count}</span>`;
+    const assignment = wellAssignment(well.name);
+    const modelOptions = ['<option value="">-</option>'].concat(state.loadedModels.map(model => (
+      `<option value="${escapeHtml(model.label)}" ${assignment && assignment.modelLabel === model.label ? 'selected' : ''}>${escapeHtml(model.label)}</option>`
+    ))).join('');
+    const trajectories = assignment ? wellModelTrajectories(assignment.modelLabel) : [];
+    const trajectoryOptions = ['<option value="">-</option>'].concat(trajectories.map(trajectory => (
+      `<option value="${escapeHtml(trajectory.uuid)}" ${assignment && assignment.trajectoryUuid === trajectory.uuid ? 'selected' : ''}>${escapeHtml(sectionTrajectoryName(trajectory))}</option>`
+    ))).join('');
+    const analysis = assignment ? state.wellTrajectoryAnalyses[wellAssignmentKey(well.name)] : null;
+    const xyValid = Number(well.validXY || 0);
+    const xyTotal = xyValid + Number(well.missingXY || 0);
+    row.innerHTML = `
+      <input type="checkbox" ${checked} data-well="${escapeHtml(well.name)}">
+      <strong>${escapeHtml(well.name)}</strong>
+      <span class="muted">${well.count}</span>
+      <span class="well-xy-state${xyValid < xyTotal ? ' incomplete' : ''}">${xyValid} / ${xyTotal}</span>
+      <select data-well-model="${escapeHtml(well.name)}">${modelOptions}</select>
+      <select data-well-trajectory="${escapeHtml(well.name)}" ${assignment && assignment.modelLabel ? '' : 'disabled'}>${trajectoryOptions}</select>
+      <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.maxAngle, '°')}</span>
+      <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.last500Azimuth, '°')}</span>
+      <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.bottomMd, ' m')}</span>
+    `;
     root.appendChild(row);
   });
   root.querySelectorAll('[data-well]').forEach(input => {
@@ -450,6 +535,181 @@ function renderWells() {
       saveState();
     });
   });
+  root.querySelectorAll('[data-well-model]').forEach(select => {
+    select.addEventListener('change', () => {
+      const wellName = select.dataset.wellModel;
+      const modelLabel = select.value;
+      const exact = wellModelTrajectories(modelLabel).find(item => normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(wellName));
+      setWellAssignment(wellName, modelLabel, exact ? exact.uuid : '');
+      renderWells();
+      saveState();
+      if (exact) refreshWellTrajectoryAnalyses([wellName]).catch(fail);
+    });
+  });
+  root.querySelectorAll('[data-well-trajectory]').forEach(select => {
+    select.addEventListener('change', () => {
+      const wellName = select.dataset.wellTrajectory;
+      const assignment = wellAssignment(wellName);
+      setWellAssignment(wellName, assignment ? assignment.modelLabel : '', select.value);
+      renderWells();
+      saveState();
+      refreshWellTrajectoryAnalyses([wellName]).catch(fail);
+    });
+  });
+  updateWorkflowSummaries();
+}
+
+function wellTrajectoryMatch(fracWell) {
+  const assignment = wellAssignment(fracWell);
+  if (assignment && assignment.trajectoryName) return assignment.trajectoryName;
+  const explicit = Object.entries(state.sectionWellNameMap || {})
+    .find(([_modelName, mappedFrac]) => normalizeLookupTextSafe(mappedFrac) === normalizeLookupTextSafe(fracWell));
+  if (explicit) return explicit[0];
+  const exact = (state.sectionTrajectories || [])
+    .find(item => normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(fracWell));
+  return exact ? sectionTrajectoryName(exact) : '';
+}
+
+function wellAssignmentKey(wellName) {
+  return normalizeLookupTextSafe(wellName);
+}
+
+function wellAssignment(wellName) {
+  return state.wellAssignments[wellAssignmentKey(wellName)] || null;
+}
+
+function wellModelTrajectories(modelLabel) {
+  const model = state.loadedModels.find(item => item.label === modelLabel);
+  return model
+    ? deduplicateTrajectories(annotateSectionTrajectories(model.trajectories || [], model))
+      .sort((left, right) => sectionTrajectoryName(left).localeCompare(sectionTrajectoryName(right), undefined, { numeric: true, sensitivity: 'base' }))
+    : [];
+}
+
+function setWellAssignment(wellName, modelLabel, trajectoryUuid) {
+  const key = wellAssignmentKey(wellName);
+  if (!modelLabel) {
+    delete state.wellAssignments[key];
+    delete state.wellTrajectoryAnalyses[key];
+    return;
+  }
+  const trajectory = wellModelTrajectories(modelLabel).find(item => item.uuid === trajectoryUuid) || null;
+  state.wellAssignments[key] = {
+    wellName,
+    modelLabel,
+    trajectoryUuid: trajectory ? trajectory.uuid : '',
+    trajectoryName: trajectory ? sectionTrajectoryName(trajectory) : ''
+  };
+  Object.keys(state.sectionWellNameMap || {}).forEach(name => {
+    if (normalizeLookupTextSafe(state.sectionWellNameMap[name]) === key) delete state.sectionWellNameMap[name];
+  });
+  if (trajectory) state.sectionWellNameMap[sectionTrajectoryName(trajectory)] = wellName;
+  delete state.wellTrajectoryAnalyses[key];
+}
+
+function ensureWellAssignments() {
+  const wells = state.sleeves ? state.sleeves.wells || [] : [];
+  wells.forEach(well => {
+    if (wellAssignment(well.name)) return;
+    for (const model of state.loadedModels) {
+      const trajectory = wellModelTrajectories(model.label)
+        .find(item => normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(well.name));
+      if (!trajectory) continue;
+      setWellAssignment(well.name, model.label, trajectory.uuid);
+      break;
+    }
+  });
+}
+
+async function refreshWellTrajectoryAnalyses(wellNames = null) {
+  const names = wellNames || (state.sleeves ? (state.sleeves.wells || []).map(well => well.name) : []);
+  const assignments = names.map(name => {
+    const assignment = wellAssignment(name);
+    const model = assignment && state.loadedModels.find(item => item.label === assignment.modelLabel);
+    return assignment && model && assignment.trajectoryUuid ? {
+      key: wellAssignmentKey(name),
+      path: model.path,
+      trajectoryUuid: assignment.trajectoryUuid
+    } : null;
+  }).filter(Boolean);
+  if (!assignments.length) {
+    renderWells();
+    return;
+  }
+  const result = await window.petrel.run('trajectory-analysis', { assignments });
+  (result.analyses || []).forEach(analysis => {
+    state.wellTrajectoryAnalyses[analysis.key] = analysis;
+  });
+  renderWells();
+}
+
+function formatWellMetric(value, suffix) {
+  const number = numericCell(value);
+  return Number.isFinite(number) ? `${formatAxisTick(number)}${suffix}` : '-';
+}
+
+async function calculateSelectedWellCoordinates() {
+  const sourcePath = $('sleeves-path').value.trim();
+  if (!sourcePath) return fail(new Error('Load frac-list first.'));
+  const wells = state.sleeves ? state.sleeves.wells || [] : [];
+  const overwriteExisting = $('overwrite-sleeve-xy').checked;
+  const selected = wells.filter(well => state.selectedWells.includes(well.name));
+  if (!selected.length) return fail(new Error('Select at least one well.'));
+  const targets = selected.filter(well => overwriteExisting || Number(well.missingXY || 0) > 0);
+  if (!targets.length) return setAttention('The file already contains X/Y data for the selected ports.');
+  const ready = targets.map(well => {
+    const assignment = wellAssignment(well.name);
+    const model = assignment && state.loadedModels.find(item => item.label === assignment.modelLabel);
+    return assignment && assignment.trajectoryUuid && model ? { well, assignment, model } : null;
+  }).filter(Boolean);
+  if (!ready.length) return fail(new Error('Selected wells have no assigned trajectories.'));
+  setBusy('Saving coordinates', `${ready.length} selected well(s) to ${basename(sourcePath)}`);
+  try {
+    let updated = 0;
+    let outside = 0;
+    for (const target of ready) {
+      const result = await window.petrel.run('calculate-sleeve-coordinates', {
+        path: sourcePath,
+        outputPath: sourcePath,
+        wellName: target.well.name,
+        modelPath: target.model.path,
+        trajectoryUuid: target.assignment.trajectoryUuid,
+        columnMapping: currentColumnMapping(),
+        overwriteExisting
+      });
+      updated += Number(result.rowsUpdated || 0);
+      outside += Number(result.rowsOutsideTrajectory || 0);
+    }
+    state.columnMapping = { ...currentColumnMapping(), X: 'X', Y: 'Y' };
+    await loadSleeves();
+    setReady(`Saved X/Y: ${updated} ports in ${ready.length} well(s)`);
+    if (targets.length > ready.length) appendLog(`Warning: ${targets.length - ready.length} selected well(s) were skipped because no trajectory is assigned.`);
+    if (outside) appendLog(`Warning: ${outside} port(s) are outside their trajectory MD range.`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function updateWorkflowSummaries() {
+  const wells = state.sleeves ? state.sleeves.wells || [] : [];
+  const stats = state.sleeves && state.sleeves.coordinateStats ? state.sleeves.coordinateStats : null;
+  const availableNames = new Set(wells.map(well => well.name));
+  const selectedWellCount = state.selectedWells.filter(name => availableNames.has(name)).length;
+  if ($('well-stat-rows')) $('well-stat-rows').textContent = String(state.sleeves ? Number(state.sleeves.rows || 0) : 0);
+  if ($('well-stat-wells')) $('well-stat-wells').textContent = String(wells.length);
+  if ($('well-stat-selected')) $('well-stat-selected').textContent = String(selectedWellCount);
+  if ($('well-stat-coordinates')) {
+    $('well-stat-coordinates').textContent = stats ? `${Number(stats.validXY || 0)} / ${Number((stats.validXY || 0) + (stats.missingXY || 0))}` : '-';
+  }
+  const selectedProperties = document.querySelectorAll('[data-property]:checked').length;
+  const selectedSleeves = wells
+    .filter(well => state.selectedWells.includes(well.name))
+    .reduce((total, well) => total + Number(well.count || 0), 0);
+  if ($('extraction-model-count')) $('extraction-model-count').textContent = String(state.loadedModels.length);
+  if ($('extraction-property-count')) $('extraction-property-count').textContent = String(selectedProperties);
+  if ($('extraction-well-count')) $('extraction-well-count').textContent = String(selectedWellCount);
+  if ($('extraction-sleeve-count')) $('extraction-sleeve-count').textContent = String(selectedSleeves);
+  if ($('extraction-source')) $('extraction-source').textContent = basename($('sleeves-path').value.trim()) || 'No frac-list loaded';
 }
 
 async function openWellMatchingModal() {
@@ -508,6 +768,7 @@ function showWellMatchingModal(fracWells, models) {
   overlay.querySelector('#well-match-cancel').addEventListener('click', close);
   overlay.querySelector('#well-match-apply').addEventListener('click', () => {
     saveState();
+    renderWells();
     setReady(`Well matches: ${Object.keys(state.sectionWellNameMap || {}).length}`);
     close();
   });
@@ -621,13 +882,26 @@ async function loadWellMatchingJson() {
   if (!path) return;
   const text = await window.petrel.readTextFile(path);
   const data = JSON.parse(text);
-  const mappings = data.mappings || data.sectionWellNameMap || data;
-  if (!mappings || typeof mappings !== 'object' || Array.isArray(mappings)) {
+  const assignments = data.assignments;
+  const mappings = data.mappings || data.sectionWellNameMap || (!assignments ? data : {});
+  if ((!assignments || typeof assignments !== 'object' || Array.isArray(assignments))
+      && (!mappings || typeof mappings !== 'object' || Array.isArray(mappings))) {
     throw new Error('Invalid well matching JSON.');
   }
-  state.sectionWellNameMap = Object.fromEntries(Object.entries(mappings).map(([modelWell, fracWell]) => [String(modelWell), String(fracWell)]));
+  if (assignments && typeof assignments === 'object' && !Array.isArray(assignments)) {
+    state.wellAssignments = Object.fromEntries(Object.entries(assignments).map(([key, value]) => [key, {
+      wellName: String(value.wellName || ''),
+      modelLabel: String(value.modelLabel || ''),
+      trajectoryUuid: String(value.trajectoryUuid || ''),
+      trajectoryName: String(value.trajectoryName || '')
+    }]));
+  }
+  state.sectionWellNameMap = Object.fromEntries(Object.entries(mappings || {}).map(([modelWell, fracWell]) => [String(modelWell), String(fracWell)]));
+  ensureWellAssignments();
+  await refreshWellTrajectoryAnalyses();
+  renderWells();
   saveState();
-  setReady(`Loaded well matches: ${Object.keys(state.sectionWellNameMap).length}`);
+  setReady(`Loaded well matches: ${Object.keys(state.wellAssignments).length}`);
 }
 
 async function saveWellMatchingJson() {
@@ -638,12 +912,13 @@ async function saveWellMatchingJson() {
   });
   if (!path) return;
   const payload = {
-    version: 1,
+    version: 2,
     savedAt: new Date().toISOString(),
+    assignments: state.wellAssignments || {},
     mappings: state.sectionWellNameMap || {}
   };
   await window.petrel.writeTextFile(path, JSON.stringify(payload, null, 2));
-  setReady(`Saved well matches: ${Object.keys(payload.mappings).length}`);
+  setReady(`Saved well matches: ${Object.keys(payload.assignments).length}`);
 }
 
 function setAllWells(checked) {
@@ -698,9 +973,11 @@ function renderProperties() {
     input.addEventListener('change', () => {
       state.extractionSelectedProperties = currentExtractionSelectedProperties();
       if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
+      updateWorkflowSummaries();
       saveState();
     });
   });
+  updateWorkflowSummaries();
 }
 
 function renderSectionModels() {
@@ -826,6 +1103,7 @@ function setAllProperties(checked) {
   document.querySelectorAll('[data-property]').forEach(input => input.checked = checked);
   state.extractionSelectedProperties = currentExtractionSelectedProperties();
   if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
+  updateWorkflowSummaries();
   saveState();
 }
 
@@ -1320,7 +1598,7 @@ async function loadSectionWells() {
 
 async function loadSectionFromExtraction() {
   if (!state.loadedModels.length) return fail(new Error('Load models first.'));
-  setBusy('Loading section context', 'Reading Extraction selection');
+  setBusy('Loading section context', 'Reading Wells selection');
   try {
     state.sectionUseExtractionSelection = true;
     renderSectionProperties();
@@ -1331,12 +1609,12 @@ async function loadSectionFromExtraction() {
     await refreshSectionSavedWellsFromBoundaryFile();
     fillSectionWells(state.sectionTrajectories);
     if (!extractionWells.length) {
-      appendLog('Warning: no Extraction wells are selected or loaded; section well list is empty.');
+      appendLog('Warning: no wells are selected on the Wells page; section well list is empty.');
     } else if (!state.sectionTrajectories.length) {
-      appendLog('Warning: no model trajectories were matched to selected Extraction wells. Use Match wells on the Extraction page.');
+      appendLog('Warning: no model trajectories were matched to selected wells. Use Match wells on the Wells page.');
     }
-    $('section-summary').textContent = `Extraction wells: ${state.sectionTrajectories.length}`;
-    setReady(`Section context from Extraction: ${state.sectionTrajectories.length} well(s)`);
+    $('section-summary').textContent = `Selected wells: ${state.sectionTrajectories.length}`;
+    setReady(`Selected well trajectories: ${state.sectionTrajectories.length}`);
     saveState();
   } catch (error) {
     fail(error);
@@ -1401,7 +1679,13 @@ async function resolveSectionTrajectoriesFromExtraction(trajectories, wells) {
   const selected = [];
   const used = new Set();
   for (const well of wells || []) {
-    const matched = findSectionTrajectoryForExtractionWell(trajectories, well, used);
+    let matched = findSectionTrajectoryForExtractionWell(trajectories, well, used);
+    const assignment = wellAssignment(well);
+    if (!matched && assignment && assignment.trajectoryUuid) {
+      const model = state.loadedModels.find(item => item.label === assignment.modelLabel);
+      const modelTrajectories = model ? await loadSectionTrajectories(model) : [];
+      matched = modelTrajectories.find(item => item.uuid === assignment.trajectoryUuid) || null;
+    }
     if (matched) {
       addSectionTrajectoryMatch(selected, used, matched, well);
     }
@@ -1412,6 +1696,13 @@ async function resolveSectionTrajectoriesFromExtraction(trajectories, wells) {
 function findSectionTrajectoryForExtractionWell(trajectories, well, used) {
   const key = normalizeLookupTextSafe(well);
   if (!key) return null;
+  const assignment = wellAssignment(well);
+  if (assignment && assignment.trajectoryUuid) {
+    const assigned = trajectories.find(item => !used.has(item.uuid)
+      && item.uuid === assignment.trajectoryUuid
+      && (!assignment.modelLabel || item.source_model === assignment.modelLabel));
+    if (assigned) return assigned;
+  }
   const mappedName = Object.entries(state.sectionWellNameMap || {})
     .find(([_modelName, fracName]) => normalizeLookupTextSafe(fracName) === key);
   if (mappedName) {
@@ -2845,11 +3136,13 @@ async function saveSectionBoundaries() {
     const savedPath = result.outputPath || outputPath;
     if (result.rowsUpdated > 0 && savedPath) {
       $('sleeves-path').value = savedPath;
+      $('sleeves-name').value = basename(savedPath);
       $('metrics-intervals').value = savedPath;
       state.columnMapping = currentColumnMapping();
       state.sectionBoundaryPath = savedPath;
     }
     if (savedPath) state.sectionBoundaryPath = savedPath;
+    updateWorkflowSummaries();
     const selected = $('section-well').value;
     if (selected) state.sectionSavedWells[selected] = true;
     await saveCurrentSectionCache();
@@ -3553,6 +3846,12 @@ function setReady(subtitle) {
   $('status-subtitle').textContent = subtitle || 'Python backend idle';
 }
 
+function setAttention(message) {
+  $('status-title').textContent = 'Attention';
+  $('status-subtitle').textContent = message;
+  appendLog(`Attention: ${message}`);
+}
+
 function fail(error) {
   const message = error && error.message ? error.message : String(error);
   $('status-title').textContent = 'Error';
@@ -3670,6 +3969,7 @@ function saveState() {
     extractionSelectedProperties: state.extractionSelectedProperties,
     columnMapping: state.columnMapping,
     hasSavedWellSelection: state.hasSavedWellSelection,
+    overwriteSleeveXY: $('overwrite-sleeve-xy').checked,
     outputPath: $('output-path').value,
     skipInactive: $('skip-inactive').checked,
     writeDiagnostics: $('write-diagnostics').checked,
@@ -3680,6 +3980,7 @@ function saveState() {
     curvePath: $('curve-path').value,
     curveSettings: state.curveSettings,
     sectionWellNameMap: state.sectionWellNameMap,
+    wellAssignments: state.wellAssignments,
     sectionSavedWells: state.sectionSavedWells,
     sectionCachedWells: state.sectionCachedWells,
     sectionCacheLabelVersion: 2,
@@ -3708,6 +4009,7 @@ function restoreState() {
     }
     if (data.columnMapping && typeof data.columnMapping === 'object') state.columnMapping = data.columnMapping;
     if (data.sectionWellNameMap && typeof data.sectionWellNameMap === 'object') state.sectionWellNameMap = data.sectionWellNameMap;
+    if (data.wellAssignments && typeof data.wellAssignments === 'object') state.wellAssignments = data.wellAssignments;
     if (data.sectionSavedWells && typeof data.sectionSavedWells === 'object') state.sectionSavedWells = data.sectionSavedWells;
     if (data.sectionCacheLabelVersion === 2 && data.sectionCachedWells && typeof data.sectionCachedWells === 'object') {
       state.sectionCachedWells = data.sectionCachedWells;
@@ -3726,7 +4028,9 @@ function restoreState() {
     state.hasSavedWellSelection = Boolean(data.hasSavedWellSelection);
     renderModels();
     $('sleeves-path').value = data.sleevesPath || '';
+    $('sleeves-name').value = basename(data.sleevesPath || '');
     $('output-path').value = basename(data.outputPath || '');
+    if (data.overwriteSleeveXY !== undefined) $('overwrite-sleeve-xy').checked = Boolean(data.overwriteSleeveXY);
     if (data.skipInactive !== undefined) $('skip-inactive').checked = Boolean(data.skipInactive);
     if (data.writeDiagnostics !== undefined) $('write-diagnostics').checked = Boolean(data.writeDiagnostics);
     if (data.parallelWorkers) $('parallel-workers').value = data.parallelWorkers;
