@@ -71,6 +71,7 @@ const state = {
   sectionBoundaryDrag: null,
   sectionAxisDrag: null,
   sectionAutoDrawTimer: null,
+  sectionSelectionRevision: 0,
   sectionSelectedHorizons: {},
   wellAssignments: {},
   wellTrajectoryAnalyses: {},
@@ -135,7 +136,7 @@ function bindActions() {
   ['section-property', 'section-well', 'section-step', 'section-axis', 'section-skip-inactive'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
-  $('section-well').addEventListener('change', scheduleCachedSectionAutoDraw);
+  $('section-well').addEventListener('change', handleSectionWellChange);
   ['section-boundary-gap', 'section-min-layer'].forEach(id => {
     $(id).addEventListener('change', saveState);
   });
@@ -1892,17 +1893,25 @@ async function recoverSectionCacheIndex() {
   }
 }
 
+function handleSectionWellChange() {
+  state.sectionSelectionRevision += 1;
+  clearRenderedSection();
+  scheduleCachedSectionAutoDraw();
+}
+
 function scheduleCachedSectionAutoDraw() {
   if (state.sectionAutoDrawTimer) clearTimeout(state.sectionAutoDrawTimer);
+  const selectionRevision = state.sectionSelectionRevision;
   state.sectionAutoDrawTimer = setTimeout(async () => {
     state.sectionAutoDrawTimer = null;
+    if (selectionRevision !== state.sectionSelectionRevision) return;
     if (!sectionSelectedWellHasCachedSection()) return;
     if (!$('section-property').value) return;
     try {
       const memoryResult = state.sectionMemoryCache.get(sectionMemoryCacheKey());
       if (memoryResult) {
         appendLog('Loaded section from memory cache.');
-        await displaySectionResult(memoryResult.result, memoryResult.payload, memoryResult.trajectory);
+        await displaySectionResult(memoryResult.result, memoryResult.payload, memoryResult.trajectory, selectionRevision);
         return;
       }
       const cacheInfo = sectionSelectedWellCacheInfo();
@@ -1911,13 +1920,14 @@ function scheduleCachedSectionAutoDraw() {
           appendLog('Loading section cache with the current surface selection.');
           setBusy('Loading section', 'Reading local cache');
           const result = unpackSectionResult(await window.petrel.loadSectionCache(cacheInfo.cacheKey));
+          if (selectionRevision !== state.sectionSelectionRevision) return;
           const trajectory = findSectionTrajectoryByValue($('section-well').value);
           const payload = Object.assign({}, cacheInfo.sectionPayload, {
             horizonSources: selectedSectionHorizonSources()
           });
           state.sectionCachedWells[$('section-well').value] = makeSectionCacheInfo(cacheInfo.cacheKey, payload);
           saveState();
-          await displaySectionResult(result, payload, trajectory);
+          await displaySectionResult(result, payload, trajectory, selectionRevision);
           return;
         }
         setAttention('Saved section does not match the loaded models or current settings. Use Draw section.');
@@ -1927,13 +1937,15 @@ function scheduleCachedSectionAutoDraw() {
         appendLog('Loading section directly from disk cache.');
         setBusy('Loading section', 'Reading local cache');
         const result = unpackSectionResult(await window.petrel.loadSectionCache(cacheInfo.cacheKey));
+        if (selectionRevision !== state.sectionSelectionRevision) return;
         const trajectory = findSectionTrajectoryByValue($('section-well').value);
-        await displaySectionResult(result, cacheInfo.sectionPayload, trajectory);
+        await displaySectionResult(result, cacheInfo.sectionPayload, trajectory, selectionRevision);
         return;
       }
       appendLog('Cached section selected; loading section automatically.');
-      await drawSection({ cacheOnly: true });
+      await drawSection({ cacheOnly: true, selectionRevision });
     } catch (error) {
+      if (selectionRevision !== state.sectionSelectionRevision) return;
       const selected = $('section-well').value;
       if (selected && state.sectionCachedWells) {
         delete state.sectionCachedWells[selected];
@@ -2019,6 +2031,9 @@ function clearSectionAutoBounds() {
 
 async function drawSection(options = {}) {
   const cacheOnly = Boolean(options.cacheOnly);
+  const selectionRevision = Number.isFinite(options.selectionRevision)
+    ? options.selectionRevision
+    : state.sectionSelectionRevision;
   const propertySelection = findSectionPropertyByValue($('section-property').value);
   if (!propertySelection || !propertySelection.model || !propertySelection.model.path) {
     return fail(new Error('Select section property.'));
@@ -2053,6 +2068,7 @@ async function drawSection(options = {}) {
       cacheOnly
     };
     const result = unpackSectionResult(await window.petrel.run('model-section', sectionPayload));
+    if (selectionRevision !== state.sectionSelectionRevision) return;
     delete sectionPayload.cacheOnly;
     if (!Array.isArray(result.sleeveMarkers)) result.sleeveMarkers = sleeveMarkers;
     if (result.cacheKey) {
@@ -2060,14 +2076,15 @@ async function drawSection(options = {}) {
       fillSectionWells(state.sectionTrajectories);
       saveState();
     }
-    await displaySectionResult(result, sectionPayload, trajectory);
+    await displaySectionResult(result, sectionPayload, trajectory, selectionRevision);
   } catch (error) {
     if (cacheOnly) throw error;
     fail(error);
   }
 }
 
-async function displaySectionResult(result, sectionPayload, trajectory) {
+async function displaySectionResult(result, sectionPayload, trajectory, selectionRevision = state.sectionSelectionRevision) {
+  if (selectionRevision !== state.sectionSelectionRevision) return;
   const payload = Object.assign({}, sectionPayload || {});
   delete payload.cacheOnly;
   state.currentSectionPayload = payload;
@@ -2085,7 +2102,8 @@ async function displaySectionResult(result, sectionPayload, trajectory) {
   applySectionSceneSettings(state.currentSectionSceneKey);
   paintSection(result);
   state.sectionMemoryCache.set(sectionMemoryCacheKey(), { result, payload, trajectory });
-  await restoreSectionBoundariesFromFile(boundaryPath, result, trajectory);
+  await restoreSectionBoundariesFromFile(boundaryPath, result, trajectory, selectionRevision);
+  if (selectionRevision !== state.sectionSelectionRevision) return;
   setProgress('section-progress', 100);
   setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
 }
@@ -2231,7 +2249,7 @@ function applySectionSceneSettings(key) {
   return true;
 }
 
-async function restoreSectionBoundariesFromFile(path, result, trajectory) {
+async function restoreSectionBoundariesFromFile(path, result, trajectory, selectionRevision = state.sectionSelectionRevision) {
   if (!path || !state.sectionMesh || !state.sectionMesh.mesh) return;
   const wellName = sectionTrajectoryName(trajectory) || (result && result.well_name) || '';
   try {
@@ -2240,6 +2258,7 @@ async function restoreSectionBoundariesFromFile(path, result, trajectory) {
       wellName: state.sectionWellNameMap[wellName] || wellName,
       columnMapping: currentColumnMapping()
     });
+    if (selectionRevision !== state.sectionSelectionRevision) return;
     const boundaries = sectionBoundariesFromSavedRecords(loaded.records || [], state.sectionMesh.mesh, result);
     if (!boundaries.length) return;
     state.sectionBoundaries = boundaries;
