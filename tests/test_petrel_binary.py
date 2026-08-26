@@ -11,8 +11,12 @@ from core.petrel_grid_reader import (
     _remove_bxml_stream_metadata,
 )
 from core.petrel_model_metadata import extract_petrel_object_names, extract_petrel_parent_names
-from core.petrel_property_reader import _strip_binary_segment_frame
-from core.petrel_property_reader import _parse_property_shape_data
+from core.petrel_property_reader import (
+    PetrelPropertyReader,
+    _parse_property_shape_data,
+    _read_property_dictionary_extension,
+    _strip_binary_segment_frame,
+)
 from core.petrel_trajectory_reader import _consume_marker, _read_bxml_number
 
 
@@ -34,6 +38,13 @@ def test_strips_dictionary_extension_between_float_bytes():
 def test_strips_property_binary_segment_frame():
     payload = bytes(range(32))
     framed = payload[:7] + b"\xa0\x99\x80\x00" + payload[7:]
+
+    assert _strip_binary_segment_frame(framed, len(payload)) == payload
+
+
+def test_strips_property_binary_segment_frame_with_long_varint():
+    payload = bytes(range(32))
+    framed = payload[:7] + b"\xa0\x99\x80\x80\x00" + payload[7:]
 
     assert _strip_binary_segment_frame(framed, len(payload)) == payload
 
@@ -139,3 +150,38 @@ def test_normalizes_vertical_petrel_curve_to_xy_position():
     assert xy == (527093.3125, 7416219.0)
     assert z_offset == len(header)
     assert count == 5
+
+
+def test_reads_late_sparse_property_dictionary():
+    extension = (
+        b"prefix"
+        b"\xa1\x10is_undef_checked"
+        b"\xa1\x06values"
+        b"\xa1\x0bno_elements"
+        b"\xa1\x05pages"
+        b"\xa1\x04page"
+        b"\xa1\x05float"
+        b"\xa0payload"
+    )
+
+    assert _read_property_dictionary_extension(extension, 0) == [
+        "is_undef_checked",
+        "values",
+        "no_elements",
+        "pages",
+        "page",
+        "float",
+    ]
+
+
+def test_maps_dense_cell_indices_through_sparse_property_mask():
+    reader = PetrelPropertyReader.__new__(PetrelPropertyReader)
+    reader._defined_mask = bytes((0b10110100,))
+    reader._mask_block_size = 4096
+    reader._mask_block_prefix = reader._build_mask_block_prefix()
+
+    assert reader._stored_value_index(0) is None
+    assert reader._stored_value_index(2) == 0
+    assert reader._stored_value_index(4) == 1
+    assert reader._stored_value_index(5) == 2
+    assert reader._stored_value_index(7) == 3

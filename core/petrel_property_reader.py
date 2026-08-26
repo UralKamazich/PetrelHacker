@@ -9,6 +9,9 @@ import numpy as np
 from core.petrel_lz4 import PetrelLz4Blob, read_first_petrel_lz4_block
 
 
+_BYTE_POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
+
+
 @dataclass(frozen=True)
 class PetrelPropertyLayout:
     data_pk: int
@@ -21,6 +24,10 @@ class PetrelPropertyLayout:
     page_capacity: int
     page_stride: int
     item_size: int
+    value_count: int
+    defined_mask_offset: int | None = None
+    defined_mask_size: int = 0
+    defined_mask_storage_size: int = 0
 
     @property
     def dtype(self) -> np.dtype:
@@ -31,13 +38,29 @@ class PetrelPropertyReader:
     def __init__(self, data_path: str | Path, data_pk: int, property_type: str) -> None:
         self.blob = PetrelLz4Blob(data_path, data_pk)
         self.layout = _parse_layout(self.blob, int(data_pk), property_type)
+        if self.layout.defined_mask_offset is not None:
+            mask_storage = self.blob.read_range(
+                self.layout.defined_mask_offset,
+                self.layout.defined_mask_storage_size,
+            )
+            self._defined_mask = _strip_binary_segment_frame(
+                mask_storage,
+                self.layout.defined_mask_size,
+            )
+        else:
+            self._defined_mask = None
+        self._mask_block_size = 4096
+        self._mask_block_prefix = self._build_mask_block_prefix()
 
     def get_value(self, i: int, j: int, k: int):
         flat_index = self._flat_index(i, j, k)
-        page_index, within_page = divmod(flat_index, self.layout.page_capacity)
+        value_index = self._stored_value_index(flat_index)
+        if value_index is None:
+            return ""
+        page_index, within_page = divmod(value_index, self.layout.page_capacity)
         page_count = min(
             self.layout.page_capacity,
-            self.layout.element_count - page_index * self.layout.page_capacity,
+            self.layout.value_count - page_index * self.layout.page_capacity,
         )
         page = self._read_page(page_index, page_count)
         value = np.frombuffer(page, dtype=self.layout.dtype, count=page_count)[within_page]
@@ -55,9 +78,24 @@ class PetrelPropertyReader:
         column_offsets = np.asarray([j * self.layout.ni + i for i, j in ordered], dtype=np.int64)
         output = np.empty((len(ordered), self.layout.nk), dtype=self.layout.dtype)
 
+        if self._defined_mask is not None:
+            output.fill(np.nan if self.layout.property_type == "FloatProperty" else 255)
+            targets: dict[int, list[tuple[int, int]]] = {}
+            layer_size = self.layout.ni * self.layout.nj
+            for column_index, column_offset in enumerate(column_offsets):
+                for k in range(self.layout.nk):
+                    value_index = self._stored_value_index(int(k * layer_size + column_offset))
+                    if value_index is not None:
+                        targets.setdefault(value_index, []).append((column_index, k))
+            self._read_sparse_targets(output, targets)
+            return {
+                column: _clean_values(output[index], self.layout.property_type)
+                for index, column in enumerate(ordered)
+            }
+
         stream = _DecompressedStream(self.blob)
         stream.skip(self.layout.value_offset)
-        remaining = self.layout.element_count
+        remaining = self.layout.value_count
         flat_start = 0
         page_index = 0
         while remaining:
@@ -86,6 +124,62 @@ class PetrelPropertyReader:
             column: _clean_values(output[index], self.layout.property_type)
             for index, column in enumerate(ordered)
         }
+
+    def _read_sparse_targets(
+        self,
+        output: np.ndarray,
+        targets: dict[int, list[tuple[int, int]]],
+    ) -> None:
+        if not targets:
+            return
+        ordered_targets = sorted(targets)
+        target_cursor = 0
+        stream = _DecompressedStream(self.blob)
+        stream.skip(self.layout.value_offset)
+        remaining = self.layout.value_count
+        value_start = 0
+        while remaining and target_cursor < len(ordered_targets):
+            count = min(self.layout.page_capacity, remaining)
+            framed_page = stream.read_exact(count * self.layout.item_size + 4)
+            page_bytes = _strip_binary_segment_frame(framed_page, count * self.layout.item_size)
+            page = np.frombuffer(page_bytes, dtype=self.layout.dtype, count=count)
+            value_end = value_start + count
+            while target_cursor < len(ordered_targets):
+                value_index = ordered_targets[target_cursor]
+                if value_index >= value_end:
+                    break
+                for column_index, k in targets[value_index]:
+                    output[column_index, k] = page[value_index - value_start]
+                target_cursor += 1
+            remaining -= count
+            value_start = value_end
+            if remaining and target_cursor < len(ordered_targets):
+                stream.skip(self.layout.page_stride - len(framed_page))
+
+    def _build_mask_block_prefix(self) -> np.ndarray | None:
+        if self._defined_mask is None:
+            return None
+        values = np.frombuffer(self._defined_mask, dtype=np.uint8)
+        counts = _BYTE_POPCOUNT[values]
+        starts = np.arange(0, len(counts), self._mask_block_size)
+        block_totals = np.add.reduceat(counts, starts)
+        return np.concatenate((np.asarray([0], dtype=np.int64), np.cumsum(block_totals)))
+
+    def _stored_value_index(self, flat_index: int) -> int | None:
+        if self._defined_mask is None:
+            return flat_index
+        byte_index, bit_index = divmod(flat_index, 8)
+        byte_value = self._defined_mask[byte_index]
+        if not byte_value & (1 << bit_index):
+            return None
+        block_index, within_block = divmod(byte_index, self._mask_block_size)
+        block_start = byte_index - within_block
+        rank = int(self._mask_block_prefix[block_index])
+        if byte_index > block_start:
+            block = np.frombuffer(self._defined_mask[block_start:byte_index], dtype=np.uint8)
+            rank += int(_BYTE_POPCOUNT[block].sum())
+        rank += (byte_value & ((1 << bit_index) - 1)).bit_count()
+        return rank
 
     def _flat_index(self, i: int, j: int, k: int) -> int:
         if not (0 <= i < self.layout.ni and 0 <= j < self.layout.nj and 0 <= k < self.layout.nk):
@@ -141,6 +235,41 @@ def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> Petr
     names, body_offset = _read_bxml_dictionary(first_block)
     ni, nj, nk = _parse_property_shape_data(first_block, names, body_offset)
     element_count = ni * nj * nk
+    header_size = min(
+        blob.uncompressed_size,
+        max(len(first_block), (element_count + 7) // 8 + 2 * 1024 * 1024),
+    )
+    if header_size > len(first_block):
+        first_block = blob.read_range(0, header_size)
+
+    value_count = element_count
+    defined_mask_offset = None
+    defined_mask_size = 0
+    defined_mask_storage_size = 0
+    needs_extension = (
+        property_type == "FloatProperty" and "float" not in names
+    ) or (
+        property_type == "IntProperty" and "page" not in names
+    )
+    extension_names = _read_property_dictionary_extension(first_block, body_offset) if needs_extension else []
+    names.extend(extension_names)
+    if extension_names and "no_elements" in names and "bitmask" in names:
+        no_elements_tag = _tag(names.index("no_elements"))
+        no_elements_pos = first_block.find(no_elements_tag + b"\x8d", body_offset)
+        if no_elements_pos >= 0:
+            value_count = struct.unpack_from(
+                "<I", first_block, no_elements_pos + len(no_elements_tag) + 1
+            )[0]
+        bitmask_tag = _tag(names.index("bitmask"))
+        bitmask_marker = bitmask_tag + b"\x06\x08\x88\xff\xa2"
+        bitmask_pos = first_block.find(bitmask_marker, body_offset)
+        if bitmask_pos >= 0:
+            size_offset = bitmask_pos + len(bitmask_marker)
+            defined_mask_size = struct.unpack_from("<I", first_block, size_offset)[0]
+            defined_mask_offset = size_offset + 4
+            extension_offset = first_block.find(b"\xa1\x10is_undef_checked", defined_mask_offset)
+            if extension_offset >= 0:
+                defined_mask_storage_size = extension_offset - defined_mask_offset
 
     if property_type == "FloatProperty":
         try:
@@ -178,7 +307,31 @@ def _parse_layout(blob: PetrelLz4Blob, data_pk: int, property_type: str) -> Petr
         page_capacity=page_capacity,
         page_stride=page_stride,
         item_size=item_size,
+        value_count=value_count,
+        defined_mask_offset=defined_mask_offset,
+        defined_mask_size=defined_mask_size,
+        defined_mask_storage_size=defined_mask_storage_size,
     )
+
+
+def _read_property_dictionary_extension(data: bytes, body_offset: int) -> list[str]:
+    marker = b"\xa1\x10is_undef_checked"
+    offset = data.find(marker, body_offset)
+    if offset < 0:
+        return []
+    names: list[str] = []
+    while offset + 2 <= len(data) and data[offset] == 0xA1:
+        size = data[offset + 1]
+        start = offset + 2
+        end = start + size
+        if size == 0 or end > len(data):
+            return []
+        try:
+            names.append(data[start:end].decode("ascii"))
+        except UnicodeDecodeError:
+            return []
+        offset = end
+    return names if offset < len(data) and data[offset] == 0xA0 else []
 
 
 def read_petrel_property_shape(data_path: str | Path, data_pk: int) -> tuple[int, int, int]:
@@ -244,9 +397,10 @@ def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
 def _strip_binary_segment_frame(data: bytes, expected_size: int) -> bytes:
     if len(data) == expected_size:
         return data
-    if len(data) != expected_size + 4:
+    if len(data) < expected_size or len(data) - expected_size > 10:
         raise ValueError(
-            f"Unexpected Petrel BXML binary segment size: {len(data)}; expected {expected_size + 4}"
+            f"Unexpected Petrel BXML binary segment size: {len(data)}; expected {expected_size} "
+            "plus a short page frame"
         )
     marker_offset = data.find(b"\xa0")
     while marker_offset >= 0:

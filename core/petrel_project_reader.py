@@ -25,6 +25,7 @@ PETREL_PROJECT_SUFFIX = ".pet"
 PETREL_PROJECT_DATA = "Data.ptd"
 GEOLOGICAL_PROPERTY_MARKERS = ("PORO", "PERM", "NTG")
 MILLIDARCY_TO_SQUARE_METRES = 9.869233e-16
+BAR_TO_PASCALS = 100_000.0
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,13 @@ class PetrelProjectReader:
             for prop in self._properties
             if prop.supporting_grid_uuid and _plain_uuid(prop.supporting_grid_uuid) == selected
         ]
+        grid_shape = self.get_grid_shape()
+        if all(value is not None for value in grid_shape):
+            ni, nj, nk = grid_shape
+            matching_shape = (nk, nj, ni)
+            matching = [prop for prop in scoped if prop.shape == matching_shape]
+            if matching:
+                return matching
         return scoped or list(self._properties)
 
     def list_named_horizons(self) -> list[PetrelNamedHorizon]:
@@ -606,11 +614,16 @@ class PetrelProjectReader:
             return None
         selected_shape = self.get_grid_shape()
         native_shape = (native.layout.ni, native.layout.nj, native.layout.nk)
-        if all(selected_shape) and native_shape != selected_shape:
+        selected_horizontal_shape = selected_shape[:2]
+        if all(selected_horizontal_shape) and native_shape[:2] != selected_horizontal_shape:
             if required:
-                raise ValueError(f"Native Petrel grid shape {native_shape} does not match {selected_shape}")
+                raise ValueError(
+                    f"Native Petrel grid horizontal shape {native_shape[:2]} "
+                    f"does not match {selected_horizontal_shape}"
+                )
             return None
         self._native_grid_readers[self._selected_grid_uuid] = native
+        self._apply_native_grid_shape(native)
         return native
 
     def _property_by_uuid(self, property_uuid: str) -> PropertyInfo:
@@ -747,7 +760,11 @@ def _data_pk_from_paths(paths: tuple[str, ...]) -> int | None:
 
 def _native_property_scale(prop: PropertyInfo) -> float:
     title = prop.title.upper()
-    return MILLIDARCY_TO_SQUARE_METRES if title == "PERM" or title.startswith("PERM_") else 1.0
+    if title == "PERM" or title.startswith("PERM_"):
+        return MILLIDARCY_TO_SQUARE_METRES
+    if (prop.property_kind or "").upper() == "PRESSURE":
+        return BAR_TO_PASCALS
+    return 1.0
 
 
 def _scale_native_property_value(prop: PropertyInfo, value):

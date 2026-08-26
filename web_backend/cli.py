@@ -129,6 +129,7 @@ def load_models(payload: JsonDict) -> None:
             grid = _select_grid(grids, selected_grid_uuid, label, getattr(reader, "backend", ""))
             reader.select_grid(grid.uuid)
             selected_grid_uuid = grid.uuid
+            grids = reader.list_grids()
         properties = reader.list_properties()
         list_horizons = getattr(reader, "list_named_horizons", None)
         try:

@@ -498,6 +498,7 @@ function renderWells() {
   $('well-summary').textContent = wellSummaryText(wells);
   const root = $('well-list');
   root.innerHTML = '';
+  resetWellSelectContext();
   const query = $('well-search').value.trim().toLowerCase();
   wells
     .slice()
@@ -515,6 +516,9 @@ function renderWells() {
     const trajectoryOptions = ['<option value="">-</option>'].concat(trajectories.map(trajectory => (
       `<option value="${escapeHtml(trajectory.uuid)}" ${assignment && assignment.trajectoryUuid === trajectory.uuid ? 'selected' : ''}>${escapeHtml(sectionTrajectoryName(trajectory))}</option>`
     ))).join('');
+    const trajectoryMenu = assignment && assignment.modelLabel
+      ? `<optgroup label="Well: ${escapeHtml(well.name)}">${trajectoryOptions}</optgroup>`
+      : trajectoryOptions;
     const analysis = assignment ? state.wellTrajectoryAnalyses[wellAssignmentKey(well.name)] : null;
     const xyValid = Number(well.validXY || 0);
     const xyTotal = xyValid + Number(well.missingXY || 0);
@@ -524,7 +528,7 @@ function renderWells() {
       <span class="muted">${well.count}</span>
       <span class="well-xy-state${xyValid < xyTotal ? ' incomplete' : ''}">${xyValid} / ${xyTotal}</span>
       <select data-well-model="${escapeHtml(well.name)}">${modelOptions}</select>
-      <select data-well-trajectory="${escapeHtml(well.name)}" ${assignment && assignment.modelLabel ? '' : 'disabled'}>${trajectoryOptions}</select>
+      <select data-well-trajectory="${escapeHtml(well.name)}" ${assignment && assignment.modelLabel ? '' : 'disabled'}>${trajectoryMenu}</select>
       <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.maxAngle, '°')}</span>
       <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.last500Azimuth, '°')}</span>
       <span class="well-trajectory-metric">${formatWellMetric(analysis && analysis.bottomMd, ' m')}</span>
@@ -542,6 +546,7 @@ function renderWells() {
     });
   });
   root.querySelectorAll('[data-well-model]').forEach(select => {
+    bindWellSelectContext(select, select.dataset.wellModel);
     select.addEventListener('change', () => {
       const wellName = select.dataset.wellModel;
       const modelLabel = select.value;
@@ -553,6 +558,7 @@ function renderWells() {
     });
   });
   root.querySelectorAll('[data-well-trajectory]').forEach(select => {
+    bindWellSelectContext(select, select.dataset.wellTrajectory);
     select.addEventListener('change', () => {
       const wellName = select.dataset.wellTrajectory;
       const assignment = wellAssignment(wellName);
@@ -563,6 +569,25 @@ function renderWells() {
     });
   });
   updateWorkflowSummaries();
+}
+
+function bindWellSelectContext(select, wellName) {
+  const activate = () => {
+    document.querySelectorAll('.wells-page-list .well-item.selecting').forEach(row => row.classList.remove('selecting'));
+    const row = select.closest('.well-item');
+    if (row) row.classList.add('selecting');
+    const label = document.querySelector('[data-well-context]');
+    if (label) label.textContent = `Well: ${wellName}`;
+  };
+  select.addEventListener('mousedown', activate);
+  select.addEventListener('focus', activate);
+  select.addEventListener('blur', resetWellSelectContext);
+}
+
+function resetWellSelectContext() {
+  document.querySelectorAll('.wells-page-list .well-item.selecting').forEach(row => row.classList.remove('selecting'));
+  const label = document.querySelector('[data-well-context]');
+  if (label) label.textContent = 'Well';
 }
 
 function wellTrajectoryMatch(fracWell) {
@@ -950,12 +975,17 @@ async function loadWellMatchingJson() {
       trajectoryName: String(value.trajectoryName || '')
     }]));
   }
+  if (Array.isArray(data.selectedWells)) {
+    state.selectedWells = uniqueNames(data.selectedWells.map(value => String(value)));
+    state.hasSavedWellSelection = data.hasSavedWellSelection !== false;
+  }
   state.sectionWellNameMap = Object.fromEntries(Object.entries(mappings || {}).map(([modelWell, fracWell]) => [String(modelWell), String(fracWell)]));
   ensureWellAssignments();
   await refreshWellTrajectoryAnalyses();
   renderWells();
   saveState();
-  setReady(`Loaded well matches: ${Object.keys(state.wellAssignments).length}`);
+  const selectionNote = Array.isArray(data.selectedWells) ? `, selected wells: ${state.selectedWells.length}` : '';
+  setReady(`Loaded well matches: ${Object.keys(state.wellAssignments).length}${selectionNote}`);
 }
 
 async function saveWellMatchingJson() {
@@ -966,10 +996,12 @@ async function saveWellMatchingJson() {
   });
   if (!path) return;
   const payload = {
-    version: 2,
+    version: 3,
     savedAt: new Date().toISOString(),
     assignments: state.wellAssignments || {},
-    mappings: state.sectionWellNameMap || {}
+    mappings: state.sectionWellNameMap || {},
+    selectedWells: state.selectedWells.slice(),
+    hasSavedWellSelection: state.hasSavedWellSelection
   };
   await window.petrel.writeTextFile(path, JSON.stringify(payload, null, 2));
   setReady(`Saved well matches: ${Object.keys(payload.assignments).length}`);
