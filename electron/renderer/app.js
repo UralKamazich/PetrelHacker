@@ -2421,14 +2421,19 @@ function setSectionImageActionsEnabled(enabled) {
 
 async function saveSectionPng() {
   try {
-    const filePath = sectionPngOutputPath();
-    await waitForSectionCaptureFrame();
-    const result = await window.petrel.savePngCapture(filePath, sectionCaptureRect());
-    setReady(`Section PNG saved: ${basename(result.path || filePath)}`);
-    appendLog(`Section PNG saved: ${result.path || filePath}`);
+    const result = await writeSectionPng();
+    setReady(`Section PNG saved: ${basename(result.path)}`);
+    appendLog(`Section PNG saved: ${result.path}`);
   } catch (error) {
     fail(error);
   }
+}
+
+async function writeSectionPng() {
+  const filePath = sectionPngOutputPath();
+  await waitForSectionCaptureFrame();
+  const result = await window.petrel.savePngCapture(filePath, sectionCaptureRect());
+  return { ...result, path: result.path || filePath };
 }
 
 async function copySectionPng() {
@@ -3469,7 +3474,15 @@ async function saveSectionBoundaries() {
     fillSectionWells(state.sectionTrajectories);
     saveState();
     const skipped = Number(result.rowsSkipped || 0);
-    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}`);
+    let pngResult = null;
+    try {
+      pngResult = await writeSectionPng();
+      appendLog(`Section PNG saved: ${pngResult.path}`);
+    } catch (error) {
+      appendLog(`Warning: section boundaries were saved, but PNG was not saved: ${error.message}`);
+    }
+    const pngSuffix = pngResult ? `, PNG: ${basename(pngResult.path)}` : '';
+    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}${pngSuffix}`);
     appendLog(`Section boundaries saved: ${savedPath}`);
     if (skipped) appendLog(`Warning: ${skipped} sleeve row(s) were not matched and were not updated.`);
   } catch (error) {
