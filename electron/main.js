@@ -1,7 +1,12 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const zlib = require('zlib');
+const { promisify } = require('util');
 const { spawn } = require('child_process');
+
+const gunzip = promisify(zlib.gunzip);
 
 let mainWindow = null;
 let dialogPaths = null;
@@ -173,6 +178,63 @@ ipcMain.handle('file:write-text', async (_event, filePath, content) => {
   return true;
 });
 
+ipcMain.handle('capture:save-png', async (event, options) => {
+  const filePath = String(options && options.filePath || '').trim();
+  if (!filePath || !path.isAbsolute(filePath)) throw new Error('An absolute PNG path is required.');
+  const image = await captureRendererArea(event.sender, options && options.rect);
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, image.toPNG());
+  return { path: filePath, size: image.getSize() };
+});
+
+ipcMain.handle('capture:copy-png', async (event, rect) => {
+  const image = await captureRendererArea(event.sender, rect);
+  clipboard.writeImage(image);
+  return { size: image.getSize() };
+});
+
+ipcMain.handle('cache:load-section', async (_event, cacheKey) => {
+  const key = String(cacheKey || '').trim();
+  if (!/^[a-f0-9]{64}$/i.test(key)) throw new Error('Invalid section cache key.');
+  const filePath = path.join(sectionCacheDirectory(), `${key}.json.gz`);
+  const compressed = await fs.promises.readFile(filePath);
+  const parsed = JSON.parse((await gunzip(compressed)).toString('utf8'));
+  const result = parsed && parsed.result;
+  if (!result || typeof result !== 'object') throw new Error('Invalid section cache file.');
+  const now = new Date();
+  fs.promises.utimes(filePath, now, now).catch(() => {});
+  return result;
+});
+
+ipcMain.handle('cache:list-sections', async () => {
+  let names = [];
+  try {
+    names = await fs.promises.readdir(sectionCacheDirectory());
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return [];
+    throw error;
+  }
+  const entries = [];
+  for (const name of names.filter(item => /^[a-f0-9]{64}\.json\.gz$/i.test(item))) {
+    try {
+      const filePath = path.join(sectionCacheDirectory(), name);
+      const compressed = await fs.promises.readFile(filePath);
+      const parsed = JSON.parse((await gunzip(compressed)).toString('utf8'));
+      const result = parsed && parsed.result;
+      if (!result || typeof result !== 'object') continue;
+      entries.push({
+        cacheKey: name.slice(0, 64),
+        modelPath: result.model_path || '',
+        propertyUuid: result.property_uuid || '',
+        trajectoryUuid: result.trajectory_uuid || ''
+      });
+    } catch (_error) {
+      // A damaged cache entry must not prevent other saved sections from loading.
+    }
+  }
+  return entries;
+});
+
 ipcMain.handle('backend:run', async (_event, command, payload) => {
   return runBackend(command, payload || {});
 });
@@ -248,4 +310,28 @@ function runBackend(command, payload) {
     child.stdin.write(JSON.stringify(payload));
     child.stdin.end();
   });
+}
+
+async function captureRendererArea(webContents, rawRect) {
+  const rect = normalizeCaptureRect(rawRect);
+  const image = await webContents.capturePage(rect);
+  if (image.isEmpty()) throw new Error('The section image is empty.');
+  return image;
+}
+
+function normalizeCaptureRect(rawRect) {
+  const x = Math.max(0, Math.floor(Number(rawRect && rawRect.x) || 0));
+  const y = Math.max(0, Math.floor(Number(rawRect && rawRect.y) || 0));
+  const width = Math.floor(Number(rawRect && rawRect.width) || 0);
+  const height = Math.floor(Number(rawRect && rawRect.height) || 0);
+  if (width < 1 || height < 1) throw new Error('The section area is not visible.');
+  return { x, y, width, height };
+}
+
+function sectionCacheDirectory() {
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Caches', 'PetrelHacker', 'section-cache');
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'PetrelHacker', 'section-cache');
+  }
+  return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'petrelhacker', 'section-cache');
 }

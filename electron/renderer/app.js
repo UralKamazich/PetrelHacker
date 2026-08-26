@@ -73,7 +73,8 @@ const state = {
   sectionAutoDrawTimer: null,
   sectionSelectedHorizons: {},
   wellAssignments: {},
-  wellTrajectoryAnalyses: {}
+  wellTrajectoryAnalyses: {},
+  sectionMemoryCache: new Map()
 };
 
 const $ = id => document.getElementById(id);
@@ -153,6 +154,8 @@ function bindActions() {
   $('load-section-from-extraction').addEventListener('click', loadSectionFromExtraction);
   $('load-section-wells').addEventListener('click', loadSectionWells);
   $('draw-section').addEventListener('click', drawSection);
+  $('section-save-png').addEventListener('click', saveSectionPng);
+  $('section-copy-png').addEventListener('click', copySectionPng);
   $('section-auto-boundaries').addEventListener('click', autoPlaceSectionBoundaries);
   $('section-save-boundaries').addEventListener('click', saveSectionBoundaries);
   $('section-clear-cache').addEventListener('click', clearSectionCache);
@@ -257,6 +260,7 @@ async function clearModelSelection(index) {
   model.propertyCount = 0;
   model.gridUuid = '';
   state.loadedModels = state.loadedModels.filter(item => item.label !== model.label);
+  pruneSectionHorizonSelections();
 
   const removedTrajectoryNames = new Set((removed && removed.trajectories || []).map(sectionTrajectoryName));
   Object.keys(state.sectionWellNameMap || {}).forEach(name => {
@@ -270,14 +274,7 @@ async function clearModelSelection(index) {
   });
 
   if (oldPath && state.currentSectionContext && state.currentSectionContext.modelPath === oldPath) {
-    state.sectionResult = null;
-    state.sectionRows = [];
-    state.sectionMesh = null;
-    state.sectionBoundaries = [];
-    state.currentSectionContext = null;
-    state.currentSectionPayload = null;
-    $('section-plot').innerHTML = '';
-    clearSectionCellInspector($('section-cell-inspector'));
+    clearRenderedSection();
   }
 
   state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
@@ -335,11 +332,19 @@ async function loadModels() {
         loaded.gridUuid = loaded.gridUuid || model.gridUuid || '';
       }
     });
+    pruneSectionHorizonSelections();
     renderModels();
     renderProperties();
     renderSectionModels();
-    state.sectionTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+    const loadedTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
+    state.sectionMemoryCache.clear();
+    reconcileWellAssignmentsWithLoadedModels();
     ensureWellAssignments();
+    if (!sectionContextExistsInLoadedModels(loadedTrajectories)) clearRenderedSection();
+    state.sectionTrajectories = state.sectionUseExtractionSelection
+      ? await resolveSectionTrajectoriesFromExtraction(loadedTrajectories, sectionExtractionWellNames())
+      : loadedTrajectories;
+    await recoverSectionCacheIndex();
     await refreshWellTrajectoryAnalyses();
     await refreshSectionSavedWellsFromBoundaryFile();
     fillSectionWells(state.sectionTrajectories);
@@ -619,6 +624,54 @@ function ensureWellAssignments() {
       break;
     }
   });
+}
+
+function reconcileWellAssignmentsWithLoadedModels() {
+  const fracWells = new Map((state.sleeves && state.sleeves.wells || [])
+    .map(well => [wellAssignmentKey(well.name), well.name]));
+  state.wellTrajectoryAnalyses = {};
+  Object.entries(state.wellAssignments || {}).forEach(([key, assignment]) => {
+    const wellName = assignment.wellName || fracWells.get(key) || '';
+    if (!wellName) {
+      delete state.wellAssignments[key];
+      return;
+    }
+    const model = state.loadedModels.find(item => item.label === assignment.modelLabel);
+    if (!model) {
+      delete state.wellAssignments[key];
+      return;
+    }
+    const trajectories = wellModelTrajectories(model.label);
+    const current = trajectories.find(item => item.uuid === assignment.trajectoryUuid);
+    if (current) {
+      assignment.trajectoryName = sectionTrajectoryName(current);
+      return;
+    }
+    const names = [assignment.trajectoryName, wellName].map(normalizeLookupTextSafe).filter(Boolean);
+    const replacement = trajectories.find(item => names.includes(normalizeLookupTextSafe(sectionTrajectoryName(item)))) || null;
+    setWellAssignment(wellName, model.label, replacement ? replacement.uuid : '');
+  });
+}
+
+function sectionContextExistsInLoadedModels(trajectories) {
+  const context = state.currentSectionContext;
+  if (!context) return true;
+  const model = state.loadedModels.find(item => item.path === context.modelPath);
+  if (!model || !(model.properties || []).some(property => property.uuid === context.propertyUuid)) return false;
+  return (trajectories || []).some(trajectory => trajectory.uuid === context.trajectoryUuid
+    && (trajectory.source_path || model.path) === context.trajectorySourcePath);
+}
+
+function clearRenderedSection() {
+  state.sectionResult = null;
+  state.sectionRows = [];
+  state.sectionMesh = null;
+  state.sectionBoundaries = [];
+  state.currentSectionContext = null;
+  state.currentSectionPayload = null;
+  $('section-plot').innerHTML = '';
+  clearSectionCellInspector($('section-cell-inspector'));
+  setSectionImageActionsEnabled(false);
 }
 
 async function refreshWellTrajectoryAnalyses(wellNames = null) {
@@ -1045,6 +1098,14 @@ function sectionHorizonOptions() {
     }
   }
   return options;
+}
+
+function pruneSectionHorizonSelections() {
+  const valid = new Set(sectionHorizonOptions().map(option => option.value));
+  Object.keys(state.sectionSelectedHorizons || {}).forEach(key => {
+    state.sectionSelectedHorizons[key] = (state.sectionSelectedHorizons[key] || [])
+      .filter(value => valid.has(value));
+  });
 }
 
 function selectedSectionHorizonUuids() {
@@ -1591,6 +1652,7 @@ async function loadSectionWells() {
     fillSectionWells(state.sectionTrajectories);
     $('section-summary').textContent = `Trajectories: ${state.sectionTrajectories.length}`;
     setReady(`Well trajectories: ${state.sectionTrajectories.length}`);
+    scheduleCachedSectionAutoDraw();
   } catch (error) {
     fail(error);
   }
@@ -1616,6 +1678,7 @@ async function loadSectionFromExtraction() {
     $('section-summary').textContent = `Selected wells: ${state.sectionTrajectories.length}`;
     setReady(`Selected well trajectories: ${state.sectionTrajectories.length}`);
     saveState();
+    scheduleCachedSectionAutoDraw();
   } catch (error) {
     fail(error);
   }
@@ -1698,25 +1761,38 @@ function findSectionTrajectoryForExtractionWell(trajectories, well, used) {
   if (!key) return null;
   const assignment = wellAssignment(well);
   if (assignment && assignment.trajectoryUuid) {
-    const assigned = trajectories.find(item => !used.has(item.uuid)
+    const assigned = trajectories.find(item => !used.has(sectionTrajectoryIdentity(item))
       && item.uuid === assignment.trajectoryUuid
       && (!assignment.modelLabel || item.source_model === assignment.modelLabel));
-    if (assigned) return assigned;
+    // A manual Wells-page assignment is authoritative. Returning null here lets
+    // the caller reload that model instead of falling back to a same-name well.
+    return assigned || null;
   }
   const mappedName = Object.entries(state.sectionWellNameMap || {})
     .find(([_modelName, fracName]) => normalizeLookupTextSafe(fracName) === key);
   if (mappedName) {
-    const mapped = trajectories.find(item => !used.has(item.uuid) && normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(mappedName[0]));
+    const mapped = trajectories.find(item => !used.has(sectionTrajectoryIdentity(item))
+      && normalizeLookupTextSafe(sectionTrajectoryName(item)) === normalizeLookupTextSafe(mappedName[0]));
     if (mapped) return mapped;
   }
-  return trajectories.find(item => !used.has(item.uuid) && normalizeLookupTextSafe(sectionTrajectoryName(item)) === key) || null;
+  return trajectories.find(item => !used.has(sectionTrajectoryIdentity(item))
+    && normalizeLookupTextSafe(sectionTrajectoryName(item)) === key) || null;
 }
 
 function addSectionTrajectoryMatch(selected, used, trajectory, extractionWell) {
-  if (!trajectory || used.has(trajectory.uuid)) return;
+  const identity = sectionTrajectoryIdentity(trajectory);
+  if (!trajectory || used.has(identity)) return;
   selected.push(trajectory);
-  used.add(trajectory.uuid);
+  used.add(identity);
   state.sectionWellNameMap[sectionTrajectoryName(trajectory)] = extractionWell;
+}
+
+function sectionTrajectoryIdentity(trajectory) {
+  return [
+    trajectory && trajectory.source_model,
+    trajectory && trajectory.source_path,
+    trajectory && trajectory.uuid
+  ].map(value => String(value || '')).join('::');
 }
 
 function fillSectionWells(trajectories) {
@@ -1781,23 +1857,142 @@ function sectionSelectedWellHasCachedSection() {
   return Boolean(value && state.sectionCachedWells && state.sectionCachedWells[value]);
 }
 
+async function recoverSectionCacheIndex() {
+  const propertySelection = findSectionPropertyByValue($('section-property').value);
+  if (!propertySelection || !propertySelection.model || !propertySelection.property) return;
+  try {
+    const entries = await window.petrel.listSectionCaches();
+    const configuredModel = state.models.find(item => item.label === propertySelection.model.label);
+    const gridUuid = propertySelection.model.gridUuid
+      || propertySelection.property.supporting_grid_uuid
+      || (configuredModel && configuredModel.gridUuid)
+      || '';
+    const byTrajectory = new Map((entries || [])
+      .filter(entry => entry.modelPath === propertySelection.model.path
+        && entry.propertyUuid === propertySelection.property.uuid)
+      .map(entry => [entry.trajectoryUuid, entry]));
+    for (const trajectory of state.sectionTrajectories || []) {
+      const entry = byTrajectory.get(trajectory.uuid);
+      const value = sectionTrajectoryValue(trajectory);
+      if (!entry || state.sectionCachedWells[value]) continue;
+      state.sectionCachedWells[value] = makeSectionCacheInfo(entry.cacheKey, {
+        path: propertySelection.model.path,
+        gridUuid,
+        propertyUuid: propertySelection.property.uuid,
+        trajectoryUuid: trajectory.uuid,
+        trajectoryPath: trajectory.source_path || propertySelection.model.path,
+        sampleStep: Number($('section-step').value || 25),
+        depthOffset: Number(propertySelection.model.depthOffset || 0),
+        skipInactive: $('section-skip-inactive').checked,
+        horizonSources: selectedSectionHorizonSources()
+      });
+    }
+  } catch (error) {
+    appendLog(`Warning: saved section cache index was not loaded: ${error.message}`);
+  }
+}
+
 function scheduleCachedSectionAutoDraw() {
   if (state.sectionAutoDrawTimer) clearTimeout(state.sectionAutoDrawTimer);
-  state.sectionAutoDrawTimer = setTimeout(() => {
+  state.sectionAutoDrawTimer = setTimeout(async () => {
     state.sectionAutoDrawTimer = null;
     if (!sectionSelectedWellHasCachedSection()) return;
     if (!$('section-property').value) return;
-    appendLog('Cached section selected; loading section automatically.');
-    drawSection({ cacheOnly: true }).catch(error => {
+    try {
+      const memoryResult = state.sectionMemoryCache.get(sectionMemoryCacheKey());
+      if (memoryResult) {
+        appendLog('Loaded section from memory cache.');
+        await displaySectionResult(memoryResult.result, memoryResult.payload, memoryResult.trajectory);
+        return;
+      }
+      const cacheInfo = sectionSelectedWellCacheInfo();
+      if (cacheInfo && !sectionCacheInfoMatchesSelection(cacheInfo)) {
+        if (sectionCacheInfoCoreMatchesSelection(cacheInfo)) {
+          appendLog('Loading section cache with the current surface selection.');
+          setBusy('Loading section', 'Reading local cache');
+          const result = unpackSectionResult(await window.petrel.loadSectionCache(cacheInfo.cacheKey));
+          const trajectory = findSectionTrajectoryByValue($('section-well').value);
+          const payload = Object.assign({}, cacheInfo.sectionPayload, {
+            horizonSources: selectedSectionHorizonSources()
+          });
+          state.sectionCachedWells[$('section-well').value] = makeSectionCacheInfo(cacheInfo.cacheKey, payload);
+          saveState();
+          await displaySectionResult(result, payload, trajectory);
+          return;
+        }
+        setAttention('Saved section does not match the loaded models or current settings. Use Draw section.');
+        return;
+      }
+      if (cacheInfo) {
+        appendLog('Loading section directly from disk cache.');
+        setBusy('Loading section', 'Reading local cache');
+        const result = unpackSectionResult(await window.petrel.loadSectionCache(cacheInfo.cacheKey));
+        const trajectory = findSectionTrajectoryByValue($('section-well').value);
+        await displaySectionResult(result, cacheInfo.sectionPayload, trajectory);
+        return;
+      }
+      appendLog('Cached section selected; loading section automatically.');
+      await drawSection({ cacheOnly: true });
+    } catch (error) {
       const selected = $('section-well').value;
       if (selected && state.sectionCachedWells) {
         delete state.sectionCachedWells[selected];
         fillSectionWells(state.sectionTrajectories);
         saveState();
       }
+      if (sectionCacheUnavailableError(error)) {
+        setAttention('Saved section cache is unavailable. Use Draw section to rebuild it.');
+        return;
+      }
       fail(error);
-    });
-  }, 120);
+    }
+  }, 30);
+}
+
+function sectionCacheUnavailableError(error) {
+  const message = error && error.message ? error.message : String(error || '');
+  return /cached section was not found|section cache|ENOENT|no such file/i.test(message);
+}
+
+function sectionSelectedWellCacheInfo() {
+  const value = $('section-well').value;
+  const info = value && state.sectionCachedWells ? state.sectionCachedWells[value] : null;
+  return info && typeof info === 'object' && info.cacheKey && info.sectionPayload ? info : null;
+}
+
+function sectionCacheInfoMatchesSelection(info) {
+  return sectionCacheInfoCoreMatchesSelection(info)
+    && JSON.stringify(info.sectionPayload.horizonSources || []) === JSON.stringify(selectedSectionHorizonSources());
+}
+
+function sectionCacheInfoCoreMatchesSelection(info) {
+  const propertySelection = findSectionPropertyByValue($('section-property').value);
+  const trajectory = findSectionTrajectoryByValue($('section-well').value);
+  const configuredModel = propertySelection && state.models.find(item => item.label === propertySelection.model.label);
+  const gridUuid = propertySelection && (propertySelection.model.gridUuid
+    || propertySelection.property.supporting_grid_uuid
+    || (configuredModel && configuredModel.gridUuid)
+    || '');
+  return Boolean(propertySelection && trajectory
+    && info.sectionPayload.path === propertySelection.model.path
+    && info.sectionPayload.gridUuid === gridUuid
+    && info.sectionPayload.propertyUuid === propertySelection.property.uuid
+    && info.sectionPayload.trajectoryUuid === trajectory.uuid
+    && Number(info.sectionPayload.sampleStep || 25) === Number($('section-step').value || 25)
+    && Number(info.sectionPayload.depthOffset || 0) === Number(propertySelection.model.depthOffset || 0)
+    && Boolean(info.sectionPayload.skipInactive) === $('section-skip-inactive').checked
+    && info.sleevesPath === $('sleeves-path').value.trim());
+}
+
+function sectionMemoryCacheKey() {
+  return JSON.stringify({
+    trajectory: $('section-well').value,
+    property: $('section-property').value,
+    sampleStep: Number($('section-step').value || 25),
+    skipInactive: $('section-skip-inactive').checked,
+    sleevesPath: $('sleeves-path').value.trim(),
+    horizons: Array.from(selectedSectionHorizonUuids()).sort()
+  });
 }
 
 function sectionTrajectoryName(item) {
@@ -1859,27 +2054,48 @@ async function drawSection(options = {}) {
     };
     const result = unpackSectionResult(await window.petrel.run('model-section', sectionPayload));
     delete sectionPayload.cacheOnly;
-    state.currentSectionPayload = sectionPayload;
-    result.sleeveMarkers = sleeveMarkers;
-    state.sectionResult = result;
-    state.sectionRows = result.rows || [];
-    state.sectionBoundaries = [];
-    const boundaryPath = currentSectionBoundaryPath();
-    state.currentSectionContext = {
-      modelPath: model.path,
-      propertyUuid,
-      trajectorySourcePath: trajectory.source_path || model.path,
-      trajectoryUuid
-    };
-    state.currentSectionSceneKey = currentSectionSceneKeyForPath(boundaryPath);
-    applySectionSceneSettings(state.currentSectionSceneKey);
-    paintSection(result);
-    await restoreSectionBoundariesFromFile(boundaryPath, result, trajectory);
-    setProgress('section-progress', 100);
-    setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
+    if (!Array.isArray(result.sleeveMarkers)) result.sleeveMarkers = sleeveMarkers;
+    if (result.cacheKey) {
+      state.sectionCachedWells[trajectoryValue] = makeSectionCacheInfo(result.cacheKey, sectionPayload);
+      fillSectionWells(state.sectionTrajectories);
+      saveState();
+    }
+    await displaySectionResult(result, sectionPayload, trajectory);
   } catch (error) {
+    if (cacheOnly) throw error;
     fail(error);
   }
+}
+
+async function displaySectionResult(result, sectionPayload, trajectory) {
+  const payload = Object.assign({}, sectionPayload || {});
+  delete payload.cacheOnly;
+  state.currentSectionPayload = payload;
+  state.sectionResult = result;
+  state.sectionRows = result.rows || [];
+  state.sectionBoundaries = [];
+  const boundaryPath = currentSectionBoundaryPath();
+  state.currentSectionContext = {
+    modelPath: payload.path || result.model_path || '',
+    propertyUuid: payload.propertyUuid || result.property_uuid || '',
+    trajectorySourcePath: payload.trajectoryPath || (trajectory && trajectory.source_path) || payload.path || '',
+    trajectoryUuid: payload.trajectoryUuid || result.trajectory_uuid || ''
+  };
+  state.currentSectionSceneKey = currentSectionSceneKeyForPath(boundaryPath);
+  applySectionSceneSettings(state.currentSectionSceneKey);
+  paintSection(result);
+  state.sectionMemoryCache.set(sectionMemoryCacheKey(), { result, payload, trajectory });
+  await restoreSectionBoundariesFromFile(boundaryPath, result, trajectory);
+  setProgress('section-progress', 100);
+  setReady(`Section cells: ${result.cell_count || state.sectionRows.length}, sleeves: ${(result.sleeveMarkers || []).length}`);
+}
+
+function makeSectionCacheInfo(cacheKey, sectionPayload) {
+  return {
+    cacheKey,
+    sectionPayload: Object.assign({}, sectionPayload || {}),
+    sleevesPath: $('sleeves-path').value.trim()
+  };
 }
 
 async function ensureSectionWellNameMapped(trajectoryUuid) {
@@ -2123,6 +2339,7 @@ function paintSection(result) {
   const validRows = rows.filter(row => Number.isFinite(numericCell(row.value)) && Number.isFinite(numericCell(row.tvd_center)));
   if (!validRows.length) {
     plotEmptyIn('section-plot', 'No section data');
+    setSectionImageActionsEnabled(false);
     return;
   }
   let axis = sectionXAxisMode();
@@ -2192,7 +2409,76 @@ function paintSection(result) {
     validRows
   };
   renderSectionLayerMesh(common, result);
+  setSectionImageActionsEnabled(true);
   $('section-summary').textContent = `${result.well_name}: ${result.station_count} stations, ${result.cell_count} cells, ${(result.sleeveMarkers || []).length} sleeves`;
+}
+
+function setSectionImageActionsEnabled(enabled) {
+  ['section-save-png', 'section-copy-png'].forEach(id => {
+    if ($(id)) $(id).disabled = !enabled;
+  });
+}
+
+async function saveSectionPng() {
+  try {
+    const filePath = sectionPngOutputPath();
+    await waitForSectionCaptureFrame();
+    const result = await window.petrel.savePngCapture(filePath, sectionCaptureRect());
+    setReady(`Section PNG saved: ${basename(result.path || filePath)}`);
+    appendLog(`Section PNG saved: ${result.path || filePath}`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function copySectionPng() {
+  try {
+    await waitForSectionCaptureFrame();
+    await window.petrel.copyPngCapture(sectionCaptureRect());
+    setReady('Section image copied to clipboard');
+    appendLog('Section image copied to clipboard.');
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function waitForSectionCaptureFrame() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+function sectionCaptureRect() {
+  if (!state.sectionResult || !state.sectionMesh) throw new Error('Draw a section first.');
+  const rect = $('section-plot').getBoundingClientRect();
+  return {
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height
+  };
+}
+
+function sectionPngOutputPath() {
+  const excelPath = currentSectionBoundaryPath() || $('sleeves-path').value.trim();
+  const outputDir = dirname(excelPath);
+  if (!excelPath || !outputDir || !isAbsolutePath(excelPath)) {
+    throw new Error('Load an Excel frac-list before saving a section PNG.');
+  }
+  const trajectory = findSectionTrajectoryByValue($('section-well').value);
+  const propertySelection = findSectionPropertyByValue($('section-property').value);
+  const parts = [
+    safeFilenamePart(sectionTrajectoryName(trajectory)),
+    safeFilenamePart(propertySelection && propertySelection.property && propertySelection.property.title)
+  ].filter(Boolean);
+  return joinPath(joinPath(outputDir, 'PNG'), `${parts.join('_')}.png`);
+}
+
+function safeFilenamePart(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/[. ]+$/g, '')
+    .slice(0, 80);
 }
 
 function sectionPointTrace(common, result) {
@@ -2530,7 +2816,6 @@ function buildSectionLayerMesh(rows, axis, depthMin, depthMax, valueMin, valueMa
     const value = numericCell(row.value);
     if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(k)) return;
     if (!Number.isFinite(top) || !Number.isFinite(base) || !Number.isFinite(value)) return;
-    if (base < depthMin || top > depthMax) return;
     if (!byStation.has(station)) byStation.set(station, { station, x, rowsByK: new Map() });
     byStation.get(station).rowsByK.set(k, { k, top, base, value, row });
   });
@@ -2549,21 +2834,16 @@ function buildSectionLayerMesh(rows, axis, depthMin, depthMax, valueMin, valueMa
       const rightCell = right.rowsByK.get(k);
       if (!rightCell) return;
       const value = (leftCell.value + rightCell.value) / 2;
-      const topLeft = Math.max(depthMin, Math.min(depthMax, leftCell.top));
-      const baseLeft = Math.max(depthMin, Math.min(depthMax, leftCell.base));
-      const topRight = Math.max(depthMin, Math.min(depthMax, rightCell.top));
-      const baseRight = Math.max(depthMin, Math.min(depthMax, rightCell.base));
-      if (Math.max(baseLeft, baseRight) <= depthMin || Math.min(topLeft, topRight) >= depthMax) return;
       quads.push({
         k,
         value,
         leftCell,
         rightCell,
         points: [
-          { x: left.xPlot, y: topLeft },
-          { x: right.xPlot, y: topRight },
-          { x: right.xPlot, y: baseRight },
-          { x: left.xPlot, y: baseLeft }
+          { x: left.xPlot, y: leftCell.top },
+          { x: right.xPlot, y: rightCell.top },
+          { x: right.xPlot, y: rightCell.base },
+          { x: left.xPlot, y: leftCell.base }
         ]
       });
     });
@@ -2891,20 +3171,17 @@ function autoPlaceSectionBoundaries() {
   if (!state.sectionMesh || !state.sectionMesh.mesh) return fail(new Error('Draw a section first.'));
   const { common, mesh } = state.sectionMesh;
   if (!mesh.sleeves || !mesh.sleeves.length) return fail(new Error('No sleeve markers were loaded for this well.'));
-  const valueRange = numericRange((common.validRows || []).map(row => numericCell(row.value)));
   const settings = sectionBoundarySettings();
   const boundaries = [];
   for (const sleeve of mesh.sleeves) {
-    const cells = sectionBoundaryCellsAtSleeve(common.validRows || [], common.axis, sleeve, valueRange);
-    const continuousBodies = sectionMergeIntervals(cells.map(cell => ({ top: cell.top, base: cell.base })), 1e-6)
-      .filter(interval => sectionIntervalThickness(interval) >= settings.minLayer);
-    const intervals = sectionMergeIntervals(continuousBodies, settings.gap);
-    if (!intervals.length) continue;
-    const local = sectionNearestInterval(intervals, sleeve.depth);
+    const column = sectionBoundaryColumnAtSleeve(state.sectionRows || [], common.axis, sleeve);
+    const cleaned = sectionCleanBoundaryColumn(column, settings);
+    if (!cleaned.bodies.length) continue;
+    const local = sectionNearestInterval(cleaned.bodies, sleeve.depth);
     const barriers = $('section-barrier-thickness').checked
-      ? sectionLocalBarrierBounds(continuousBodies, local)
+      ? sectionLocalBarrierBounds(cleaned.runs, local)
       : { topPoint: NaN, botPoint: NaN, topThickness: NaN, botThickness: NaN };
-    const totalRange = numericRange(intervals.flatMap(interval => [interval.top, interval.base]));
+    const totalRange = numericRange(cleaned.bodies.flatMap(interval => [interval.top, interval.base]));
     boundaries.push({
       well: sleeve.well || (state.sectionResult && state.sectionResult.well_name) || '',
       port: sleeve.port,
@@ -2938,7 +3215,7 @@ function sectionBoundarySettings() {
   };
 }
 
-function sectionBoundaryCellsAtSleeve(rows, axis, sleeve, valueRange) {
+function sectionBoundaryColumnAtSleeve(rows, axis, sleeve) {
   const stationMap = new Map();
   for (const row of rows || []) {
     const station = Number(row.station_index);
@@ -2946,36 +3223,74 @@ function sectionBoundaryCellsAtSleeve(rows, axis, sleeve, valueRange) {
     const top = numericCell(row.tvd_top);
     const base = numericCell(row.tvd_base);
     const value = numericCell(row.value);
-    if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(top) || !Number.isFinite(base) || !Number.isFinite(value)) continue;
-    if (isUnitScaleRange(valueRange) && value <= 1e-9) continue;
+    if (!Number.isFinite(station) || !Number.isFinite(x) || !Number.isFinite(top) || !Number.isFinite(base)) continue;
     if (!stationMap.has(station)) stationMap.set(station, { station, x, cells: [] });
-    stationMap.get(station).cells.push({ top: Math.min(top, base), base: Math.max(top, base), value });
+    stationMap.get(station).cells.push({
+      top: Math.min(top, base),
+      base: Math.max(top, base),
+      productive: Number.isFinite(value) && Math.abs(value) > 1e-9
+    });
   }
   const stations = Array.from(stationMap.values());
   if (!stations.length) return [];
   stations.sort((left, right) => Math.abs(left.x - sleeve.x) - Math.abs(right.x - sleeve.x));
-  return stations[0].cells.sort((a, b) => a.top - b.top);
+  return sectionBuildBoundaryRuns(stations[0].cells);
 }
 
-function isUnitScaleRange(range) {
-  return Number.isFinite(range.min) && Number.isFinite(range.max) && range.min >= -0.001 && range.max <= 1.001;
-}
-
-function sectionMergeIntervals(intervals, gap) {
-  const sorted = (intervals || [])
-    .filter(interval => Number.isFinite(interval.top) && Number.isFinite(interval.base))
-    .map(interval => ({ top: Math.min(interval.top, interval.base), base: Math.max(interval.top, interval.base) }))
-    .sort((left, right) => left.top - right.top);
-  const merged = [];
-  for (const interval of sorted) {
-    const last = merged[merged.length - 1];
-    if (!last || interval.top > last.base + gap) {
-      merged.push({ ...interval });
-    } else {
-      last.base = Math.max(last.base, interval.base);
+function sectionBuildBoundaryRuns(cells) {
+  const sorted = (cells || [])
+    .filter(cell => Number.isFinite(cell.top) && Number.isFinite(cell.base) && cell.base > cell.top)
+    .slice()
+    .sort((left, right) => left.top - right.top || left.base - right.base);
+  const runs = [];
+  let cursor = NaN;
+  for (const cell of sorted) {
+    if (Number.isFinite(cursor) && cell.top > cursor + 1e-6) {
+      sectionAppendBoundaryRun(runs, { top: cursor, base: cell.top, productive: false });
     }
+    const top = Number.isFinite(cursor) ? Math.max(cursor, cell.top) : cell.top;
+    if (cell.base > top + 1e-9) {
+      sectionAppendBoundaryRun(runs, { top, base: cell.base, productive: Boolean(cell.productive) });
+    }
+    cursor = Number.isFinite(cursor) ? Math.max(cursor, cell.base) : cell.base;
   }
-  return merged;
+  return runs;
+}
+
+function sectionAppendBoundaryRun(runs, interval) {
+  const last = runs[runs.length - 1];
+  if (last && last.productive === interval.productive && interval.top <= last.base + 1e-6) {
+    last.base = Math.max(last.base, interval.base);
+  } else {
+    runs.push({ ...interval });
+  }
+}
+
+function sectionCleanBoundaryColumn(runs, settings) {
+  let cleaned = (runs || []).map(run => ({ ...run }));
+
+  cleaned.forEach((run, index) => {
+    const internalGap = index > 0 && index < cleaned.length - 1
+      && cleaned[index - 1].productive && cleaned[index + 1].productive;
+    if (!run.productive && internalGap && sectionIntervalThickness(run) <= settings.gap) run.productive = true;
+  });
+  cleaned = sectionCoalesceBoundaryRuns(cleaned);
+
+  cleaned.forEach(run => {
+    if (run.productive && sectionIntervalThickness(run) < settings.minLayer) run.productive = false;
+  });
+  cleaned = sectionCoalesceBoundaryRuns(cleaned);
+
+  return {
+    runs: cleaned,
+    bodies: cleaned.filter(run => run.productive)
+  };
+}
+
+function sectionCoalesceBoundaryRuns(runs) {
+  const result = [];
+  for (const run of runs || []) sectionAppendBoundaryRun(result, run);
+  return result;
 }
 
 function sectionIntervalThickness(interval) {
@@ -2986,22 +3301,24 @@ function sectionIntervalThickness(interval) {
   return Math.abs(base - top);
 }
 
-function sectionLocalBarrierBounds(bodies, local) {
+function sectionLocalBarrierBounds(runs, local) {
   if (!local) return { topPoint: NaN, botPoint: NaN, topThickness: NaN, botThickness: NaN };
-  const sorted = (bodies || []).slice().sort((left, right) => left.top - right.top);
-  const previous = sorted
-    .filter(item => item.base <= local.top + 1e-6)
-    .sort((left, right) => right.base - left.base)[0] || null;
-  const next = sorted
-    .filter(item => item.top >= local.base - 1e-6)
-    .sort((left, right) => left.top - right.top)[0] || null;
-  const topPoint = previous ? previous.base : local.top;
-  const botPoint = next ? next.top : local.base;
+  const localIndex = (runs || []).indexOf(local);
+  const topBarrier = localIndex > 1 && runs[localIndex - 1] && !runs[localIndex - 1].productive
+    && runs.slice(0, localIndex - 1).some(run => run.productive)
+    ? runs[localIndex - 1]
+    : null;
+  const botBarrier = localIndex >= 0 && localIndex < runs.length - 2 && runs[localIndex + 1] && !runs[localIndex + 1].productive
+    && runs.slice(localIndex + 2).some(run => run.productive)
+    ? runs[localIndex + 1]
+    : null;
+  const topPoint = topBarrier ? topBarrier.top : local.top;
+  const botPoint = botBarrier ? botBarrier.base : local.base;
   return {
     topPoint,
     botPoint,
-    topThickness: Number.isFinite(topPoint) ? Math.max(0, local.top - topPoint) : NaN,
-    botThickness: Number.isFinite(botPoint) ? Math.max(0, botPoint - local.base) : NaN
+    topThickness: topBarrier ? sectionIntervalThickness(topBarrier) : 0,
+    botThickness: botBarrier ? sectionIntervalThickness(botBarrier) : 0
   };
 }
 
@@ -3145,8 +3462,10 @@ async function saveSectionBoundaries() {
     updateWorkflowSummaries();
     const selected = $('section-well').value;
     if (selected) state.sectionSavedWells[selected] = true;
-    await saveCurrentSectionCache();
-    if (selected && state.currentSectionPayload && state.sectionResult) state.sectionCachedWells[selected] = true;
+    const savedCache = await saveCurrentSectionCache();
+    if (selected && savedCache && savedCache.cacheKey) {
+      state.sectionCachedWells[selected] = makeSectionCacheInfo(savedCache.cacheKey, state.currentSectionPayload);
+    }
     fillSectionWells(state.sectionTrajectories);
     saveState();
     const skipped = Number(result.rowsSkipped || 0);
@@ -3159,21 +3478,24 @@ async function saveSectionBoundaries() {
 }
 
 async function saveCurrentSectionCache() {
-  if (!state.currentSectionPayload || !state.sectionResult) return;
+  if (!state.currentSectionPayload || !state.sectionResult) return null;
   try {
-    await window.petrel.run('save-section-cache', {
+    const result = await window.petrel.run('save-section-cache', {
       sectionPayload: state.currentSectionPayload,
       result: sectionCacheResultPayload(state.sectionResult)
     });
     appendLog('Section cache saved.');
+    return result;
   } catch (error) {
     appendLog(`Warning: section cache was not saved: ${error.message}`);
+    return null;
   }
 }
 
 function sectionCacheResultPayload(result) {
   const payload = Object.assign({}, result || {});
   delete payload.event;
+  delete payload.cacheKey;
   const rows = Array.isArray(payload.rows) ? payload.rows : [];
   if (rows.length) {
     const keys = Object.keys(rows[0]);
@@ -3204,6 +3526,7 @@ async function clearSectionCache() {
   try {
     const result = await window.petrel.run('clear-section-cache', {});
     state.sectionCachedWells = {};
+    state.sectionMemoryCache.clear();
     fillSectionWells(state.sectionTrajectories);
     saveState();
     setReady('Section cache cleared');
@@ -3321,6 +3644,10 @@ function dragSectionAxis(event, canvas) {
       5
     );
     state.sectionViewXRange = range;
+    current.mesh.xMin = range.min;
+    current.mesh.xMax = range.max;
+    current.common.xMin = range.min;
+    current.common.xMax = range.max;
   } else if (drag.type === 'y-axis') {
     const range = sectionDraggedAxisRange(
       drag.yMin,
@@ -3332,9 +3659,13 @@ function dragSectionAxis(event, canvas) {
     );
     $('section-depth-min').value = formatInputNumber(range.min, 1);
     $('section-depth-max').value = formatInputNumber(range.max, 1);
+    current.mesh.yMin = range.min;
+    current.mesh.yMax = range.max;
+    current.common.depthMin = range.min;
+    current.common.depthMax = range.max;
   }
   event.preventDefault();
-  paintSection(state.sectionResult);
+  redrawCurrentSectionMesh();
 }
 
 function sectionDraggedAxisRange(minValue, maxValue, pixelDelta, pixelSpan, mode, minSpan) {
@@ -3342,10 +3673,10 @@ function sectionDraggedAxisRange(minValue, maxValue, pixelDelta, pixelSpan, mode
   if (!Number.isFinite(span) || span <= 0 || !Number.isFinite(pixelDelta)) return { min: minValue, max: maxValue };
   const valueDelta = (pixelDelta / Math.max(1, pixelSpan)) * span;
   if (mode === 'resize-min') {
-    return sectionNormalizedRange(minValue + valueDelta, maxValue, minSpan);
+    return sectionNormalizedRange(minValue - valueDelta, maxValue, minSpan);
   }
   if (mode === 'resize-max') {
-    return sectionNormalizedRange(minValue, maxValue + valueDelta, minSpan);
+    return sectionNormalizedRange(minValue, maxValue - valueDelta, minSpan);
   }
   return {
     min: minValue - valueDelta,
@@ -3392,16 +3723,25 @@ function zoomSectionMesh(event, canvas, mesh) {
   if (!region) return;
   event.preventDefault();
   const point = sectionMeshPointFromScreen(screenX, screenY, frame, mesh);
-  const factor = event.deltaY < 0 ? 0.82 : 1.22;
+  const delta = Math.max(-160, Math.min(160, Number(event.deltaY) || 0));
+  const factor = Math.exp(delta * 0.0018);
   if (region.type === 'plot' || region.type === 'x-axis') {
     state.sectionViewXRange = sectionZoomRange(mesh.xMin, mesh.xMax, point.x, point.xFraction, factor, 5);
+    mesh.xMin = state.sectionViewXRange.min;
+    mesh.xMax = state.sectionViewXRange.max;
+    state.sectionMesh.common.xMin = mesh.xMin;
+    state.sectionMesh.common.xMax = mesh.xMax;
   }
   if (region.type === 'plot' || region.type === 'y-axis') {
     const yRange = sectionZoomRange(mesh.yMin, mesh.yMax, point.y, point.yFraction, factor, 1);
     $('section-depth-min').value = formatInputNumber(yRange.min, 1);
     $('section-depth-max').value = formatInputNumber(yRange.max, 1);
+    mesh.yMin = yRange.min;
+    mesh.yMax = yRange.max;
+    state.sectionMesh.common.depthMin = yRange.min;
+    state.sectionMesh.common.depthMax = yRange.max;
   }
-  paintSection(state.sectionResult);
+  redrawCurrentSectionMesh();
 }
 
 function sectionZoomRange(minValue, maxValue, centerValue, fraction, factor, minSpan) {

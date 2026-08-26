@@ -6,6 +6,10 @@ contextBridge.exposeInMainWorld('petrel', {
   saveFile: options => ipcRenderer.invoke('dialog:save-file', options || {}),
   readTextFile: path => ipcRenderer.invoke('file:read-text', path),
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
+  savePngCapture: (filePath, rect) => ipcRenderer.invoke('capture:save-png', { filePath, rect }),
+  copyPngCapture: rect => ipcRenderer.invoke('capture:copy-png', rect),
+  loadSectionCache: cacheKey => ipcRenderer.invoke('cache:load-section', cacheKey),
+  listSectionCaches: () => ipcRenderer.invoke('cache:list-sections'),
   run: (command, payload) => ipcRenderer.invoke('backend:run', command, payload || {}),
   onBackendEvent: callback => {
     const listener = (_event, message) => callback(message);

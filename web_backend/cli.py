@@ -491,6 +491,7 @@ def trajectory_analysis(payload: JsonDict) -> None:
     if not isinstance(assignments, list):
         raise ValueError("Trajectory assignments must be a list.")
     readers: dict[str, object] = {}
+    trajectories_by_path: dict[str, dict[str, object]] = {}
     results: list[JsonDict] = []
     for assignment in assignments:
         if not isinstance(assignment, dict):
@@ -504,8 +505,10 @@ def trajectory_analysis(payload: JsonDict) -> None:
             if reader is None:
                 reader = _open_trajectory_reader(path)
                 readers[path] = reader
-            trajectories = reader.list_well_trajectories()
-            trajectory = next((item for item in trajectories if str(item.uuid) == trajectory_uuid), None)
+                trajectories_by_path[path] = {
+                    str(item.uuid).lower(): item for item in reader.list_well_trajectories()
+                }
+            trajectory = trajectories_by_path[path].get(trajectory_uuid.lower())
             if trajectory is None:
                 raise ValueError("Trajectory was not found in the selected model.")
             points = reader.get_well_trajectory_points(trajectory_uuid)
@@ -681,7 +684,7 @@ def model_section(payload: JsonDict) -> None:
     if cached is not None:
         _emit("log", message="Loaded section from cache.")
         _emit("progress", value=100)
-        _emit("result", **_clean_section_cache_result(cached))
+        _emit("result", cacheKey=cache_key, **_clean_section_cache_result(cached))
         return
     if bool(payload.get("cacheOnly", False)):
         raise ValueError("Cached section was not found. Use Draw section to build it.")
@@ -937,6 +940,7 @@ def _load_section_cache(key: str) -> JsonDict | None:
 def _clean_section_cache_result(result: JsonDict) -> JsonDict:
     cleaned = dict(result)
     cleaned.pop("event", None)
+    cleaned.pop("cacheKey", None)
     return cleaned
 
 

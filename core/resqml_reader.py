@@ -209,6 +209,7 @@ class ResqmlReader:
         self._objects: list[tuple[str, str, ET.Element]] = []
         self._grids: list[GridInfo] = []
         self._properties: list[PropertyInfo] = []
+        self._trajectories: list[WellTrajectoryInfo] | None = None
         self._selected_grid_uuid: str | None = None
 
     @property
@@ -227,6 +228,7 @@ class ResqmlReader:
         self._load_xml_objects()
         self._grids = self._parse_grids()
         self._properties = self._parse_properties() if include_properties else []
+        self._trajectories = None
 
     def list_grids(self) -> list[GridInfo]:
         return list(self._grids)
@@ -292,6 +294,8 @@ class ResqmlReader:
         return datums
 
     def list_well_trajectories(self) -> list[WellTrajectoryInfo]:
+        if self._trajectories is not None:
+            return list(self._trajectories)
         trajectories: list[WellTrajectoryInfo] = []
         object_titles = self._object_titles_by_uuid()
         all_hdf_paths: list[str] = []
@@ -323,7 +327,8 @@ class ResqmlReader:
                     point_count=point_count,
                 )
             )
-        return trajectories
+        self._trajectories = trajectories
+        return list(trajectories)
 
     def get_well_trajectory_points(self, trajectory_uuid: str) -> list[WellTrajectoryPoint]:
         info = self._trajectory_by_uuid(trajectory_uuid)
