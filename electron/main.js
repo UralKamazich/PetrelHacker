@@ -139,6 +139,19 @@ ipcMain.handle('dialog:open-file', async (_event, options) => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('dialog:open-directory', async (_event, options) => {
+  const key = options && options.dialogKey ? String(options.dialogKey) : 'open-directory';
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: options && options.title ? String(options.title) : 'Select folder',
+    buttonLabel: options && options.buttonLabel ? String(options.buttonLabel) : 'Select',
+    properties: ['openDirectory'],
+    defaultPath: dialogDefaultPath(options, key)
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  saveDialogDirectory(key, result.filePaths[0], false);
+  return result.filePaths[0];
+});
+
 ipcMain.handle('dialog:open-model', async (_event, options) => {
   const key = options && options.dialogKey ? String(options.dialogKey) : 'models';
   const result = await dialog.showOpenDialog(mainWindow, {

@@ -42,6 +42,13 @@ from core.sleeves_loader import (
     validate_sleeves_table,
     well_value_counts,
 )
+from core.section_workspace import (
+    extract_workspace,
+    load_section as load_workspace_section,
+    save_section,
+    workspace_info,
+    workspace_path_for,
+)
 from core.table_io import read_table
 from core.trajectory_analysis import analyze_trajectory, interpolate_trajectory_xy
 
@@ -70,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
             "load-section-boundaries",
             "save-section-boundaries",
             "save-section-cache",
+            "save-section-workspace",
+            "section-workspace-info",
+            "load-section-workspace",
+            "extract-section-workspace",
             "clear-section-cache",
         ),
     )
@@ -94,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
             "load-section-boundaries": load_section_boundaries,
             "save-section-boundaries": save_section_boundaries,
             "save-section-cache": save_section_cache,
+            "save-section-workspace": save_section_workspace,
+            "section-workspace-info": section_workspace_info,
+            "load-section-workspace": load_section_workspace,
+            "extract-section-workspace": extract_section_workspace,
             "clear-section-cache": clear_section_cache,
         }
         handlers[args.command](payload)
@@ -852,6 +867,99 @@ def load_section_boundaries(payload: JsonDict) -> None:
         if has_boundary:
             records.append(record)
     _emit("result", records=records)
+
+
+def save_section_workspace(payload: JsonDict) -> None:
+    boundary_path = str(payload.get("boundaryPath", "")).strip()
+    section_payload = payload.get("sectionPayload")
+    result = payload.get("result")
+    if not boundary_path:
+        raise ValueError("Boundary file path is required for the section workspace.")
+    if not isinstance(section_payload, dict) or not isinstance(result, dict):
+        raise ValueError("Current section data is missing.")
+    scene_settings = payload.get("sceneSettings")
+    boundary_records = payload.get("boundaryRecords")
+    column_mapping = payload.get("columnMapping")
+    saved = save_section(
+        boundary_path,
+        section_payload,
+        _clean_section_cache_result(result),
+        scene_settings=scene_settings if isinstance(scene_settings, dict) else None,
+        boundary_records=boundary_records if isinstance(boundary_records, list) else None,
+        column_mapping=column_mapping if isinstance(column_mapping, dict) else None,
+    )
+    _emit("result", **saved)
+
+
+def section_workspace_info(payload: JsonDict) -> None:
+    path = str(payload.get("workspacePath") or payload.get("boundaryPath") or payload.get("sleevesPath") or "").strip()
+    if not path:
+        _emit("result", exists=False, sectionCount=0, wellCount=0, propertyCount=0, sizeBytes=0)
+        return
+    _emit("result", **workspace_info(path))
+
+
+def load_section_workspace(payload: JsonDict) -> None:
+    path = str(payload.get("workspacePath") or "").strip()
+    section_id = str(payload.get("sectionId") or "").strip()
+    if not path or not section_id:
+        raise ValueError("Select a section workspace and saved section.")
+    _emit("result", **load_workspace_section(path, section_id))
+
+
+def extract_section_workspace(payload: JsonDict) -> None:
+    sleeves_path = str(payload.get("sleevesPath", "")).strip()
+    output_path = str(payload.get("outputPath", "")).strip()
+    workspace_path = str(payload.get("workspacePath", "")).strip()
+    if not sleeves_path:
+        raise ValueError("Sleeves path is empty.")
+    if not output_path:
+        raise ValueError("Output path is empty.")
+    if not workspace_path:
+        workspace_path = str(workspace_path_for(sleeves_path))
+
+    sleeves = load_sleeves_table(sleeves_path, payload.get("columnMapping") or None)
+    original_count = len(sleeves)
+    selected_wells = payload.get("selectedWells")
+    if selected_wells is not None:
+        sleeves = filter_sleeves_by_wells(sleeves, [str(value) for value in selected_wells])
+        _emit("log", message=f"Well filter: sleeves {len(sleeves)} of {original_count}.")
+    if sleeves.empty:
+        raise ValueError("Well filter removed all sleeves.")
+    if "MD" not in sleeves.columns or pd.to_numeric(sleeves["MD"], errors="coerce").isna().all():
+        raise ValueError("Section workspace extraction requires sleeve MD values.")
+
+    selected_properties = {
+        str(model.get("label") or f"M{index}"): [str(value) for value in model.get("selectedPropertyUuids") or []]
+        for index, model in enumerate(_models(payload), start=1)
+        if model.get("selectedPropertyUuids")
+    }
+    info = workspace_info(workspace_path)
+    output_plan = choose_output_plan(
+        output_path,
+        sleeve_count=len(sleeves),
+        nk=max(1, int(info.get("maxCellsPerStation") or 1)),
+    )
+    if output_plan.warning:
+        _emit("log", message=f"Warning: {output_plan.warning}")
+
+    def progress(current: int, total: int) -> None:
+        value = int((current / total) * 100) if total else 0
+        _emit("progress", value=value, current=current, total=total)
+
+    stats = extract_workspace(
+        workspace_path,
+        sleeves,
+        output_plan.path,
+        selected_properties=selected_properties,
+        skip_inactive=bool(payload.get("skipInactive", True)),
+        write_diagnostics=bool(payload.get("writeDiagnostics", True)),
+        progress_callback=progress,
+        log_callback=lambda message: _emit("log", message=message),
+    )
+    if output_plan.warning:
+        stats.warnings.append(output_plan.warning)
+    _emit("result", outputPath=str(output_plan.path), workspacePath=workspace_path, stats=_dataclass_dict(stats))
 
 
 def clear_section_cache(_payload: JsonDict) -> None:

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('petrel', {
   openFile: options => ipcRenderer.invoke('dialog:open-file', options || {}),
+  openDirectory: options => ipcRenderer.invoke('dialog:open-directory', options || {}),
   openModel: options => ipcRenderer.invoke('dialog:open-model', options || {}),
   saveFile: options => ipcRenderer.invoke('dialog:save-file', options || {}),
   readTextFile: path => ipcRenderer.invoke('file:read-text', path),

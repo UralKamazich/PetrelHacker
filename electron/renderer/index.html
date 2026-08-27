@@ -151,7 +151,14 @@
               <div class="extraction-source" id="extraction-source">No frac-list loaded</div>
             </section>
             <section class="panel span-5">
-              <div class="panel-title"><h3>Run options</h3></div>
+              <div class="panel-title">
+                <h3>Run options</h3>
+                <div class="segmented extraction-source-toggle">
+                  <button class="active" id="extract-source-models" type="button">Models</button>
+                  <button id="extract-source-workspace" type="button">Section workspace</button>
+                </div>
+              </div>
+              <div class="workspace-summary" id="section-workspace-summary">No saved section workspace</div>
               <label class="check-row"><input type="checkbox" id="skip-inactive" checked><span>Skip inactive cells</span></label>
               <label class="check-row"><input type="checkbox" id="write-diagnostics" checked><span>Write property diagnostics</span></label>
               <label class="field"><span>Parallel workers</span><input id="parallel-workers" type="number" min="1" max="32" value="1"></label>
@@ -231,9 +238,13 @@
           <header class="view-header">
             <div>
               <h2>Sections</h2>
-              <p>Model slice from top to base along a selected well trajectory.</p>
+              <p id="section-view-subtitle">Model slice from top to base along a selected well trajectory.</p>
             </div>
             <div class="view-header-actions">
+              <div class="segmented section-source-toggle">
+                <button id="section-source-workspace" type="button">Saved sections</button>
+                <button class="active" id="section-source-models" type="button">New section</button>
+              </div>
               <button class="soft-button" id="section-save-png" type="button" disabled>Save PNG</button>
               <button class="soft-button" id="section-copy-png" type="button" disabled>Copy image</button>
               <button class="primary-action" id="draw-section">Draw section</button>
@@ -243,19 +254,23 @@
             <section class="panel span-4 section-data-panel">
               <div class="panel-title section-panel-title">
                 <h3>Data</h3>
-                <div class="section-title-actions">
+                <div class="section-title-actions section-model-controls">
                   <button class="soft-button" id="load-section-from-extraction">Load selected wells</button>
                   <button class="soft-button" id="load-section-wells">Load all wells</button>
                 </div>
               </div>
-              <label class="field"><span>Well trajectory</span><select id="section-well"></select></label>
+              <div class="section-workspace-controls" id="section-workspace-controls" hidden>
+                <label class="field"><span>Section workspace</span><div class="path-row"><input id="section-workspace-name" type="text" readonly placeholder="No workspace selected"><button class="icon-button" id="browse-section-workspace" type="button">...</button></div></label>
+                <div class="section-workspace-status" id="section-workspace-status">No saved sections</div>
+              </div>
+              <label class="field"><span id="section-well-label">Well trajectory</span><select id="section-well"></select></label>
               <label class="field"><span>Property</span><select id="section-property"></select></label>
               <div class="field section-horizon-field" id="section-horizon-field" hidden>
                 <span>Named surfaces</span>
                 <div class="section-horizon-list" id="section-horizons"></div>
               </div>
-              <label class="field"><span>Sample step, m</span><input id="section-step" type="number" min="1" step="1" value="25"></label>
-              <label class="check-row">
+              <label class="field section-model-controls"><span>Sample step, m</span><input id="section-step" type="number" min="1" step="1" value="25"></label>
+              <label class="check-row section-model-controls">
                 <input type="checkbox" id="section-skip-inactive" checked>
                 <span>Skip inactive cells</span>
               </label>

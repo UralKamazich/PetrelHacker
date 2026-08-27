@@ -15,6 +15,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 1024px;
@@ -167,6 +171,11 @@ select {
   gap: 8px;
 }
 
+.section-source-toggle {
+  display: flex;
+  gap: 4px;
+}
+
 .wells-table-panel .panel-title {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) auto;
@@ -282,6 +291,32 @@ button:disabled {
   background: var(--accent-soft);
   color: #0f5f58;
   font-weight: 600;
+}
+
+.segmented button.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.extraction-source-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.extraction-source-toggle button {
+  white-space: nowrap;
+}
+
+.workspace-summary {
+  min-height: 34px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .icon-button {
@@ -851,6 +886,16 @@ select {
 
 .section-data-panel {
   padding: 10px;
+}
+
+.section-workspace-controls {
+  margin-bottom: 8px;
+}
+
+.section-workspace-status {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 #view-sections .layout-grid {
