@@ -1338,10 +1338,12 @@ class MainWindow(QMainWindow):
     def _on_metrics_finished(self, result: MetricsResult) -> None:
         self.metrics_progress_bar.setValue(100)
         self.metrics_status_label.setText(
-            f"Metrics finished. Rows: {result.rows_written}. Warnings: {len(result.warnings)}. Output: {result.output_path}"
+            f"Metrics finished. Rows: {result.rows_written}. Warnings: {len(result.warnings)}. "
+            f"Output: {result.output_path}. Description: {result.description_path}"
         )
         self.log_panel.append_message(
-            f"Metrics finished. Rows: {result.rows_written}. Output: {result.output_path}"
+            f"Metrics finished. Rows: {result.rows_written}. Output: {result.output_path}. "
+            f"Description: {result.description_path}"
         )
         self._load_metrics_preview(result.output_path)
         self._update_metrics_enabled()

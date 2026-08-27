@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from core.multi_model_extractor import (
@@ -42,6 +43,19 @@ class _FakeReader:
 
     def get_property_column_values(self, uuid: str, i: int, j: int):
         return [2.5]
+
+
+class _FakePetrelPointsReader(_FakeReader):
+    def get_cell_geometry_column(self, i: int, j: int):
+        return {
+            "points": np.asarray(
+                [
+                    [[0.0, 0.0, -100.0], [20.0, 0.0, -102.0], [0.0, 30.0, -100.0], [20.0, 30.0, -102.0]],
+                    [[0.0, 0.0, -110.0], [20.0, 0.0, -112.0], [0.0, 30.0, -110.0], [20.0, 30.0, -112.0]],
+                ],
+                dtype=float,
+            )
+        }
 
 
 def test_find_depth_k_uses_depth_interval_not_matching_index() -> None:
@@ -150,6 +164,10 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
             "X": [10.0],
             "Y": [20.0],
             "TVDSS_PORT": [95.0],
+            "TVDSS_TOP_TOTAL": [92.0],
+            "TVDSS_BOT_TOTAL": [118.0],
+            "TVDSS_TOP_LOCAL": [98.0],
+            "TVDSS_BOT_LOCAL": [112.0],
         }
     )
     output_path = tmp_path / "out.csv"
@@ -159,6 +177,10 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
 
     assert stats.extracted_rows == 1
     assert rows.loc[0, "TVDSS_PORT"] == 95.0
+    assert rows.loc[0, "TVDSS_TOP_TOTAL"] == 92.0
+    assert rows.loc[0, "TVDSS_BOT_TOTAL"] == 118.0
+    assert rows.loc[0, "TVDSS_TOP_LOCAL"] == 98.0
+    assert rows.loc[0, "TVDSS_BOT_LOCAL"] == 112.0
     assert rows.loc[0, "Datum_Z"] == 85.0
     assert rows.loc[0, "Depth_KB_PORT"] == 180.0
     assert rows.loc[0, "TVDSS_center"] == 105.0
@@ -167,6 +189,41 @@ def test_multi_model_extractor_writes_port_relative_depths(tmp_path) -> None:
     assert rows.loc[0, "Rel_TVD_top"] == 5.0
     assert rows.loc[0, "Rel_TVD_base"] == 15.0
     assert rows.loc[0, "Rel_TVD_center"] == 10.0
+
+
+def test_multi_model_extractor_normalizes_native_petrel_corner_points(tmp_path) -> None:
+    extractor = MultiModelPropertyExtractor([], skip_inactive=False)
+    extractor.contexts = [
+        ModelContext(
+            spec=ExtractionModelSpec(path="fake.pet"),
+            label="petrel",
+            reader=_FakePetrelPointsReader(),
+            indexer=_FakeIndexer(),
+            properties=[],
+            output_names={},
+        )
+    ]
+    sleeves = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "X": [10.0],
+            "Y": [15.0],
+            "TVDSS_PORT": [105.0],
+        }
+    )
+    output_path = tmp_path / "petrel.csv"
+
+    stats = extractor.extract_to_csv(sleeves, output_path)
+    rows = pd.read_csv(output_path)
+
+    assert stats.extracted_rows == 1
+    assert rows.loc[0, "TVD_top"] == 101.0
+    assert rows.loc[0, "TVD_base"] == 111.0
+    assert rows.loc[0, "CellHeight"] == 10.0
+    assert rows.loc[0, "CellSizeI"] == 20.0
+    assert rows.loc[0, "CellSizeJ"] == 30.0
+    assert rows.loc[0, "CellAreaXY"] == 600.0
 
 
 def test_multi_model_extractor_writes_property_source_diagnostics(tmp_path) -> None:

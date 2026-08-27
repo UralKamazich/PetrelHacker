@@ -17,6 +17,12 @@ LogCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 PERM_TO_MD_MULTIPLIER = 1_013_250_000_000_000
 PORT_DEPTH_COLUMN = "TVDSS_PORT"
+INTERVAL_BOUNDARY_COLUMNS = (
+    "TVDSS_TOP_TOTAL",
+    "TVDSS_BOT_TOTAL",
+    "TVDSS_TOP_LOCAL",
+    "TVDSS_BOT_LOCAL",
+)
 
 
 @dataclass(frozen=True)
@@ -129,6 +135,10 @@ class PropertyExtractor:
                 x = float(getattr(sleeve, self.settings.x_col))
                 y = float(getattr(sleeve, self.settings.y_col))
                 port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
+                interval_boundaries = {
+                    column: _numeric_or_blank(getattr(sleeve, column, ""))
+                    for column in INTERVAL_BOUNDARY_COLUMNS
+                }
                 match = self.indexer.find_column(x, y)
                 if match is None:
                     stats.sleeves_outside_grid += 1
@@ -166,6 +176,7 @@ class PropertyExtractor:
                         "X": x,
                         "Y": y,
                         PORT_DEPTH_COLUMN: port_tvd,
+                        **interval_boundaries,
                         "I": i + 1,
                         "J": j + 1,
                         "K": k + 1,
@@ -210,6 +221,7 @@ class PropertyExtractor:
             "X",
             "Y",
             PORT_DEPTH_COLUMN,
+            *INTERVAL_BOUNDARY_COLUMNS,
             "I",
             "J",
             "K",

@@ -22,6 +22,7 @@ from core.interval_metrics import (
     DEFAULT_METRIC_KEYS,
     IntervalMetricSettings,
     calculate_interval_metrics,
+    write_interval_metrics_description,
     write_interval_metrics_xlsx,
 )
 from core.model_section import extract_well_section
@@ -29,7 +30,7 @@ from core.model_reader import open_model_reader, resolve_model_path
 from core.multi_model_extractor import ExtractionModelSpec, MultiModelPropertyExtractor
 from core.output_planner import choose_output_plan
 from core.petrel_project_reader import describe_petrel_project, is_petrel_project_path
-from core.property_extractor import ExtractionSettings, write_extraction_log
+from core.property_extractor import INTERVAL_BOUNDARY_COLUMNS, ExtractionSettings, write_extraction_log
 from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import (
     apply_sleeves_column_mapping,
@@ -54,6 +55,8 @@ from core.trajectory_analysis import analyze_trajectory, interpolate_trajectory_
 
 
 JsonDict = dict[str, Any]
+CURVE_CACHE_WELL_KEY = "__petrelhacker_well_key"
+CURVE_CACHE_PORT_KEY = "__petrelhacker_port_key"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -370,16 +373,27 @@ def table_info(payload: JsonDict) -> None:
     path = str(payload.get("path", "")).strip()
     if not path:
         raise ValueError("Table path is empty.")
-    df = _deduplicate_columns(read_table(path))
-    wells = _unique_strings(df.get("Well")) if "Well" in df else []
-    ports = _unique_strings(df.get("Port")) if "Port" in df else []
+    if bool(payload.get("prepareCurveCache", False)):
+        _cache_path, metadata = _ensure_curve_table_cache(path)
+    else:
+        df = _deduplicate_columns(read_table(path))
+        metadata = {
+            "columns": [str(column) for column in df.columns],
+            "rows": int(len(df)),
+            "wells": _unique_strings(df.get("Well")) if "Well" in df else [],
+            "ports": _unique_strings(df.get("Port")) if "Port" in df else [],
+            "portsByWell": _ports_by_well(df),
+            "preview": _records(df.head(100)),
+        }
     _emit(
         "result",
-        columns=[str(column) for column in df.columns],
-        rows=len(df),
-        wells=wells,
-        ports=ports,
-        preview=_records(df.head(100)),
+        columns=metadata["columns"],
+        rows=metadata["rows"],
+        wells=metadata["wells"],
+        ports=metadata["ports"],
+        portsByWell=metadata["portsByWell"],
+        preview=metadata["preview"],
+        curveCacheReady=bool(payload.get("prepareCurveCache", False)),
     )
 
 
@@ -414,44 +428,93 @@ def metrics(payload: JsonDict) -> None:
     result = calculate_interval_metrics(extracted, intervals, settings, progress_callback=metrics_progress)
     for warning in result.warnings:
         _emit("log", message=f"Warning: {warning}")
+    if not result.rows:
+        details = "; ".join(result.warnings) or "The interval table contains no rows."
+        raise ValueError(f"Metrics were not calculated. {details}")
     _emit("progress", value=80)
     _emit("log", message=f"Writing metrics XLSX: {output_path}")
     write_interval_metrics_xlsx(result, output_path)
+    description_path = write_interval_metrics_description(
+        result,
+        output_path,
+        settings,
+        extracted_path=extracted_path,
+        intervals_path=intervals_path,
+    )
+    _emit("log", message=f"Writing metrics description: {description_path}")
     _emit("progress", value=100)
-    _emit("result", outputPath=output_path, rowsWritten=len(result.rows), warnings=result.warnings)
+    _emit(
+        "result",
+        outputPath=output_path,
+        descriptionPath=str(description_path),
+        rowsWritten=len(result.rows),
+        warnings=result.warnings,
+    )
 
 
 def curve_data(payload: JsonDict) -> None:
     path = str(payload.get("path", "")).strip()
     if not path:
         raise ValueError("Curve table path is empty.")
-    df = _deduplicate_columns(read_table(path))
+    cache_path, metadata = _ensure_curve_table_cache(path)
     well = _empty_to_none(payload.get("well"))
     port = _empty_to_none(payload.get("port"))
-    if well is not None and "Well" in df:
-        df = df[df["Well"].map(_normalize_value) == _normalize_value(well)]
-    if port is not None and "Port" in df:
-        df = df[df["Port"].map(_normalize_value) == _normalize_value(port)]
-    columns = [str(value) for value in payload.get("columns") or [] if str(value) in df.columns]
+    available_columns = [str(value) for value in metadata["columns"]]
+    columns = [str(value) for value in payload.get("columns") or [] if str(value) in available_columns]
     depth_mode = str(payload.get("depthMode") or "individual")
-    depth_col = _first_existing_column(df, ("TVD_top", "TVD_center", "TVDSS_top", "TVDSS_center"))
+    depth_col = next(
+        (name for name in ("TVD_top", "TVD_center", "TVDSS_top", "TVDSS_center") if name in available_columns),
+        None,
+    )
     if depth_col is None:
         raise ValueError("Curve table has no supported depth column.")
     channel_depth_columns: dict[str, str] = {}
     for column in columns:
         diagnostic_depth = f"{column}_TVD_center"
-        if depth_mode != "common" and diagnostic_depth in df.columns:
+        if depth_mode != "common" and diagnostic_depth in available_columns:
             channel_depth_columns[column] = diagnostic_depth
         else:
             channel_depth_columns[column] = depth_col
     keep = _unique_list(
         [
             column
-            for column in ["Well", "Port", "TVDSS_PORT", "Depth_KB_PORT", depth_col, *channel_depth_columns.values(), *columns]
-            if column in df.columns
+            for column in [
+                "Well",
+                "Port",
+                "TVDSS_PORT",
+                "Depth_KB_PORT",
+                *INTERVAL_BOUNDARY_COLUMNS,
+                depth_col,
+                *channel_depth_columns.values(),
+                *columns,
+            ]
+            if column in available_columns
         ]
     )
-    df = df[keep].copy()
+    filters = []
+    if well is not None and "Well" in available_columns:
+        filters.append((CURVE_CACHE_WELL_KEY, "==", _normalize_value(well)))
+    if port is not None and "Port" in available_columns:
+        filters.append((CURVE_CACHE_PORT_KEY, "==", _normalize_value(port)))
+    cache_columns = _unique_list(
+        keep
+        + ([CURVE_CACHE_WELL_KEY] if "Well" in available_columns else [])
+        + ([CURVE_CACHE_PORT_KEY] if "Port" in available_columns else [])
+    )
+    try:
+        df = pd.read_parquet(cache_path, columns=cache_columns, filters=filters or None)
+    except Exception:  # noqa: BLE001
+        cache_path, _metadata = _ensure_curve_table_cache(path, force=True)
+        df = pd.read_parquet(cache_path, columns=cache_columns, filters=filters or None)
+    df = df.drop(columns=[CURVE_CACHE_WELL_KEY, CURVE_CACHE_PORT_KEY], errors="ignore")
+    boundaries = {}
+    for column in INTERVAL_BOUNDARY_COLUMNS:
+        if column not in df:
+            continue
+        values = pd.to_numeric(df[column], errors="coerce").dropna()
+        if not values.empty:
+            boundaries[column] = float(values.iloc[0])
+    df = df.drop(columns=list(INTERVAL_BOUNDARY_COLUMNS), errors="ignore")
     if depth_col in df:
         df = df.sort_values(depth_col)
     _emit(
@@ -459,8 +522,96 @@ def curve_data(payload: JsonDict) -> None:
         depthColumn=depth_col,
         channelDepthColumns=channel_depth_columns,
         columns=columns,
+        boundaries=boundaries,
         rows=_records(df.head(int(payload.get("limit") or 20000))),
     )
+
+
+def _ensure_curve_table_cache(
+    path: str | Path,
+    *,
+    force: bool = False,
+) -> tuple[Path, JsonDict]:
+    source = Path(path).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    cache_dir = _curve_cache_directory()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:24]
+    cache_path = cache_dir / f"{digest}.parquet"
+    metadata_path = cache_dir / f"{digest}.json"
+    source_stat = source.stat()
+    signature = {
+        "sourcePath": str(source),
+        "sourceSize": int(source_stat.st_size),
+        "sourceMtimeNs": int(source_stat.st_mtime_ns),
+    }
+
+    if not force and cache_path.exists() and metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if all(metadata.get(key) == value for key, value in signature.items()):
+                return cache_path, metadata
+        except (OSError, ValueError, TypeError):
+            pass
+
+    df = _deduplicate_columns(read_table(source))
+    columns = [str(column) for column in df.columns]
+    wells = _unique_strings(df.get("Well")) if "Well" in df else []
+    ports = _unique_strings(df.get("Port")) if "Port" in df else []
+    ports_by_well = _ports_by_well(df)
+    if "Well" in df:
+        df[CURVE_CACHE_WELL_KEY] = df["Well"].map(_normalize_value)
+    if "Port" in df:
+        df[CURVE_CACHE_PORT_KEY] = df["Port"].map(_normalize_value)
+
+    metadata: JsonDict = {
+        **signature,
+        "columns": columns,
+        "rows": int(len(df)),
+        "wells": wells,
+        "ports": ports,
+        "portsByWell": ports_by_well,
+        "preview": _records(df[columns].head(100)),
+    }
+    temporary_cache = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+    temporary_metadata = metadata_path.with_name(f"{metadata_path.name}.{os.getpid()}.tmp")
+    try:
+        df.to_parquet(temporary_cache, index=False, compression="snappy")
+        temporary_metadata.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary_cache, cache_path)
+        os.replace(temporary_metadata, metadata_path)
+    finally:
+        temporary_cache.unlink(missing_ok=True)
+        temporary_metadata.unlink(missing_ok=True)
+    return cache_path, metadata
+
+
+def _curve_cache_directory() -> Path:
+    override = os.environ.get("PETRELHACKER_CURVE_CACHE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "PetrelHacker" / "curve-cache"
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return root / "PetrelHacker" / "curve-cache"
+    return Path.home() / ".cache" / "PetrelHacker" / "curve-cache"
+
+
+def _ports_by_well(df: pd.DataFrame) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    if "Well" not in df or "Port" not in df:
+        return result
+    for raw_well, raw_port in zip(df["Well"], df["Port"], strict=False):
+        well_key = _normalize_value(raw_well)
+        port_key = _normalize_value(raw_port)
+        if not well_key or not port_key:
+            continue
+        ports = result.setdefault(well_key, [])
+        if port_key not in ports:
+            ports.append(port_key)
+    return result
 
 
 def well_trajectories(payload: JsonDict) -> None:
@@ -828,7 +979,25 @@ def save_section_boundaries(payload: JsonDict) -> None:
 
     if skipped:
         _emit("log", message=f"Warning: boundary rows were not matched and were skipped: {len(skipped)}.")
-    _emit("result", outputPath=output_path, rowsUpdated=updated, rowsRequested=len(records), rowsSkipped=len(skipped), skipped=skipped[:20])
+    missing_global_bounds = _verify_saved_global_bounds(output_path, records, mapping)
+    if missing_global_bounds:
+        _emit(
+            "log",
+            message=(
+                "Warning: TVDSS_TOP_TOTAL/TVDSS_BOT_TOTAL are missing after saving for "
+                f"{len(missing_global_bounds)} sleeve row(s)."
+            ),
+        )
+    _emit(
+        "result",
+        outputPath=output_path,
+        rowsUpdated=updated,
+        rowsRequested=len(records),
+        rowsSkipped=len(skipped),
+        skipped=skipped[:20],
+        missingGlobalBoundsCount=len(missing_global_bounds),
+        missingGlobalBounds=missing_global_bounds[:100],
+    )
 
 
 def load_section_boundaries(payload: JsonDict) -> None:
@@ -1182,6 +1351,35 @@ def _boundary_record_label(record: dict[str, Any]) -> JsonDict:
         "port": _json_value(record.get("port")),
         "md": _json_value(record.get("md")),
     }
+
+
+def _verify_saved_global_bounds(
+    output_path: str,
+    records: list[object],
+    mapping: dict[str, str],
+) -> list[JsonDict]:
+    raw = read_sleeves_table_raw(output_path)
+    normalized = apply_sleeves_column_mapping(raw, mapping)
+    column_targets = _boundary_output_columns(raw, mapping)
+    missing: list[JsonDict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        index = _find_boundary_row(normalized, record)
+        if index is None:
+            continue
+        missing_fields = [
+            key
+            for key in ("TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL")
+            if column_targets[key] not in raw.columns
+            or not math.isfinite(_to_float(raw.at[index, column_targets[key]], math.nan))
+        ]
+        if not missing_fields:
+            continue
+        label = _boundary_record_label(record)
+        label["missingFields"] = missing_fields
+        missing.append(label)
+    return missing
 
 
 def _find_md_column(columns: object) -> str | None:

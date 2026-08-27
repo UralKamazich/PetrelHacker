@@ -94,6 +94,53 @@ def test_preview_sleeves_reports_coordinate_coverage(tmp_path, monkeypatch):
     assert result["coordinateStats"] == {"validXY": 2, "missingXY": 1, "validMD": 2}
 
 
+def test_curve_data_reuses_indexed_cache_for_selected_well_and_port(tmp_path, monkeypatch):
+    source = tmp_path / "extracted.csv"
+    pd.DataFrame(
+        {
+            "Well": ["A", "A", "A", "B"],
+            "Port": [1, 1, 2, 1],
+            "TVD_top": [100.0, 110.0, 120.0, 130.0],
+            "PORO": [0.1, 0.2, 0.3, 0.4],
+            "TVDSS_TOP_TOTAL": [90.0, 90.0, 114.0, 120.0],
+            "TVDSS_BOT_TOTAL": [115.0, 115.0, 128.0, 140.0],
+            "TVDSS_TOP_LOCAL": [95.0, 95.0, 117.0, 125.0],
+            "TVDSS_BOT_LOCAL": [110.0, 110.0, 125.0, 135.0],
+        }
+    ).to_csv(source, index=False)
+    monkeypatch.setenv("PETRELHACKER_CURVE_CACHE_DIR", str(tmp_path / "cache"))
+    events = []
+    monkeypatch.setattr(cli, "_emit", lambda event, **payload: events.append((event, payload)))
+
+    cli.table_info({"path": str(source), "prepareCurveCache": True})
+
+    info = next(payload for event, payload in events if event == "result")
+    assert info["portsByWell"] == {"A": ["1", "2"], "B": ["1"]}
+    assert info["curveCacheReady"] is True
+    assert len(list((tmp_path / "cache").glob("*.parquet"))) == 1
+
+    monkeypatch.setattr(cli, "read_table", lambda _path: pytest.fail("fresh cache should avoid the source table"))
+    events.clear()
+    cli.curve_data(
+        {
+            "path": str(source),
+            "well": "A",
+            "port": "2",
+            "depthMode": "common",
+            "columns": ["PORO"],
+        }
+    )
+
+    result = next(payload for event, payload in events if event == "result")
+    assert result["rows"] == [{"Well": "A", "Port": 2, "TVD_top": 120.0, "PORO": 0.3}]
+    assert result["boundaries"] == {
+        "TVDSS_TOP_TOTAL": 114.0,
+        "TVDSS_BOT_TOTAL": 128.0,
+        "TVDSS_TOP_LOCAL": 117.0,
+        "TVDSS_BOT_LOCAL": 125.0,
+    }
+
+
 def test_calculate_sleeve_coordinates_fills_only_missing_values_in_source(tmp_path, monkeypatch):
     source = tmp_path / "frac-list.csv"
     pd.DataFrame(
@@ -162,6 +209,62 @@ def test_calculate_sleeve_coordinates_overwrites_existing_values(tmp_path, monke
 
     result = pd.read_csv(source)
     assert result.loc[0, ["X", "Y"]].tolist() == pytest.approx([20, 40])
+
+
+def test_save_section_boundaries_reports_missing_global_values_in_written_xlsx(tmp_path, monkeypatch):
+    source = tmp_path / "frac-list.xlsx"
+    output = tmp_path / "field_boundaries.xlsx"
+    pd.DataFrame(
+        {
+            "Скважина": ["A", "A"],
+            "Стадия": [1, 2],
+            "MD": [1000.0, 1100.0],
+            "TVDSS_TOP_TOTAL": [None, None],
+            "TVDSS_BOT_TOTAL": [None, None],
+        }
+    ).to_excel(source, index=False)
+    events = []
+    monkeypatch.setattr(cli, "_emit", lambda event, **payload: events.append((event, payload)))
+
+    cli.save_section_boundaries(
+        {
+            "path": str(source),
+            "outputPath": str(output),
+            "records": [
+                {
+                    "well": "A",
+                    "port": 1,
+                    "md": 1000.0,
+                    "TVDSS_TOP_TOTAL": 100.0,
+                    "TVDSS_BOT_TOTAL": 110.0,
+                },
+                {
+                    "well": "A",
+                    "port": 2,
+                    "md": 1100.0,
+                    "TVDSS_TOP_TOTAL": None,
+                    "TVDSS_BOT_TOTAL": 120.0,
+                },
+            ],
+        }
+    )
+
+    result = next(payload for event, payload in events if event == "result")
+    assert result["rowsUpdated"] == 2
+    assert result["missingGlobalBoundsCount"] == 1
+    assert result["missingGlobalBounds"] == [
+        {
+            "well": "A",
+            "port": 2,
+            "md": 1100.0,
+            "missingFields": ["TVDSS_TOP_TOTAL"],
+        }
+    ]
+    written = pd.read_excel(output)
+    assert written.loc[0, "TVDSS_TOP_TOTAL"] == 100.0
+    assert written.loc[0, "TVDSS_BOT_TOTAL"] == 110.0
+    assert pd.isna(written.loc[1, "TVDSS_TOP_TOTAL"])
+    assert written.loc[1, "TVDSS_BOT_TOTAL"] == 120.0
 
 
 def test_calculate_sleeve_coordinates_updates_xlsx_in_place_and_preserves_sheets(tmp_path, monkeypatch):

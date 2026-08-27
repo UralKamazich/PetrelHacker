@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('petrel', {
   openDirectory: options => ipcRenderer.invoke('dialog:open-directory', options || {}),
   openModel: options => ipcRenderer.invoke('dialog:open-model', options || {}),
   saveFile: options => ipcRenderer.invoke('dialog:save-file', options || {}),
+  showWarning: options => ipcRenderer.invoke('dialog:show-warning', options || {}),
   readTextFile: path => ipcRenderer.invoke('file:read-text', path),
   writeTextFile: (path, content) => ipcRenderer.invoke('file:write-text', path, content),
   savePngCapture: (filePath, rect) => ipcRenderer.invoke('capture:save-png', { filePath, rect }),

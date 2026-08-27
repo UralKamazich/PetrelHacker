@@ -4,7 +4,12 @@ import math
 
 import pandas as pd
 
-from core.interval_metrics import IntervalMetricSettings, calculate_interval_metrics
+from core.interval_metrics import (
+    IntervalMetricResult,
+    IntervalMetricSettings,
+    calculate_interval_metrics,
+    write_interval_metrics_description,
+)
 
 
 def test_calculate_interval_metrics_for_global_local_and_net() -> None:
@@ -155,6 +160,73 @@ def test_calculate_interval_metrics_matches_port_float_and_coordinates() -> None
     assert result.rows[1]["Thickness_Global"] == 10.0
 
 
+def test_calculate_interval_metrics_recognizes_russian_well_and_stage_columns() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["3А011"],
+            "Port": [3],
+            "TVD_top": [100.0],
+            "TVD_base": [110.0],
+            "CellHeight": [10.0],
+            "KP1": [0.15],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Скважина": ["3А011"],
+            "Стадия": [3],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [102.0],
+            "TVDSS_BOT_LOCAL": [108.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, poro_column=None, property_columns=["KP1"]),
+    )
+
+    assert result.warnings == ["Net metrics use all interval cells because no lithology, NTG, or PORO net filter is available."]
+    assert len(result.rows) == 1
+    assert result.rows[0]["Well"] == "3А011"
+    assert result.rows[0]["Port"] == "3"
+    assert result.rows[0]["Thickness_Global"] == 10.0
+    assert result.rows[0]["KP1_avg_Global"] == 0.15
+
+
+def test_calculate_interval_metrics_aggregates_repeated_missing_bound_warnings() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A", "A"],
+            "Port": [1, 2],
+            "TVD_top": [100.0, 100.0],
+            "TVD_base": [110.0, 110.0],
+            "CellHeight": [10.0, 10.0],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A", "A"],
+            "Port": [1, 2],
+            "TVDSS_TOP_TOTAL": [None, None],
+            "TVDSS_BOT_TOTAL": [None, None],
+            "TVDSS_TOP_LOCAL": [100.0, 100.0],
+            "TVDSS_BOT_LOCAL": [110.0, 110.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, poro_column=None),
+    )
+
+    global_warnings = [warning for warning in result.warnings if "bounds for Global" in warning]
+    assert global_warnings == ["Missing interval bounds for Global: 2 rows in wells: A (2)."]
+
+
 def test_calculate_interval_metrics_merges_pandas_duplicate_columns() -> None:
     extracted = pd.DataFrame(
         {
@@ -259,6 +331,47 @@ def test_calculate_interval_metrics_uses_gross_cells_for_net_without_net_filter(
     assert any("Net metrics use all interval cells" in warning for warning in result.warnings)
 
 
+def test_calculate_interval_metrics_uses_positive_poro_as_binary_ntg() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A", "A", "A"],
+            "Port": [1, 1, 1],
+            "TVD_top": [100.0, 110.0, 120.0],
+            "TVD_base": [110.0, 120.0, 130.0],
+            "CellHeight": [10.0, 10.0, 10.0],
+            "PORO": [0.1, None, 0.0],
+            "PERM": [100.0, 100.0, 100.0],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [130.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [130.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, poro_column="PORO", perm_column="PERM"),
+    )
+
+    row = result.rows[0]
+    assert row["Thickness_Global"] == 30.0
+    assert row["Thickness_Global_Net"] == 10.0
+    assert row["Thickness_Global_NonNet"] == 20.0
+    assert row["NetThickness_Global"] == 10.0
+    assert math.isclose(row["NTG_avg_Global"], 1.0 / 3.0)
+    assert row["NTG_median_Global"] == 0.0
+    assert row["KH_Global"] == 1000.0
+    assert row["PHIH_Global"] == 1.0
+    assert any("PORO > 0 as a binary NTG mask" in warning for warning in result.warnings)
+
+
 def test_calculate_interval_metrics_uses_partial_depth_overlap_for_coarse_cells() -> None:
     extracted = pd.DataFrame(
         {
@@ -326,3 +439,34 @@ def test_calculate_interval_metrics_honors_selected_metric_keys() -> None:
     assert row["SW_mean_arith_Global"] == 0.25
     assert "SW_median_Global" not in row
     assert "NTG_avg_Global" not in row
+
+
+def test_write_interval_metrics_description_next_to_xlsx(tmp_path) -> None:
+    output_path = tmp_path / "field_metrics.xlsx"
+    result = IntervalMetricResult(rows=[{"Well": "A", "Port": "1"}], warnings=["Example warning."])
+    settings = IntervalMetricSettings(
+        ntg_column="NTG",
+        poro_column=None,
+        perm_column="PERM",
+        property_columns=["KP1"],
+        metric_keys=["thickness", "geom", "min_star"],
+    )
+
+    description_path = write_interval_metrics_description(
+        result,
+        output_path,
+        settings,
+        extracted_path=tmp_path / "extracted.xlsx",
+        intervals_path=tmp_path / "boundaries.xlsx",
+    )
+
+    assert description_path == tmp_path / "field_metrics.txt"
+    text = description_path.read_text(encoding="utf-8")
+    assert "ОПИСАНИЕ РАСЧЕТА ИНТЕРВАЛЬНЫХ МЕТРИК" in text
+    assert "Global: TVDSS_TOP_TOTAL ... TVDSS_BOT_TOTAL." in text
+    assert "Thickness = сумма h." in text
+    assert "<property>_geom" in text
+    assert "<property>_min_star" in text
+    assert "KP1" in text
+    assert "внутренний NTG принимается равным 1 при PORO > 0" in text
+    assert "Example warning." in text

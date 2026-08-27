@@ -180,6 +180,19 @@ ipcMain.handle('dialog:save-file', async (_event, options) => {
   return result.filePath;
 });
 
+ipcMain.handle('dialog:show-warning', async (_event, options) => {
+  await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: String(options && options.title || 'Warning'),
+    message: String(options && options.message || 'Data was not saved completely.'),
+    detail: String(options && options.detail || ''),
+    buttons: ['OK'],
+    defaultId: 0,
+    noLink: true
+  });
+  return true;
+});
+
 ipcMain.handle('file:read-text', async (_event, filePath) => {
   if (!filePath) return '';
   return fs.promises.readFile(filePath, 'utf8');

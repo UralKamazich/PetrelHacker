@@ -61,6 +61,11 @@ const state = {
   tableColumns: [],
   curveRows: [],
   curveSettings: {},
+  curvePorts: [],
+  curvePortsByWell: {},
+  curveSelectionRevision: 0,
+  curvePlotContext: null,
+  curveAxisSyncing: false,
   sectionTrajectories: [],
   sectionResult: null,
   sectionRows: [],
@@ -82,6 +87,8 @@ const state = {
   sectionAutoDrawTimer: null,
   sectionSelectionRevision: 0,
   sectionSelectedHorizons: {},
+  currentWorkspaceSectionId: '',
+  sectionViewActivationPromise: null,
   wellAssignments: {},
   wellTrajectoryAnalyses: {},
   sectionMemoryCache: new Map()
@@ -108,8 +115,32 @@ function bindNavigation() {
       document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
       button.classList.add('active');
       $(`view-${button.dataset.view}`).classList.add('active');
+      handleViewActivated(button.dataset.view);
     });
   });
+}
+
+function handleViewActivated(viewName) {
+  if (viewName !== 'sections' || state.sectionViewActivationPromise) return;
+  state.sectionViewActivationPromise = activateSectionsView()
+    .catch(fail)
+    .finally(() => { state.sectionViewActivationPromise = null; });
+}
+
+async function activateSectionsView() {
+  if (state.sectionSource !== 'workspace') {
+    if (state.sectionResult) requestAnimationFrame(() => paintSection(state.sectionResult));
+    return;
+  }
+  if (!state.sectionWorkspaceSections.length) await refreshSectionWorkspaceInfo();
+  if (!$('view-sections').classList.contains('active')) return;
+  const entry = selectedWorkspaceSectionEntry();
+  if (!entry) return;
+  if (state.sectionResult && state.currentWorkspaceSectionId === entry.id) {
+    requestAnimationFrame(() => paintSection(state.sectionResult));
+    return;
+  }
+  await loadSelectedWorkspaceSection();
 }
 
 function bindActions() {
@@ -135,6 +166,7 @@ function bindActions() {
   $('browse-metrics-extracted').addEventListener('click', async () => setPath('metrics-extracted', await pickTable('metrics-extracted')));
   $('browse-metrics-intervals').addEventListener('click', browseMetricsIntervals);
   $('browse-metrics-output').addEventListener('click', browseMetricsOutput);
+  $('metrics-intervals').addEventListener('change', syncMetricsOutputFilename);
   $('load-metrics-table').addEventListener('click', loadMetricsTable);
   $('run-metrics').addEventListener('click', runMetrics);
   $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable('curve-table')));
@@ -180,14 +212,17 @@ function bindActions() {
   });
   $('section-barrier-thickness').addEventListener('change', saveState);
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
-  ['curve-well', 'curve-port'].forEach(id => {
+  $('curve-well').addEventListener('change', handleCurveWellChange);
+  $('curve-port').addEventListener('change', refreshCurveSelection);
+  $('curve-depth-mode').addEventListener('change', () => {
+    saveState();
+    drawCurves();
+  });
+  ['curve-depth-min', 'curve-depth-max'].forEach(id => {
     $(id).addEventListener('change', () => {
       saveState();
-      drawCurves();
+      syncCurvePlotAxesFromInputs();
     });
-  });
-  ['curve-depth-mode', 'curve-depth-min', 'curve-depth-max'].forEach(id => {
-    $(id).addEventListener('change', saveState);
   });
   window.addEventListener('resize', () => {
     if (state.sectionResult) paintSection(state.sectionResult);
@@ -717,6 +752,7 @@ function clearRenderedSection() {
   state.sectionBoundaries = [];
   state.currentSectionContext = null;
   state.currentSectionPayload = null;
+  state.currentWorkspaceSectionId = '';
   $('section-plot').innerHTML = '';
   clearSectionCellInspector($('section-cell-inspector'));
   setSectionImageActionsEnabled(false);
@@ -988,6 +1024,7 @@ async function loadSelectedWorkspaceSection() {
     $('sleeves-path').value = loaded.boundaryPath;
     $('sleeves-name').value = basename(loaded.boundaryPath);
     $('metrics-intervals').value = loaded.boundaryPath;
+    syncMetricsOutputFilename();
   }
   renderSectionHorizons();
   await displaySectionResult(result, payload, trajectory, selectionRevision, {
@@ -995,6 +1032,8 @@ async function loadSelectedWorkspaceSection() {
     boundaryRecords: loaded.boundaryRecords || [],
     skipBoundaryFileRestore: Boolean((loaded.boundaryRecords || []).length)
   });
+  if (selectionRevision !== state.sectionSelectionRevision) return false;
+  state.currentWorkspaceSectionId = entry.id;
   $('section-summary').textContent = `Saved ${formatSavedAt(entry.savedAt)} · ${entry.cellCount || result.cell_count || 0} cells`;
   appendLog(`Loaded saved section: ${entry.fracWellName || entry.modelWellName} / ${entry.propertyTitle || ''}`);
   saveState();
@@ -1514,17 +1553,20 @@ async function loadMetricsTable() {
 function renderMetricsProperties(columns) {
   const root = $('metrics-properties');
   root.innerHTML = '';
+  const autoSelect = state.extractionSource === 'workspace';
   metricAdditionalColumns(columns).forEach(column => {
     const row = document.createElement('label');
     row.className = 'check-item';
-    row.innerHTML = `<input type="checkbox" data-metrics-property="${escapeHtml(column)}"><span>${escapeHtml(column)}</span><span></span>`;
+    row.innerHTML = `<input type="checkbox"${autoSelect ? ' checked' : ''} data-metrics-property="${escapeHtml(column)}"><span>${escapeHtml(column)}</span><span></span>`;
     root.appendChild(row);
   });
 }
 
 function metricAdditionalColumns(columns) {
   const refs = selectedPropertyRefs();
-  if (!refs.length) return [];
+  if (!refs.length || state.extractionSource === 'workspace') {
+    return columns.filter(isPropertyColumn);
+  }
   return columns.filter(column => isPropertyColumn(column) && matchesSelectedProperty(column, refs));
 }
 
@@ -1592,13 +1634,18 @@ async function loadCurveTable() {
   if (!path) return fail(new Error('Select extracted table first.'));
   setBusy('Reading curves', 'Loading table metadata');
   try {
-    const result = await window.petrel.run('table-info', { path });
+    const result = await window.petrel.run('table-info', {
+      path,
+      prepareCurveCache: true
+    });
     state.tableColumns = result.columns || [];
     const wells = result.wells || [];
     const ports = result.ports || [];
     const saved = state.curveSettings || {};
+    state.curvePorts = ports;
+    state.curvePortsByWell = result.portsByWell || {};
     fillSelect('curve-well', wells, wells.includes(saved.well) ? saved.well : wells[0]);
-    fillSelect('curve-port', ports, ports.includes(saved.port) ? saved.port : ports[0]);
+    fillCurvePorts(saved.port);
     $('curve-depth-mode').value = saved.depthMode || 'common';
     renderCurveControls(true);
     await autoFitAndDrawCurves();
@@ -1633,7 +1680,27 @@ function renderCurveControls(autoSelect) {
     if (saved.maxs && saved.maxs[index - 1] !== undefined) $(`curve-max-${index}`).value = saved.maxs[index - 1];
     if (saved.shifts && saved.shifts[index - 1] !== undefined) $(`curve-shift-${index}`).value = saved.shifts[index - 1];
   }
-  root.querySelectorAll('select,input').forEach(element => element.addEventListener('change', saveState));
+  root.querySelectorAll('select').forEach(element => element.addEventListener('change', () => {
+    const index = Number(element.id.split('-').pop());
+    if (Number.isFinite(index)) {
+      $(`curve-min-${index}`).value = '';
+      $(`curve-max-${index}`).value = '';
+    }
+    saveState();
+    drawCurves();
+  }));
+  root.querySelectorAll('input[id^="curve-min-"],input[id^="curve-max-"]').forEach(element => {
+    element.addEventListener('change', () => {
+      saveState();
+      syncCurvePlotAxesFromInputs();
+    });
+  });
+  root.querySelectorAll('input[id^="curve-shift-"]').forEach(element => {
+    element.addEventListener('change', () => {
+      saveState();
+      redrawCurvesFromLoadedRows();
+    });
+  });
 }
 
 function curveChannelColumns() {
@@ -1655,8 +1722,13 @@ async function drawCurves() {
   const columns = selectedCurveColumns();
   setBusy('Drawing curves', 'Loading selected well/port');
   try {
+    const revision = ++state.curveSelectionRevision;
     const result = await loadCurveRows(columns);
-    paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, result.rows || []);
+    if (revision !== state.curveSelectionRevision) return;
+    state.curveRows = result.rows || [];
+    autoFitCurveValueRanges(columns, state.curveRows, true);
+    paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+    saveState();
     setReady(`Curve rows: ${state.curveRows.length}`);
   } catch (error) {
     fail(error);
@@ -1670,33 +1742,78 @@ async function autoFitAndDrawCurves() {
     return;
   }
   setBusy('Drawing curves', 'Auto-fitting selected well/port');
+  const revision = ++state.curveSelectionRevision;
   const result = await loadCurveRows(columns);
-  autoFitCurveRanges(result.depthColumn, result.channelDepthColumns || {}, columns, result.rows || []);
+  if (revision !== state.curveSelectionRevision) return;
+  state.curveRows = result.rows || [];
+  autoFitCurveRanges(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows);
   applySavedCurveRanges();
-  paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, result.rows || []);
+  paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+  saveState();
 }
 
 function applySavedCurveRanges() {
   const saved = state.curveSettings || {};
-  if (saved.depthMin !== undefined) $('curve-depth-min').value = saved.depthMin;
-  if (saved.depthMax !== undefined) $('curve-depth-max').value = saved.depthMax;
+  applySavedCurveInput('curve-depth-min', saved.depthMin);
+  applySavedCurveInput('curve-depth-max', saved.depthMax);
   for (let index = 1; index <= 4; index += 1) {
-    if (saved.mins && saved.mins[index - 1] !== undefined) $(`curve-min-${index}`).value = saved.mins[index - 1];
-    if (saved.maxs && saved.maxs[index - 1] !== undefined) $(`curve-max-${index}`).value = saved.maxs[index - 1];
-    if (saved.shifts && saved.shifts[index - 1] !== undefined) $(`curve-shift-${index}`).value = saved.shifts[index - 1];
+    applySavedCurveInput(`curve-min-${index}`, saved.mins && saved.mins[index - 1]);
+    applySavedCurveInput(`curve-max-${index}`, saved.maxs && saved.maxs[index - 1]);
+    applySavedCurveInput(`curve-shift-${index}`, saved.shifts && saved.shifts[index - 1], true);
+  }
+}
+
+function applySavedCurveInput(id, value, allowZero = false) {
+  if (value === undefined || value === null) return;
+  const text = String(value).trim();
+  if (!text && !allowZero) return;
+  $(id).value = text || '0';
+}
+
+function fillCurvePorts(preferredPort = '') {
+  const well = $('curve-well').value;
+  const ports = state.curvePortsByWell[well] || state.curvePorts || [];
+  const selected = ports.includes(preferredPort) ? preferredPort : ports[0];
+  fillSelect('curve-port', ports, selected);
+}
+
+async function handleCurveWellChange() {
+  const previousPort = $('curve-port').value;
+  fillCurvePorts(previousPort);
+  await refreshCurveSelection();
+}
+
+async function refreshCurveSelection() {
+  const columns = selectedCurveColumns();
+  if (!columns.length) {
+    plotEmpty('No curve channels');
+    return;
+  }
+  saveState();
+  const revision = ++state.curveSelectionRevision;
+  setBusy('Drawing curves', 'Loading selected well/port');
+  try {
+    const result = await loadCurveRows(columns);
+    if (revision !== state.curveSelectionRevision) return;
+    state.curveRows = result.rows || [];
+    autoFitCurveDepthRange(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows);
+    autoFitCurveValueRanges(columns, state.curveRows, true);
+    paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+    saveState();
+    setReady(`Curve rows: ${state.curveRows.length}`);
+  } catch (error) {
+    if (revision === state.curveSelectionRevision) fail(error);
   }
 }
 
 async function loadCurveRows(columns) {
-  const result = await window.petrel.run('curve-data', {
+  return window.petrel.run('curve-data', {
     path: $('curve-path').value.trim(),
     well: $('curve-well').value,
     port: $('curve-port').value,
     depthMode: $('curve-depth-mode').value,
     columns
   });
-  state.curveRows = result.rows || [];
-  return result;
 }
 
 function selectedCurveColumns() {
@@ -1709,6 +1826,11 @@ function selectedCurveColumns() {
 }
 
 function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, rows) {
+  autoFitCurveDepthRange(defaultDepthColumn, channelDepthColumns, columns, rows);
+  autoFitCurveValueRanges(columns, rows, false);
+}
+
+function autoFitCurveDepthRange(defaultDepthColumn, channelDepthColumns, columns, rows) {
   const intervals = columns.map(column => {
     const depthColumn = channelDepthColumns[column] || defaultDepthColumn;
     const depths = rows.map(row => {
@@ -1725,7 +1847,11 @@ function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, ro
     $('curve-depth-min').value = formatInputNumber(shortest.min - 50, 1);
     $('curve-depth-max').value = formatInputNumber(shortest.max + 50, 1);
   }
+}
+
+function autoFitCurveValueRanges(columns, rows, onlyEmpty) {
   columns.forEach((column, index) => {
+    if (onlyEmpty && $(`curve-min-${index + 1}`).value.trim() && $(`curve-max-${index + 1}`).value.trim()) return;
     const values = rows.map(row => numericCell(row[column])).filter(Number.isFinite);
     if (!values.length) return;
     const { min, max } = numericRange(values);
@@ -1736,7 +1862,8 @@ function autoFitCurveRanges(defaultDepthColumn, channelDepthColumns, columns, ro
   });
 }
 
-function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
+function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows, boundaries = {}) {
+  state.curvePlotContext = { defaultDepthColumn, channelDepthColumns, columns: [...columns], boundaries };
   const depths = [];
   const sleeveDepth = curveSleeveDepth(rows);
   columns.forEach((column, index) => {
@@ -1755,15 +1882,21 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
   let depthMin = numericInput('curve-depth-min');
   let depthMax = numericInput('curve-depth-max');
   const depthRange = numericRange(depths);
-  if (!Number.isFinite(depthMin)) depthMin = depthRange.min;
-  if (!Number.isFinite(depthMax)) depthMax = depthRange.max;
+  if (!Number.isFinite(depthMin)) {
+    depthMin = depthRange.min;
+    $('curve-depth-min').value = formatInputNumber(depthMin, 1);
+  }
+  if (!Number.isFinite(depthMax)) {
+    depthMax = depthRange.max;
+    $('curve-depth-max').value = formatInputNumber(depthMax, 1);
+  }
   if (depthMax === depthMin) depthMax = depthMin + 1;
   const colors = ['#2563eb', '#16a34a', '#9333ea', '#f97316'];
   const traces = [];
   const layout = {
     paper_bgcolor: '#ffffff',
     plot_bgcolor: '#ffffff',
-    margin: { l: 72, r: 28, t: 84, b: 74 },
+    margin: { l: 72, r: 28, t: 84, b: 96 },
     hovermode: 'closest',
     legend: { orientation: 'h', x: 0, y: 1.18, font: { size: 11 } },
     annotations: [],
@@ -1771,7 +1904,7 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     yaxis: {
       title: 'TVD top',
       range: [depthMax, depthMin],
-      domain: [0.1, 0.9],
+      domain: [0.14, 0.9],
       gridcolor: '#e3e8ef',
       zeroline: false,
       titlefont: { size: 12 },
@@ -1784,8 +1917,14 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
     let min = numericInput(`curve-min-${index + 1}`);
     let max = numericInput(`curve-max-${index + 1}`);
     const range = numericRange(values);
-    if (!Number.isFinite(min)) min = range.min;
-    if (!Number.isFinite(max)) max = range.max;
+    if (!Number.isFinite(min)) {
+      min = range.min;
+      $(`curve-min-${index + 1}`).value = formatInputNumber(min, 4);
+    }
+    if (!Number.isFinite(max)) {
+      max = range.max;
+      $(`curve-max-${index + 1}`).value = formatInputNumber(max, 4);
+    }
     if (max === min) max = min + 1;
     const shift = Number($(`curve-shift-${index + 1}`).value || 0);
     const axisName = index === 0 ? 'x' : `x${index + 1}`;
@@ -1840,15 +1979,135 @@ function paintCurves(defaultDepthColumn, channelDepthColumns, columns, rows) {
       borderpad: 2
     });
   }
+  addCurveBoundaryLines(layout, boundaries);
   if (!traces.length) {
     plotEmpty('No curve data');
     return;
   }
-  Plotly.react('curve-plot', traces, layout, {
+  state.curveAxisSyncing = true;
+  const plotTarget = $('curve-plot');
+  Promise.resolve(Plotly.react(plotTarget, traces, layout, {
     responsive: true,
     displaylogo: false,
     scrollZoom: true
+  })).then(() => {
+    bindCurvePlotAxisSync(plotTarget);
+  }).finally(() => {
+    state.curveAxisSyncing = false;
   });
+}
+
+function redrawCurvesFromLoadedRows() {
+  const context = state.curvePlotContext;
+  if (!context || !state.curveRows.length) return;
+  paintCurves(
+    context.defaultDepthColumn,
+    context.channelDepthColumns || {},
+    context.columns || [],
+    state.curveRows,
+    context.boundaries || {}
+  );
+}
+
+function addCurveBoundaryLines(layout, boundaries) {
+  const styles = [
+    ['TVDSS_TOP_TOTAL', 'Top total', '#d97706', 'dash'],
+    ['TVDSS_BOT_TOTAL', 'Bot total', '#f97316', 'dash'],
+    ['TVDSS_TOP_LOCAL', 'Top local', '#2563eb', 'dot'],
+    ['TVDSS_BOT_LOCAL', 'Bot local', '#7c3aed', 'dot']
+  ];
+  styles.forEach(([key, label, color, dash]) => {
+    const depth = numericCell(boundaries && boundaries[key]);
+    if (!Number.isFinite(depth)) return;
+    const isLocal = key.includes('_LOCAL');
+    layout.shapes.push({
+      type: 'line',
+      xref: 'paper',
+      yref: 'y',
+      x0: 0,
+      x1: 1,
+      y0: depth,
+      y1: depth,
+      line: { color, width: 2, dash }
+    });
+    layout.annotations.push({
+      text: label,
+      x: isLocal ? 1 : 0,
+      y: depth,
+      xref: 'paper',
+      yref: 'y',
+      showarrow: false,
+      xanchor: isLocal ? 'right' : 'left',
+      yanchor: 'bottom',
+      font: { color, size: 10 },
+      bgcolor: 'rgba(255,255,255,0.8)',
+      borderpad: 1
+    });
+  });
+}
+
+function syncCurvePlotAxesFromInputs() {
+  const target = $('curve-plot');
+  const context = state.curvePlotContext;
+  if (!target || !context || !window.Plotly) return;
+  const update = {};
+  const depthMin = numericInput('curve-depth-min');
+  const depthMax = numericInput('curve-depth-max');
+  if (Number.isFinite(depthMin) && Number.isFinite(depthMax) && depthMax > depthMin) {
+    update['yaxis.range'] = [depthMax, depthMin];
+  }
+  (context.columns || []).forEach((_column, index) => {
+    const min = numericInput(`curve-min-${index + 1}`);
+    const max = numericInput(`curve-max-${index + 1}`);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+    update[`${curvePlotlyAxisKey(index)}.range`] = [min, max];
+  });
+  if (!Object.keys(update).length) return;
+  state.curveAxisSyncing = true;
+  Promise.resolve(Plotly.relayout(target, update)).finally(() => {
+    state.curveAxisSyncing = false;
+  });
+}
+
+function bindCurvePlotAxisSync(target) {
+  if (!target || typeof target.on !== 'function' || target.__curveAxisSyncBound) return;
+  target.__curveAxisSyncBound = true;
+  target.on('plotly_relayout', update => syncCurveInputsFromPlotAxes(target, update || {}));
+}
+
+function syncCurveInputsFromPlotAxes(target, update) {
+  if (state.curveAxisSyncing) return;
+  const context = state.curvePlotContext;
+  if (!context) return;
+  const depthRange = curveRelayoutRange(target, update, 'yaxis');
+  if (depthRange) {
+    $('curve-depth-min').value = formatInputNumber(Math.min(...depthRange), 1);
+    $('curve-depth-max').value = formatInputNumber(Math.max(...depthRange), 1);
+  }
+  (context.columns || []).forEach((_column, index) => {
+    const range = curveRelayoutRange(target, update, curvePlotlyAxisKey(index));
+    if (!range) return;
+    $(`curve-min-${index + 1}`).value = formatInputNumber(Math.min(...range), 4);
+    $(`curve-max-${index + 1}`).value = formatInputNumber(Math.max(...range), 4);
+  });
+  saveState();
+}
+
+function curveRelayoutRange(target, update, axisKey) {
+  const direct = update[`${axisKey}.range`];
+  if (Array.isArray(direct) && direct.length >= 2 && direct.every(Number.isFinite)) return direct.map(Number);
+  const first = Number(update[`${axisKey}.range[0]`]);
+  const second = Number(update[`${axisKey}.range[1]`]);
+  if (Number.isFinite(first) && Number.isFinite(second)) return [first, second];
+  if (update[`${axisKey}.autorange`] !== undefined) {
+    const fullRange = target && target._fullLayout && target._fullLayout[axisKey] && target._fullLayout[axisKey].range;
+    if (Array.isArray(fullRange) && fullRange.length >= 2 && fullRange.every(Number.isFinite)) return fullRange.map(Number);
+  }
+  return null;
+}
+
+function curvePlotlyAxisKey(index) {
+  return index === 0 ? 'xaxis' : `xaxis${index + 1}`;
 }
 
 function curveSleeveDepth(rows) {
@@ -1864,7 +2123,7 @@ function curveSleeveDepth(rows) {
 }
 
 function plotlyXAxis(title, min, max, color, index) {
-  const positions = [0.085, 0.915, 0.955, 0.045];
+  const positions = [0.075, 0.915, 0.955, 0.02];
   const sides = ['bottom', 'top', 'top', 'bottom'];
   const side = sides[index] || 'bottom';
   const axis = {
@@ -1890,7 +2149,7 @@ function plotlyXAxis(title, min, max, color, index) {
 }
 
 function plotlyAxisTitle(title, color, index) {
-  const yPositions = [0.097, 0.903, 1.012, -0.012];
+  const yPositions = [0.035, 0.903, 1.012, -0.025];
   return {
     text: escapeHtml(title),
     x: 0.5,
@@ -2871,11 +3130,18 @@ function sectionPngOutputPath() {
   if (!excelPath || !outputDir || !isAbsolutePath(excelPath)) {
     throw new Error('Load an Excel frac-list before saving a section PNG.');
   }
-  const trajectory = findSectionTrajectoryByValue($('section-well').value);
-  const propertySelection = findSectionPropertyByValue($('section-property').value);
+  const workspaceEntry = state.sectionSource === 'workspace' ? selectedWorkspaceSectionEntry() : null;
+  const trajectory = workspaceEntry ? null : findSectionTrajectoryByValue($('section-well').value);
+  const propertySelection = workspaceEntry ? null : findSectionPropertyByValue($('section-property').value);
+  const wellName = workspaceEntry
+    ? (workspaceEntry.fracWellName || workspaceEntry.modelWellName)
+    : sectionTrajectoryName(trajectory);
+  const propertyTitle = workspaceEntry
+    ? workspaceEntry.propertyTitle
+    : (propertySelection && propertySelection.property && propertySelection.property.title);
   const parts = [
-    safeFilenamePart(sectionTrajectoryName(trajectory)),
-    safeFilenamePart(propertySelection && propertySelection.property && propertySelection.property.title)
+    safeFilenamePart(wellName),
+    safeFilenamePart(propertyTitle)
   ].filter(Boolean);
   return joinPath(joinPath(outputDir, 'PNG'), `${parts.join('_')}.png`);
 }
@@ -3850,6 +4116,7 @@ async function saveSectionBoundaries() {
       $('sleeves-path').value = savedPath;
       $('sleeves-name').value = basename(savedPath);
       $('metrics-intervals').value = savedPath;
+      syncMetricsOutputFilename();
       state.columnMapping = currentColumnMapping();
       state.sectionBoundaryPath = savedPath;
     }
@@ -3880,12 +4147,38 @@ async function saveSectionBoundaries() {
       appendLog(`Warning: section boundaries were saved, but PNG was not saved: ${error.message}`);
     }
     const pngSuffix = pngResult ? `, PNG: ${basename(pngResult.path)}` : '';
-    setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}${pngSuffix}`);
     appendLog(`Section boundaries saved: ${savedPath}`);
     if (skipped) appendLog(`Warning: ${skipped} sleeve row(s) were not matched and were not updated.`);
+    const missingGlobalCount = Number(result.missingGlobalBoundsCount || 0);
+    if (missingGlobalCount) {
+      const missingRows = formatMissingGlobalBoundaryRows(result.missingGlobalBounds || []);
+      const message = `TVDSS_TOP_TOTAL/BOT_TOTAL are missing in Excel for ${missingGlobalCount} sleeve row(s).`;
+      const detail = `${missingRows ? `Well/port: ${missingRows}. ` : ''}Set the TT/BB points and press Save again.`;
+      setAttention(message);
+      appendLog(`Warning: ${message} ${detail}`);
+      try {
+        await window.petrel.showWarning({
+          title: 'Global boundaries were not saved',
+          message,
+          detail
+        });
+      } catch (error) {
+        appendLog(`Warning: could not show the save warning dialog: ${error.message}`);
+      }
+    } else {
+      setReady(`Saved boundaries: ${result.rowsUpdated || 0} rows${skipped ? `, skipped ${skipped}` : ''}${pngSuffix}`);
+    }
   } catch (error) {
     fail(error);
   }
+}
+
+function formatMissingGlobalBoundaryRows(rows) {
+  return (rows || []).map(row => {
+    const well = String(row.well == null ? '' : row.well).trim();
+    const port = String(row.port == null ? '' : row.port).trim();
+    return [well, port].filter(Boolean).join('_');
+  }).filter(Boolean).join(', ');
 }
 
 function currentSectionBoundaryRecords() {
@@ -4617,9 +4910,7 @@ async function browseMetricsIntervals() {
   const selected = await pickTable('metrics-intervals');
   if (!selected) return;
   $('metrics-intervals').value = selected;
-  if (!$('metrics-output').value.trim()) {
-    $('metrics-output').value = metricsDefaultFilename(selected);
-  }
+  syncMetricsOutputFilename();
   saveState();
 }
 
@@ -4688,7 +4979,12 @@ function metricsOutputPath() {
 function applyMetricsDefaultsFromSleeves(sleevesPath) {
   if (!sleevesPath) return;
   if (!$('metrics-intervals').value.trim()) $('metrics-intervals').value = sleevesPath;
-  if (!$('metrics-output').value.trim()) $('metrics-output').value = metricsDefaultFilename(sleevesPath);
+  syncMetricsOutputFilename();
+}
+
+function syncMetricsOutputFilename() {
+  const filename = metricsDefaultFilename($('metrics-intervals').value.trim());
+  if (filename) $('metrics-output').value = filename;
 }
 
 function metricsBaseTablePath() {
@@ -4746,19 +5042,21 @@ function appendLog(message) {
 }
 
 function currentCurveSettings() {
+  const previous = state.curveSettings || {};
   const channels = [];
   const mins = [];
   const maxs = [];
   const shifts = [];
   for (let index = 1; index <= 4; index += 1) {
-    channels.push($(`curve-channel-${index}`) ? $(`curve-channel-${index}`).value : '');
+    const channel = $(`curve-channel-${index}`) ? $(`curve-channel-${index}`).value : '';
+    channels.push(channel || (previous.channels && previous.channels[index - 1]) || '');
     mins.push($(`curve-min-${index}`) ? $(`curve-min-${index}`).value : '');
     maxs.push($(`curve-max-${index}`) ? $(`curve-max-${index}`).value : '');
     shifts.push($(`curve-shift-${index}`) ? $(`curve-shift-${index}`).value : '');
   }
   return {
-    well: $('curve-well') ? $('curve-well').value : '',
-    port: $('curve-port') ? $('curve-port').value : '',
+    well: ($('curve-well') && $('curve-well').value) || previous.well || '',
+    port: ($('curve-port') && $('curve-port').value) || previous.port || '',
     depthMode: $('curve-depth-mode') ? $('curve-depth-mode').value : 'common',
     depthMin: $('curve-depth-min') ? $('curve-depth-min').value : '',
     depthMax: $('curve-depth-max') ? $('curve-depth-max').value : '',
@@ -4862,6 +5160,7 @@ function restoreState() {
     $('metrics-extracted').value = data.metricsExtracted || '';
     $('metrics-intervals').value = data.metricsIntervals || '';
     $('metrics-output').value = basename(data.metricsOutput || '');
+    syncMetricsOutputFilename();
     $('curve-path').value = data.curvePath || '';
     applySavedCurveRanges();
     if (data.sectionStep) $('section-step').value = data.sectionStep;

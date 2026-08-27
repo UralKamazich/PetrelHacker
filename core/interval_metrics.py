@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 import math
 import re
@@ -116,9 +117,10 @@ def calculate_interval_metrics(
     settings = settings or IntervalMetricSettings()
     extracted = _normalize_identity_columns(extracted_df.copy())
     intervals = _normalize_identity_columns(intervals_df.copy())
-    warnings = _validate_inputs(extracted, intervals)
-    if warnings:
-        return IntervalMetricResult(rows=[], warnings=warnings)
+    validation_warnings = _validate_inputs(extracted, intervals)
+    if validation_warnings:
+        return IntervalMetricResult(rows=[], warnings=validation_warnings)
+    warnings: list[str] = []
 
     extracted["WellKey"] = extracted["Well"].map(_normalize_value)
     extracted["PortKey"] = extracted["Port"].map(_normalize_value)
@@ -141,6 +143,8 @@ def calculate_interval_metrics(
     xy_grouped = _xy_groups(extracted)
 
     total_intervals = len(intervals)
+    missing_cells: list[tuple[str, str]] = []
+    missing_bounds: dict[str, list[tuple[str, str]]] = {}
     for interval_index, (_index, interval) in enumerate(intervals.iterrows(), start=1):
         well = _normalize_value(interval["Well"])
         port = _normalize_value(interval["Port"])
@@ -151,7 +155,7 @@ def calculate_interval_metrics(
         if cells is None:
             cells = _cells_by_xy(interval, xy_grouped)
         if cells is None:
-            warnings.append(f"No extracted cells found for {well}_{port}; tried Well/Port and X/Y.")
+            missing_cells.append((well, port))
             rows.append(row)
             continue
 
@@ -160,7 +164,7 @@ def calculate_interval_metrics(
             top = _to_float(interval.get(top_col))
             bot = _to_float(interval.get(bot_col))
             if top is None or bot is None:
-                warnings.append(f"{well}_{port}: missing interval bounds for {name}.")
+                missing_bounds.setdefault(name, []).append((well, port))
                 interval_sets[name] = cells.iloc[0:0]
                 interval_sets[f"{name}_Net"] = cells.iloc[0:0]
                 interval_sets[f"{name}_NonNet"] = cells.iloc[0:0]
@@ -183,11 +187,115 @@ def calculate_interval_metrics(
         if progress_callback:
             progress_callback(interval_index, total_intervals)
 
+    warnings.extend(_missing_bounds_warnings(missing_bounds))
+    warnings.extend(_missing_cells_warnings(missing_cells))
     return IntervalMetricResult(rows=rows, warnings=warnings)
 
 
 def write_interval_metrics_xlsx(result: IntervalMetricResult, output_path: str | Path) -> None:
     export_xlsx(pd.DataFrame(result.rows), output_path)
+
+
+def write_interval_metrics_description(
+    result: IntervalMetricResult,
+    output_path: str | Path,
+    settings: IntervalMetricSettings,
+    *,
+    extracted_path: str | Path | None = None,
+    intervals_path: str | Path | None = None,
+) -> Path:
+    output = Path(output_path)
+    description_path = output.with_suffix(".txt")
+    metric_keys = _metric_key_set(settings.metric_keys)
+    property_columns = [str(value) for value in settings.property_columns if str(value)]
+    reservoir_values = sorted(str(value) for value in settings.reservoir_values)
+    lines = [
+        "ОПИСАНИЕ РАСЧЕТА ИНТЕРВАЛЬНЫХ МЕТРИК",
+        "",
+        f"Дата расчета (UTC): {datetime.now(UTC).isoformat(timespec='seconds')}",
+        f"Файл метрик: {output}",
+        f"Таблица ячеек: {extracted_path or 'не указана'}",
+        f"Таблица интервалов: {intervals_path or 'не указана'}",
+        f"Количество строк результата: {len(result.rows)}",
+        "",
+        "НАСТРОЙКИ КАНАЛОВ",
+        f"NTG: {settings.ntg_column or 'не выбран; при PORO > 0 используется маска 1, иначе 0'}",
+        f"PORO: {settings.poro_column or 'не выбран'}",
+        f"PERM: {settings.perm_column or 'автоматический поиск столбца с PERM'}",
+        f"Литология: {settings.lithology_column or 'не выбрана'}",
+        f"Пластовые значения литологии: {', '.join(reservoir_values) if reservoir_values else 'не заданы'}",
+        f"Дополнительные свойства: {', '.join(property_columns) if property_columns else 'не выбраны'}",
+        "",
+        "СОПОСТАВЛЕНИЕ СТРОК",
+        "Сначала ячейки сопоставляются с интервалом по Well и Port.",
+        "Если совпадение не найдено, используется X/Y с округлением до 0.001 м.",
+        "Названия Скважина/Well и Стадия/Муфта/Порт/Port распознаются как эквивалентные.",
+        "",
+        "ИНТЕРВАЛЫ",
+        "Global: TVDSS_TOP_TOTAL ... TVDSS_BOT_TOTAL.",
+        "Local: TVDSS_TOP_LOCAL ... TVDSS_BOT_LOCAL.",
+        "Total_pm15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_BOT_TOTAL + 15 м.",
+        "TopTotal_m15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_TOP_TOTAL.",
+        "BotTotal_p15m: от TVDSS_BOT_TOTAL до TVDSS_BOT_TOTAL + 15 м.",
+        "Для каждого интервала также рассчитываются выборки Net и NonNet.",
+        "У граничных ячеек учитывается только фактическая мощность пересечения с интервалом (h).",
+        "",
+        "NET / NONNET",
+        "Если выбраны литология и пластовые значения, Net = ячейки с указанными значениями литологии.",
+        "Иначе, если выбран NTG, Net = ячейки с NTG > 0.",
+        "Иначе, если выбран PORO, Net = ячейки с PORO > 0.",
+        "Для этого варианта внутренний NTG принимается равным 1 при PORO > 0 и 0 во всех остальных случаях.",
+        "Если нет литологии, NTG и PORO, все ячейки считаются Net; это отражается в предупреждениях.",
+        "NonNet = ячейки интервала, не вошедшие в Net.",
+        "",
+        "ВЫБРАННЫЕ ФОРМУЛЫ",
+    ]
+    formulas = {
+        "thickness": "Thickness = сумма h.",
+        "net_thickness": "NetThickness = сумма(h * NTG); без NTG при выбранном PORO используется маска PORO > 0, без обоих каналов значение пустое.",
+        "ntg_avg": "NTG_avg = сумма(NTG * h) / сумма(h).",
+        "ntg_median": "NTG_median = обычная медиана валидных значений NTG.",
+        "poro_avg": "PORO_avg = сумма(PORO * h) / сумма(h).",
+        "poro_median": "PORO_median = обычная медиана валидных значений PORO.",
+        "perm_avg_arith": "PERM_avg_arith = сумма(PERM * h) / сумма(h).",
+        "perm_avg_geom": "PERM_avg_geom = exp(сумма(ln(PERM) * h) / сумма(h)); учитываются только PERM > 0.",
+        "perm_median": "PERM_median = обычная медиана валидных значений PERM.",
+        "kh": "KH = сумма(PERM * h * NTG); без NTG используется маска PORO > 0, а без PORO множитель равен 1.",
+        "phih": "PHIH = сумма(PORO * h * NTG); без NTG используется маска PORO > 0, а без PORO множитель равен 1.",
+        "avg": "<property>_avg = сумма(value * h) / сумма(h).",
+        "mean_arith": "<property>_mean_arith = сумма(value * h) / сумма(h).",
+        "geom": "<property>_geom = exp(сумма(ln(value) * h) / сумма(h)); учитываются только value > 0.",
+        "median": "<property>_median = обычная медиана валидных значений.",
+        "min": "<property>_min = минимальное валидное значение.",
+        "max": "<property>_max = максимальное валидное значение.",
+        "integral": "<property>_integral = сумма(value * h).",
+        "min_star": "<property>_min_star = среднее нижних 10% после удаления выбросов по правилу 1.5 * IQR.",
+        "max_star": "<property>_max_star = среднее верхних 10% после удаления выбросов по правилу 1.5 * IQR.",
+        "std": "<property>_std = взвешенное по h стандартное отклонение генеральной совокупности.",
+        "delta": "<property>_delta = max_star - min_star.",
+    }
+    lines.extend(f"- {formulas[key]}" for key in DEFAULT_METRIC_KEYS if key in metric_keys)
+    lines.extend(
+        [
+            "",
+            "ОБРАБОТКА ДАННЫХ",
+            "Пустые и нечисловые значения свойства не участвуют в его статистике.",
+            "Если для показателя нет валидных значений, соответствующая ячейка результата остается пустой.",
+            "Медиана, min, max и min*/max* не взвешиваются по мощности; остальные указанные формулы используют h.",
+            "",
+            "ПРЕДУПРЕЖДЕНИЯ РАСЧЕТА",
+        ]
+    )
+    lines.extend(f"- {warning}" for warning in result.warnings)
+    if not result.warnings:
+        lines.append("Нет.")
+    lines.append("")
+
+    description_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = description_path.with_name(f".{description_path.name}.tmp")
+    temporary_path.write_text("\n".join(lines), encoding="utf-8")
+    temporary_path.replace(description_path)
+    return description_path
 
 
 def _validate_inputs(extracted: pd.DataFrame, intervals: pd.DataFrame) -> list[str]:
@@ -199,6 +307,39 @@ def _validate_inputs(extracted: pd.DataFrame, intervals: pd.DataFrame) -> list[s
     if missing_intervals:
         warnings.append(f"Intervals table is missing columns: {', '.join(missing_intervals)}.")
     return warnings
+
+
+def _missing_bounds_warnings(missing: dict[str, list[tuple[str, str]]]) -> list[str]:
+    warnings: list[str] = []
+    for name, identities in missing.items():
+        if len(identities) == 1:
+            well, port = identities[0]
+            warnings.append(f"{well}_{port}: missing interval bounds for {name}.")
+        else:
+            warnings.append(
+                f"Missing interval bounds for {name}: {len(identities)} rows in wells: "
+                f"{_well_count_summary(identities)}."
+            )
+    return warnings
+
+
+def _missing_cells_warnings(identities: list[tuple[str, str]]) -> list[str]:
+    if not identities:
+        return []
+    if len(identities) == 1:
+        well, port = identities[0]
+        return [f"No extracted cells found for {well}_{port}; tried Well/Port and X/Y."]
+    return [
+        f"No extracted cells found for {len(identities)} interval rows in wells: "
+        f"{_well_count_summary(identities)}; tried Well/Port and X/Y."
+    ]
+
+
+def _well_count_summary(identities: list[tuple[str, str]]) -> str:
+    counts: dict[str, int] = {}
+    for well, _port in identities:
+        counts[well] = counts.get(well, 0) + 1
+    return ", ".join(f"{well} ({count})" for well, count in sorted(counts.items()))
 
 
 def _interval_base_row(interval: pd.Series) -> dict:
@@ -251,8 +392,11 @@ def _settings_warnings(
         warnings.append("Lithology column is configured, but no reservoir values were provided.")
     has_lithology_net = bool(settings.lithology_column and settings.lithology_column in extracted.columns and settings.reservoir_values)
     has_ntg_net = bool(settings.ntg_column and settings.ntg_column in extracted.columns)
-    if not has_lithology_net and not has_ntg_net:
-        warnings.append("Net metrics use all interval cells because no NTG or lithology net filter is available.")
+    has_poro_net = bool(settings.poro_column and settings.poro_column in extracted.columns)
+    if not has_lithology_net and not has_ntg_net and has_poro_net:
+        warnings.append("Net metrics use PORO > 0 as a binary NTG mask because no lithology or NTG filter is available.")
+    elif not has_lithology_net and not has_ntg_net:
+        warnings.append("Net metrics use all interval cells because no lithology, NTG, or PORO net filter is available.")
     return warnings
 
 
@@ -261,9 +405,9 @@ def _normalize_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename: dict[str, str] = {}
     for column in df.columns:
         normalized = str(column).strip().lower().replace(" ", "_").replace("-", "_")
-        if normalized in {"well", "well_name"}:
+        if normalized in {"well", "well_name", "skv", "скважина"}:
             rename[column] = "Well"
-        elif normalized in {"port", "stage", "port_id"}:
+        elif normalized in {"port", "stage", "port_id", "муфта", "порт", "стадия"}:
             rename[column] = "Port"
         elif normalized in {"x", "coord_x", "coordinate_x"}:
             rename[column] = "X"
@@ -340,7 +484,7 @@ def _add_base_metrics(
     metric_keys: set[str],
 ) -> None:
     heights = _metric_heights(cells)
-    ntg = _optional_numeric(cells, settings.ntg_column)
+    ntg = _effective_ntg(cells, settings)
     poro = _optional_numeric(cells, settings.poro_column)
     perm = _optional_numeric(cells, settings.perm_column) if settings.perm_column else _auto_perm(cells)
 
@@ -410,6 +554,8 @@ def _net_cells(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.Data
         return cells[values.isin(settings.reservoir_values)]
     if settings.ntg_column and settings.ntg_column in cells.columns:
         return cells[_numeric(cells[settings.ntg_column]) > 0]
+    if settings.poro_column and settings.poro_column in cells.columns:
+        return cells[_numeric(cells[settings.poro_column]) > 0]
     return cells
 
 
@@ -465,6 +611,20 @@ def _optional_numeric(df: pd.DataFrame, column: str | None) -> pd.Series | None:
     if not column or column not in df.columns:
         return None
     return _numeric(df[column])
+
+
+def _effective_ntg(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.Series | None:
+    ntg = _optional_numeric(cells, settings.ntg_column)
+    if ntg is not None:
+        return ntg
+    has_lithology_filter = bool(
+        settings.lithology_column
+        and settings.lithology_column in cells.columns
+        and settings.reservoir_values
+    )
+    if not has_lithology_filter and settings.poro_column and settings.poro_column in cells.columns:
+        return (_numeric(cells[settings.poro_column]) > 0).astype(float)
+    return None
 
 
 def _numeric(series: pd.Series) -> pd.Series:

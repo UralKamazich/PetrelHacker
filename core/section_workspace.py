@@ -21,6 +21,7 @@ from core.multi_model_extractor import (
 )
 from core.property_extractor import (
     ExtractionStats,
+    INTERVAL_BOUNDARY_COLUMNS,
     _cell_center,
     _is_blank_property_value,
     _numeric_or_blank,
@@ -38,6 +39,7 @@ BASE_OUTPUT_COLUMNS = [
     "X",
     "Y",
     PORT_DEPTH_COLUMN,
+    *INTERVAL_BOUNDARY_COLUMNS,
     "Datum_Z",
     "Depth_KB_PORT",
     "I",
@@ -360,6 +362,10 @@ def _extract_sleeve_rows(
     x = _numeric_or_blank(getattr(sleeve, "X", ""))
     y = _numeric_or_blank(getattr(sleeve, "Y", ""))
     port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
+    interval_boundaries = {
+        column: _numeric_or_blank(getattr(sleeve, column, ""))
+        for column in INTERVAL_BOUNDARY_COLUMNS
+    }
     rows: list[dict[str, Any]] = []
     for segment_index, (top, base) in enumerate(segments, start=1):
         center = _cell_center(top, base)
@@ -373,6 +379,7 @@ def _extract_sleeve_rows(
             "X": x,
             "Y": y,
             PORT_DEPTH_COLUMN: port_tvd,
+            **interval_boundaries,
             "Datum_Z": "",
             "Depth_KB_PORT": "",
             "I": "" if geometry is None else geometry[0].i + 1,

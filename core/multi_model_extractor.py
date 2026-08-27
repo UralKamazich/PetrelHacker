@@ -13,10 +13,12 @@ import pandas as pd
 
 from core.exporter import StreamingCsvExporter, StreamingXlsxExporter
 from core.grid_indexer import FastGridIndexer
+from core.model_section import _geometry_column_depths_at_xy
 from core.model_reader import open_model_reader
 from core.property_extractor import (
     CancelCallback,
     ExtractionStats,
+    INTERVAL_BOUNDARY_COLUMNS,
     LogCallback,
     ProgressCallback,
     _cell_center as _depth_cell_center,
@@ -182,6 +184,7 @@ class MultiModelPropertyExtractor:
             "X",
             "Y",
             PORT_DEPTH_COLUMN,
+            *INTERVAL_BOUNDARY_COLUMNS,
             "Datum_Z",
             "Depth_KB_PORT",
             "I",
@@ -270,6 +273,10 @@ class MultiModelPropertyExtractor:
         x = float(getattr(sleeve, "X"))
         y = float(getattr(sleeve, "Y"))
         port_tvd = _numeric_or_blank(getattr(sleeve, PORT_DEPTH_COLUMN, ""))
+        interval_boundaries = {
+            column: _numeric_or_blank(getattr(sleeve, column, ""))
+            for column in INTERVAL_BOUNDARY_COLUMNS
+        }
         datum_z = _datum_for_well(self.well_depth_datums, well)
         model_columns = [_load_model_column(context, x, y) for context in self.contexts]
         if not any(model_columns):
@@ -303,6 +310,7 @@ class MultiModelPropertyExtractor:
                 "X": x,
                 "Y": y,
                 PORT_DEPTH_COLUMN: port_tvd,
+                **interval_boundaries,
                 "Datum_Z": datum_z,
                 "Depth_KB_PORT": _depth_kb(port_tvd, datum_z),
                 "I": "" if geometry_source is None else geometry_source[0].i + 1,
@@ -421,7 +429,11 @@ def _load_model_column(context: ModelContext, x: float, y: float) -> LoadedColum
         match = context.indexer.find_column(x, y)
         if match is None:
             return None
-        geometry = context.reader.get_cell_geometry_column(match.i, match.j)
+        geometry = _normalize_geometry_column(
+            context.reader.get_cell_geometry_column(match.i, match.j),
+            x,
+            y,
+        )
         if context.spec.depth_offset:
             geometry = _offset_geometry(geometry, context.spec.depth_offset)
         return LoadedColumn(
@@ -434,6 +446,68 @@ def _load_model_column(context: ModelContext, x: float, y: float) -> LoadedColum
                 for prop in context.properties
             },
         )
+
+
+def _normalize_geometry_column(geometry: dict, x: float, y: float) -> dict[str, list[float]]:
+    if "TVD_top" in geometry and "TVD_base" in geometry:
+        return {key: list(values) for key, values in geometry.items() if key != "points"}
+    if "points" not in geometry:
+        raise ValueError("Model cell geometry contains neither TVD intervals nor corner points.")
+
+    points = np.asarray(geometry["points"], dtype=float)
+    if points.ndim != 3 or points.shape[1:] != (4, 3) or points.shape[0] < 2:
+        raise ValueError(f"Unsupported model cell geometry shape: {points.shape}")
+
+    depths = _geometry_column_depths_at_xy(geometry, x, y)
+    tops = depths["TVD_top"]
+    bases = depths["TVD_base"]
+    size_i: list[float] = []
+    size_j: list[float] = []
+    area_xy: list[float] = []
+    for top, base in zip(points[:-1], points[1:], strict=False):
+        size_i.append(
+            float(
+                np.nanmean(
+                    [
+                        np.linalg.norm(top[0, :2] - top[1, :2]),
+                        np.linalg.norm(top[2, :2] - top[3, :2]),
+                        np.linalg.norm(base[0, :2] - base[1, :2]),
+                        np.linalg.norm(base[2, :2] - base[3, :2]),
+                    ]
+                )
+            )
+        )
+        size_j.append(
+            float(
+                np.nanmean(
+                    [
+                        np.linalg.norm(top[0, :2] - top[2, :2]),
+                        np.linalg.norm(top[1, :2] - top[3, :2]),
+                        np.linalg.norm(base[0, :2] - base[2, :2]),
+                        np.linalg.norm(base[1, :2] - base[3, :2]),
+                    ]
+                )
+            )
+        )
+        polygon = top[[0, 1, 3, 2], :2]
+        area_xy.append(
+            float(
+                0.5
+                * abs(
+                    np.dot(polygon[:, 0], np.roll(polygon[:, 1], -1))
+                    - np.dot(polygon[:, 1], np.roll(polygon[:, 0], -1))
+                )
+            )
+        )
+
+    return {
+        "TVD_top": tops,
+        "TVD_base": bases,
+        "CellHeight": [abs(float(base) - float(top)) for top, base in zip(tops, bases, strict=False)],
+        "CellSizeI": size_i,
+        "CellSizeJ": size_j,
+        "CellAreaXY": area_xy,
+    }
 
 
 def _property_values_for_k(context: ModelContext, column: LoadedColumn, k: int) -> dict[str, object]:

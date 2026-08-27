@@ -17,12 +17,16 @@ def test_property_output_columns_include_port_depth_context() -> None:
 
     columns = PropertyExtractor._output_columns([prop])
 
-    assert columns[:14] == [
+    assert columns[:18] == [
         "Well",
         "Port",
         "X",
         "Y",
         "TVDSS_PORT",
+        "TVDSS_TOP_TOTAL",
+        "TVDSS_BOT_TOTAL",
+        "TVDSS_TOP_LOCAL",
+        "TVDSS_BOT_LOCAL",
         "I",
         "J",
         "K",

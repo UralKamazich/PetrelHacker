@@ -6,7 +6,12 @@ import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from core.interval_metrics import IntervalMetricSettings, calculate_interval_metrics, write_interval_metrics_xlsx
+from core.interval_metrics import (
+    IntervalMetricSettings,
+    calculate_interval_metrics,
+    write_interval_metrics_description,
+    write_interval_metrics_xlsx,
+)
 from core.table_io import read_table
 
 
@@ -27,6 +32,7 @@ class MetricsRequest:
 @dataclass(frozen=True)
 class MetricsResult:
     output_path: str
+    description_path: str
     rows_written: int
     warnings: list[str]
 
@@ -72,10 +78,19 @@ class MetricsWorker(QObject):
             self.progress.emit(80)
             self.log.emit(f"Writing metrics XLSX: {self.request.output_path}")
             write_interval_metrics_xlsx(result, self.request.output_path)
+            description_path = write_interval_metrics_description(
+                result,
+                self.request.output_path,
+                settings,
+                extracted_path=self.request.extracted_path,
+                intervals_path=self.request.intervals_path,
+            )
+            self.log.emit(f"Writing metrics description: {description_path}")
             self.progress.emit(100)
             self.finished.emit(
                 MetricsResult(
                     output_path=self.request.output_path,
+                    description_path=str(description_path),
                     rows_written=len(result.rows),
                     warnings=result.warnings,
                 )

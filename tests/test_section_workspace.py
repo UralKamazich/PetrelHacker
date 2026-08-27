@@ -97,6 +97,10 @@ def test_section_workspace_extracts_saved_property_at_sleeve_md(tmp_path) -> Non
             "Y": [40.0],
             "MD": [1100.0],
             "TVDSS_PORT": [108.0],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [120.0],
+            "TVDSS_TOP_LOCAL": [103.0],
+            "TVDSS_BOT_LOCAL": [115.0],
         }
     )
     output_path = tmp_path / "extracted.csv"
@@ -116,3 +120,7 @@ def test_section_workspace_extracts_saved_property_at_sleeve_md(tmp_path) -> Non
     assert rows["PORO_Model"].tolist() == ["M1", "M1"]
     assert rows["PORO_I"].tolist() == [6, 6]
     assert rows["Rel_TVD_center"].tolist() == [-2.0, 8.0]
+    assert rows["TVDSS_TOP_TOTAL"].tolist() == [100.0, 100.0]
+    assert rows["TVDSS_BOT_TOTAL"].tolist() == [120.0, 120.0]
+    assert rows["TVDSS_TOP_LOCAL"].tolist() == [103.0, 103.0]
+    assert rows["TVDSS_BOT_LOCAL"].tolist() == [115.0, 115.0]

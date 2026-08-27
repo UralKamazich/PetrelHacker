@@ -56,6 +56,8 @@ def test_metrics_worker_writes_metrics_xlsx(tmp_path) -> None:
     assert failures == []
     assert len(results) == 1
     assert results[0].rows_written == 1
+    assert results[0].description_path == str(tmp_path / "metrics.txt")
+    assert (tmp_path / "metrics.txt").is_file()
     preview = read_xlsx_preview(output_path)
     assert preview.headers[:2] == ["Well", "Port"]
     assert preview.rows[0][:2] == ["A", "1"]
