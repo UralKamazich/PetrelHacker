@@ -17,7 +17,7 @@ from core.petrel_property_reader import (
     _read_property_dictionary_extension,
     _strip_binary_segment_frame,
 )
-from core.petrel_trajectory_reader import _consume_marker, _read_bxml_number
+from core.petrel_trajectory_reader import _consume_marker, _read_bxml_number, decode_petrel_well_shape
 
 
 def test_strips_binary_page_frame_between_float_bytes():
@@ -100,6 +100,49 @@ def test_reads_compact_petrel_numbers():
     value, offset = _read_bxml_number(b"\x91" + struct.pack("<f", -3721.5), 0)
     assert value == -3721.5
     assert offset == 5
+
+
+def test_decodes_dummy_well_shape_md_and_xyz_records():
+    names = [
+        "records",
+        "item",
+        "md",
+        "vertex",
+        "double",
+        "inclination",
+        "azimuth",
+        "dx_tn",
+        "dy_tn",
+        "dls",
+    ]
+    dictionary = b"BXML\x01" + b"".join(
+        b"\xa1" + bytes((len(name),)) + name.encode("ascii") for name in names
+    ) + b"\xa0"
+    tag = lambda index: bytes((0x42, index * 2))
+    records = []
+    for md, point in ((0.0, (10.0, 20.0, 30.0)), (100.0, (40.0, 50.0, -60.0))):
+        records.append(
+            tag(1)
+            + tag(2)
+            + b"\x93"
+            + struct.pack("<d", md)
+            + tag(3)
+            + b"\x03"
+            + tag(4)
+            + b"\x01\x93\x03"
+            + struct.pack("<3d", *point)
+            + b"\x01"
+            + b"".join(tag(index) + b"\x81" for index in range(5, 10))
+            + b"\x01"
+        )
+    body = tag(0) + b"\x06\x08\x88\x02" + b"".join(records)
+    page_size = bytes(((len(body) & 0x7F) | 0x80, len(body) >> 7))
+    raw = dictionary + page_size + body
+
+    md, points = decode_petrel_well_shape(raw)
+
+    assert md.tolist() == [0.0, 100.0]
+    assert points.tolist() == [[10.0, 20.0, 30.0], [40.0, 50.0, -60.0]]
 
 
 def test_consumes_bxml_page_frame_inside_marker():

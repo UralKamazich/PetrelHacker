@@ -10,7 +10,11 @@ import numpy as np
 from core.petrel_grid_reader import PetrelGridReader, read_petrel_grid_horizontal_shape
 from core.petrel_horizon_reader import PetrelNamedHorizon, read_petrel_named_horizons
 from core.petrel_model_metadata import read_petrel_object_names, read_petrel_parent_names
-from core.petrel_trajectory_reader import read_petrel_trajectory, read_petrel_trajectory_point_count
+from core.petrel_trajectory_reader import (
+    read_petrel_trajectory,
+    read_petrel_trajectory_point_count,
+    read_petrel_well_shape,
+)
 from core.resqml_reader import (
     GridInfo,
     PropertyInfo,
@@ -104,6 +108,7 @@ class PetrelProjectReader:
         self._native_property_readers: dict[str, PetrelPropertyReader] = {}
         self._trajectories: list[WellTrajectoryInfo] | None = None
         self._trajectory_data_pks: dict[str, int] = {}
+        self._trajectory_blob_types: dict[str, str] = {}
 
     @property
     def epc_path(self) -> Path:
@@ -200,10 +205,14 @@ class PetrelProjectReader:
         data_pk = self._trajectory_data_pks.get(normalized)
         if data_pk is None:
             raise ValueError(f"Petrel trajectory has no Data.ptd object reference: {info.title}")
-        first_md, xyz = read_petrel_trajectory(self.data_path, data_pk)
+        blob_type = self._trajectory_blob_types.get(normalized, "XYZTrajectoryProviderData")
+        if blob_type == "DummyWellTraceSubjectShape":
+            md, xyz = read_petrel_well_shape(self.data_path, data_pk)
+        else:
+            first_md, xyz = read_petrel_trajectory(self.data_path, data_pk)
+            md = first_md + _trajectory_distances(xyz)
         distance = _trajectory_distances(xyz)
         horizontal_distance = _trajectory_distances(xyz[:, :2])
-        md = first_md + distance
         tvd = _z_to_depth(xyz[:, 2])
         return [
             WellTrajectoryPoint(
@@ -394,10 +403,14 @@ class PetrelProjectReader:
     def _load_trajectories(self) -> None:
         if self.project is None:
             raise RuntimeError("Petrel project is not opened.")
-        rows = _query_project_objects(self.data_path, ("XYZTrajectoryProviderData",))
-        well_names = read_petrel_parent_names(self.project.ptd_path, [row[1] for row in rows])
+        rows = _query_project_objects(self.data_path, ("DummyWellTraceSubjectShape",))
+        if rows:
+            well_names = read_petrel_object_names(self.project.ptd_path, [row[1] for row in rows])
+        else:
+            rows = _query_project_objects(self.data_path, ("XYZTrajectoryProviderData",))
+            well_names = read_petrel_parent_names(self.project.ptd_path, [row[1] for row in rows])
         trajectories: list[WellTrajectoryInfo] = []
-        for data_pk, droid, _blob_type, _time_stamp, _bytes_size in rows:
+        for data_pk, droid, blob_type, _time_stamp, _bytes_size in rows:
             normalized = _plain_uuid(droid)
             well_name = well_names.get(normalized)
             if not well_name:
@@ -406,13 +419,14 @@ class PetrelProjectReader:
             if point_count is None or point_count < 2:
                 continue
             self._trajectory_data_pks[normalized] = data_pk
+            self._trajectory_blob_types[normalized] = blob_type
             trajectories.append(
                 WellTrajectoryInfo(
                     index=len(trajectories),
                     title=well_name,
                     uuid=normalized,
                     well_name=well_name,
-                    trajectory_type="XYZTrajectoryProviderData",
+                    trajectory_type=blob_type,
                     point_count=point_count,
                 )
             )
