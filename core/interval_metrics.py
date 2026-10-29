@@ -142,10 +142,8 @@ def calculate_interval_metrics(
     extracted["CellCenterTVD"] = (_numeric(extracted["TVD_top"]) + _numeric(extracted["TVD_base"])) / 2.0
     extracted["CellHeight"] = _numeric(extracted["CellHeight"])
 
-    property_columns = _additional_property_columns(
-        settings,
-        settings.property_columns or _default_property_columns(extracted.columns),
-    )
+    # Only explicitly selected channels are used; nothing is picked up automatically.
+    property_columns = _additional_property_columns(settings, settings.property_columns)
     metric_keys = _metric_key_set(settings.metric_keys)
     warnings.extend(_settings_warnings(extracted, settings, property_columns))
     rows: list[dict] = []
@@ -246,7 +244,7 @@ def write_interval_metrics_description(
         "НАСТРОЙКИ КАНАЛОВ",
         f"NTG: {settings.ntg_column or 'не выбран; при PORO > 0 используется маска 1, иначе 0'}",
         f"PORO: {settings.poro_column or 'не выбран'}",
-        f"PERM: {settings.perm_column or 'автоматический поиск столбца с PERM'}",
+        f"PERM: {settings.perm_column or 'не выбран'}",
         f"Литология: {settings.lithology_column or 'не выбрана'}",
         f"Density: {settings.density_column or 'не выбран; столбцы Density_* остаются пустыми'}",
         f"Shmin: {settings.shmin_column or 'не выбран; столбцы Shmin_* остаются пустыми'}",
@@ -515,7 +513,7 @@ def _add_base_metrics(
     heights = _metric_heights(cells)
     ntg = _effective_ntg(cells, settings)
     poro = _optional_numeric(cells, settings.poro_column)
-    perm = _optional_numeric(cells, settings.perm_column) if settings.perm_column else _auto_perm(cells)
+    perm = _optional_numeric(cells, settings.perm_column)
 
     if "thickness" in metric_keys:
         row[f"Thickness_{suffix}"] = _sum(heights)
@@ -608,20 +606,6 @@ def _metric_suffixes() -> tuple[str, ...]:
     return tuple(values)
 
 
-def _default_property_columns(columns) -> list[str]:
-    return [
-        str(column)
-        for column in columns
-        if str(column) not in BASE_EXTRACTION_COLUMNS
-        and str(column) != "CellCenterTVD"
-        and not _is_source_diagnostic_column(str(column))
-    ]
-
-
-def _is_source_diagnostic_column(column_name: str) -> bool:
-    return column_name.endswith(("_Model", "_I", "_J", "_K", "_TVD_center", "_Depth_KB"))
-
-
 def _additional_property_columns(settings: IntervalMetricSettings, property_columns: list[str]) -> list[str]:
     base_columns = {
         settings.ntg_column,
@@ -642,13 +626,6 @@ def _metric_key_set(metric_keys: list[str]) -> set[str]:
     if not selected:
         return set(DEFAULT_METRIC_KEYS)
     return selected & set(DEFAULT_METRIC_KEYS)
-
-
-def _auto_perm(cells: pd.DataFrame) -> pd.Series | None:
-    for column in cells.columns:
-        if "perm" in str(column).lower():
-            return _numeric(cells[column])
-    return None
 
 
 def _optional_numeric(df: pd.DataFrame, column: str | None) -> pd.Series | None:

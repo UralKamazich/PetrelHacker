@@ -1656,11 +1656,10 @@ async function loadMetricsTable() {
 function renderMetricsProperties(columns) {
   const root = $('metrics-properties');
   root.innerHTML = '';
-  const autoSelect = state.extractionSource === 'workspace';
   metricAdditionalColumns(columns).forEach(column => {
     const row = document.createElement('label');
     row.className = 'check-item';
-    row.innerHTML = `<input type="checkbox"${autoSelect ? ' checked' : ''} data-metrics-property="${escapeHtml(column)}"><span>${escapeHtml(column)}</span><span></span>`;
+    row.innerHTML = `<input type="checkbox" data-metrics-property="${escapeHtml(column)}"><span>${escapeHtml(column)}</span><span></span>`;
     root.appendChild(row);
   });
 }

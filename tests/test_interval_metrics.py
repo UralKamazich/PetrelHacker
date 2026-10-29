@@ -321,7 +321,11 @@ def test_calculate_interval_metrics_uses_gross_cells_for_net_without_net_filter(
         }
     )
 
-    result = calculate_interval_metrics(extracted, intervals, IntervalMetricSettings(ntg_column=None))
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, property_columns=["DENSITY"]),
+    )
 
     row = result.rows[0]
     assert row["Thickness_Global"] == 20.0
@@ -571,12 +575,46 @@ def test_calculate_interval_metrics_ignores_interval_boundary_columns_as_propert
     )
     intervals = extracted[["Well", "Port", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL"]]
 
-    for property_columns in ([], ["SW", "TVDSS_BOT_LOCAL"]):
-        result = calculate_interval_metrics(
-            extracted,
-            intervals,
-            IntervalMetricSettings(property_columns=property_columns, metric_keys=["avg"]),
-        )
-        row = result.rows[0]
-        assert row["SW_avg_Global"] == 0.3
-        assert not any(column.startswith("TVDSS_BOT_LOCAL_") for column in row)
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(property_columns=["SW", "TVDSS_BOT_LOCAL"], metric_keys=["avg"]),
+    )
+    row = result.rows[0]
+    assert row["SW_avg_Global"] == 0.3
+    assert not any(column.startswith("TVDSS_BOT_LOCAL_") for column in row)
+
+
+def test_calculate_interval_metrics_uses_only_selected_channels() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVD_top": [100.0],
+            "TVD_base": [110.0],
+            "CellHeight": [10.0],
+            "EFFECTIVE_STRESS": [30.0],
+            "TOTAL_STRESS": [55.0],
+            "PermX": [100.0],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [110.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, poro_column=None, property_columns=[]),
+    )
+
+    row = result.rows[0]
+    assert not any("STRESS" in column for column in row)
+    assert row["PERM_avg_arith_Global"] == ""
