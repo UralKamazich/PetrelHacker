@@ -8,6 +8,8 @@
     "electron:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/run-electron.ps1",
     "electron": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/run-electron.ps1",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-backend.ps1",
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-desktop-win.ps1",
+    "dist:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-desktop-win.ps1",
     "dist:web": "powershell -NoProfile -ExecutionPolicy Bypass -File electron/build-web.ps1"
   },
   "devDependencies": {
@@ -44,7 +46,7 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "artifactName": "PetrelHacker-${version}-${arch}-portable.${ext}",
       "icon": "electron/assets/icon.png"
     },
     "mac": {
