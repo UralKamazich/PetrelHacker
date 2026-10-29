@@ -470,3 +470,85 @@ def test_write_interval_metrics_description_next_to_xlsx(tmp_path) -> None:
     assert "KP1" in text
     assert "внутренний NTG принимается равным 1 при PORO > 0" in text
     assert "Example warning." in text
+
+
+def test_calculate_interval_metrics_writes_fixed_channels_under_stable_names() -> None:
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [110.0],
+        }
+    )
+
+    def model_columns(density: str, shmin: str, extra: str) -> list[str]:
+        extracted = pd.DataFrame(
+            {
+                "Well": ["A"],
+                "Port": [1],
+                "TVD_top": [100.0],
+                "TVD_base": [110.0],
+                "CellHeight": [10.0],
+                "NTG": [1.0],
+                density: [2.4],
+                shmin: [35.0],
+                extra: [0.3],
+            }
+        )
+        result = calculate_interval_metrics(
+            extracted,
+            intervals,
+            IntervalMetricSettings(
+                ntg_column="NTG",
+                density_column=density,
+                shmin_column=shmin,
+                property_columns=[density, shmin, extra],
+                metric_keys=["thickness", "avg"],
+            ),
+        )
+        row = result.rows[0]
+        assert row["Density_avg_Global"] == 2.4
+        assert row["Shmin_avg_Global"] == 35.0
+        assert f"{density}_avg_Global" not in row
+        return [column for column in row if not column.startswith(extra)]
+
+    first = model_columns("M1_RHOB", "M1_SHMIN_MPa", "M1_SW")
+    second = model_columns("M2_Density", "M2_Shmin", "M2_SW")
+    assert first == second
+
+
+def test_calculate_interval_metrics_keeps_empty_fixed_channels_and_puts_additional_last() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVD_top": [100.0],
+            "TVD_base": [110.0],
+            "CellHeight": [10.0],
+            "SW": [0.3],
+        }
+    )
+    intervals = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [110.0],
+        }
+    )
+
+    result = calculate_interval_metrics(
+        extracted,
+        intervals,
+        IntervalMetricSettings(ntg_column=None, property_columns=["SW"], metric_keys=["avg"]),
+    )
+
+    columns = list(result.rows[0])
+    assert result.rows[0]["Density_avg_Global"] == ""
+    assert result.rows[0]["Shmin_avg_Global"] == ""
+    assert columns.index("Shmin_avg_BotTotal_p15m_NonNet") < columns.index("SW_avg_Global")

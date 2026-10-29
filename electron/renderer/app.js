@@ -1641,6 +1641,9 @@ async function loadMetricsTable() {
     fillSelect('metrics-poro', state.tableColumns, guessColumn(state.tableColumns, ['PORO']));
     fillSelect('metrics-perm', state.tableColumns, guessColumn(state.tableColumns, ['PERM']));
     fillSelect('metrics-lithology', state.tableColumns, guessColumn(state.tableColumns, ['LITH', 'FACIES']));
+    const propertyColumns = state.tableColumns.filter(isPropertyColumn);
+    fillSelect('metrics-density', propertyColumns, guessColumn(propertyColumns, ['DENS', 'RHOB']));
+    fillSelect('metrics-shmin', propertyColumns, guessColumn(propertyColumns, ['SHMIN']));
     renderMetricsProperties(state.tableColumns);
     setReady(`Headers: ${state.tableColumns.length}`);
   } catch (error) {
@@ -1716,6 +1719,8 @@ async function runMetrics() {
       poroColumn: valueOrNull('metrics-poro'),
       permColumn: valueOrNull('metrics-perm'),
       lithologyColumn: valueOrNull('metrics-lithology'),
+      densityColumn: valueOrNull('metrics-density'),
+      shminColumn: valueOrNull('metrics-shmin'),
       reservoirValues: splitCsv($('reservoir-values').value),
       propertyColumns: checkedValues('metrics-property'),
       metricKeys

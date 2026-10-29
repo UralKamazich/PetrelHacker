@@ -88,6 +88,12 @@ PROPERTY_METRIC_KEYS = (
     "delta",
 )
 DEFAULT_METRIC_KEYS = BASE_METRIC_KEYS + PROPERTY_METRIC_KEYS
+# Fixed channels are written under a stable output name regardless of the source column,
+# so metric files from different models share the same columns.
+FIXED_PROPERTY_CHANNELS = (
+    ("Density", "density_column"),
+    ("Shmin", "shmin_column"),
+)
 MetricProgressCallback = Callable[[int, int], None]
 
 
@@ -97,6 +103,8 @@ class IntervalMetricSettings:
     poro_column: str | None = "PORO"
     perm_column: str | None = None
     lithology_column: str | None = None
+    density_column: str | None = None
+    shmin_column: str | None = None
     reservoir_values: set[str] = field(default_factory=set)
     property_columns: list[str] = field(default_factory=list)
     metric_keys: list[str] = field(default_factory=list)
@@ -180,6 +188,18 @@ def calculate_interval_metrics(
         metric_suffixes = _metric_suffixes()
         for suffix in metric_suffixes:
             _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings, metric_keys)
+        for name, attribute in FIXED_PROPERTY_CHANNELS:
+            column = getattr(settings, attribute)
+            for suffix in metric_suffixes:
+                interval_cells = interval_sets.get(suffix, cells.iloc[0:0])
+                _add_channel_metrics(
+                    row,
+                    name,
+                    _optional_numeric(interval_cells, column),
+                    _metric_heights(interval_cells),
+                    suffix,
+                    metric_keys,
+                )
         for suffix in metric_suffixes:
             _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns, metric_keys)
 
@@ -223,6 +243,8 @@ def write_interval_metrics_description(
         f"PORO: {settings.poro_column or 'не выбран'}",
         f"PERM: {settings.perm_column or 'автоматический поиск столбца с PERM'}",
         f"Литология: {settings.lithology_column or 'не выбрана'}",
+        f"Density: {settings.density_column or 'не выбран; столбцы Density_* остаются пустыми'}",
+        f"Shmin: {settings.shmin_column or 'не выбран; столбцы Shmin_* остаются пустыми'}",
         f"Пластовые значения литологии: {', '.join(reservoir_values) if reservoir_values else 'не заданы'}",
         f"Дополнительные свойства: {', '.join(property_columns) if property_columns else 'не выбраны'}",
         "",
@@ -382,6 +404,8 @@ def _settings_warnings(
         ("PORO", settings.poro_column),
         ("PERM", settings.perm_column),
         ("lithology", settings.lithology_column),
+        ("Density", settings.density_column),
+        ("Shmin", settings.shmin_column),
     ):
         if column and column not in extracted.columns:
             warnings.append(f"Configured {label} column is missing from extracted table: {column}.")
@@ -524,28 +548,33 @@ def _add_property_metrics(
         values = _optional_numeric(cells, column)
         if values is None:
             continue
-        if "avg" in metric_keys:
-            row[f"{column}_avg_{suffix}"] = _mean(values, heights)
-        if "mean_arith" in metric_keys:
-            row[f"{column}_mean_arith_{suffix}"] = _mean(values, heights)
-        if "geom" in metric_keys:
-            row[f"{column}_geom_{suffix}"] = _geom_mean(values, heights)
-        if "median" in metric_keys:
-            row[f"{column}_median_{suffix}"] = _median(values)
-        if "min" in metric_keys:
-            row[f"{column}_min_{suffix}"] = _min(values)
-        if "max" in metric_keys:
-            row[f"{column}_max_{suffix}"] = _max(values)
-        if "integral" in metric_keys:
-            row[f"{column}_integral_{suffix}"] = _sum(values * heights)
-        if "min_star" in metric_keys:
-            row[f"{column}_min_star_{suffix}"] = _robust_tail_mean(values, lower=True)
-        if "max_star" in metric_keys:
-            row[f"{column}_max_star_{suffix}"] = _robust_tail_mean(values, lower=False)
-        if "std" in metric_keys:
-            row[f"{column}_std_{suffix}"] = _std(values, heights)
-        if "delta" in metric_keys:
-            row[f"{column}_delta_{suffix}"] = _delta_star(values)
+        _add_channel_metrics(row, column, values, heights, suffix, metric_keys)
+
+
+def _add_channel_metrics(
+    row: dict,
+    name: str,
+    values: pd.Series | None,
+    heights: pd.Series,
+    suffix: str,
+    metric_keys: set[str],
+) -> None:
+    calculators = {
+        "avg": lambda: _mean(values, heights),
+        "mean_arith": lambda: _mean(values, heights),
+        "geom": lambda: _geom_mean(values, heights),
+        "median": lambda: _median(values),
+        "min": lambda: _min(values),
+        "max": lambda: _max(values),
+        "integral": lambda: _sum(values * heights),
+        "min_star": lambda: _robust_tail_mean(values, lower=True),
+        "max_star": lambda: _robust_tail_mean(values, lower=False),
+        "std": lambda: _std(values, heights),
+        "delta": lambda: _delta_star(values),
+    }
+    for key in PROPERTY_METRIC_KEYS:
+        if key in metric_keys:
+            row[f"{name}_{key}_{suffix}"] = calculators[key]() if values is not None else ""
 
 
 def _net_cells(cells: pd.DataFrame, settings: IntervalMetricSettings) -> pd.DataFrame:
@@ -589,7 +618,13 @@ def _is_source_diagnostic_column(column_name: str) -> bool:
 
 
 def _additional_property_columns(settings: IntervalMetricSettings, property_columns: list[str]) -> list[str]:
-    base_columns = {settings.ntg_column, settings.poro_column, settings.perm_column}
+    base_columns = {
+        settings.ntg_column,
+        settings.poro_column,
+        settings.perm_column,
+        settings.lithology_column,
+        *(getattr(settings, attribute) for _name, attribute in FIXED_PROPERTY_CHANNELS),
+    }
     return [column for column in property_columns if column and column not in base_columns]
 
 

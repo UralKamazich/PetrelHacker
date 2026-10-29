@@ -421,6 +421,8 @@ def metrics(payload: JsonDict) -> None:
         poro_column=_empty_to_none(payload.get("poroColumn")),
         perm_column=_empty_to_none(payload.get("permColumn")),
         lithology_column=_empty_to_none(payload.get("lithologyColumn")),
+        density_column=_empty_to_none(payload.get("densityColumn")),
+        shmin_column=_empty_to_none(payload.get("shminColumn")),
         reservoir_values={_normalize_value(value) for value in payload.get("reservoirValues") or []},
         property_columns=[str(value) for value in payload.get("propertyColumns") or []],
         metric_keys=[str(value) for value in payload.get("metricKeys") or DEFAULT_METRIC_KEYS],
