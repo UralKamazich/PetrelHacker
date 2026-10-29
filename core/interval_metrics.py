@@ -26,6 +26,11 @@ BASE_EXTRACTION_COLUMNS = {
     "X",
     "Y",
     "TVDSS_PORT",
+    "TVDSS_TOP_TOTAL",
+    "TVDSS_BOT_TOTAL",
+    "TVDSS_TOP_LOCAL",
+    "TVDSS_BOT_LOCAL",
+    "MD",
     "Datum_Z",
     "Depth_KB_PORT",
     "I",
@@ -625,7 +630,11 @@ def _additional_property_columns(settings: IntervalMetricSettings, property_colu
         settings.lithology_column,
         *(getattr(settings, attribute) for _name, attribute in FIXED_PROPERTY_CHANNELS),
     }
-    return [column for column in property_columns if column and column not in base_columns]
+    return [
+        column
+        for column in property_columns
+        if column and column not in base_columns and column not in BASE_EXTRACTION_COLUMNS
+    ]
 
 
 def _metric_key_set(metric_keys: list[str]) -> set[str]:

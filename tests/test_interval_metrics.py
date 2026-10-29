@@ -552,3 +552,31 @@ def test_calculate_interval_metrics_keeps_empty_fixed_channels_and_puts_addition
     assert result.rows[0]["Density_avg_Global"] == ""
     assert result.rows[0]["Shmin_avg_Global"] == ""
     assert columns.index("Shmin_avg_BotTotal_p15m_NonNet") < columns.index("SW_avg_Global")
+
+
+def test_calculate_interval_metrics_ignores_interval_boundary_columns_as_properties() -> None:
+    extracted = pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [110.0],
+            "TVDSS_TOP_LOCAL": [100.0],
+            "TVDSS_BOT_LOCAL": [110.0],
+            "TVD_top": [100.0],
+            "TVD_base": [110.0],
+            "CellHeight": [10.0],
+            "SW": [0.3],
+        }
+    )
+    intervals = extracted[["Well", "Port", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL"]]
+
+    for property_columns in ([], ["SW", "TVDSS_BOT_LOCAL"]):
+        result = calculate_interval_metrics(
+            extracted,
+            intervals,
+            IntervalMetricSettings(property_columns=property_columns, metric_keys=["avg"]),
+        )
+        row = result.rows[0]
+        assert row["SW_avg_Global"] == 0.3
+        assert not any(column.startswith("TVDSS_BOT_LOCAL_") for column in row)

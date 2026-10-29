@@ -25,6 +25,7 @@ const metricOptions = [
 
 const metadataColumns = new Set([
   'Well', 'Port', 'X', 'Y', 'TVDSS_PORT', 'MD', 'Datum_Z', 'Depth_KB_PORT',
+  'TVDSS_TOP_TOTAL', 'TVDSS_BOT_TOTAL', 'TVDSS_TOP_LOCAL', 'TVDSS_BOT_LOCAL',
   'I', 'J', 'K', 'IsActive', 'TVDSS_top', 'TVDSS_base', 'TVDSS_center',
   'TVD_top', 'TVD_base', 'TVD_center', 'Depth_KB_top', 'Depth_KB_base',
   'Depth_KB_center', 'Rel_TVD_top', 'Rel_TVD_base', 'Rel_TVD_center',
