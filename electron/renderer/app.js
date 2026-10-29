@@ -105,6 +105,7 @@ function init() {
   bindNavigation();
   bindActions();
   updateWorkflowSummaries();
+  installPanelHelp();
   window.petrel.onBackendEvent(handleBackendEvent);
 }
 

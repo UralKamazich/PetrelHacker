@@ -46,14 +46,14 @@
           </header>
 
           <div class="layout-grid">
-            <section class="panel span-12">
+            <section class="panel span-12" data-help="models-sources">
               <div class="panel-title">
                 <h3>Sources</h3>
               </div>
               <div class="model-stack" id="model-stack"></div>
             </section>
 
-            <section class="panel span-12">
+            <section class="panel span-12" data-help="models-properties">
               <div class="panel-title">
                 <h3>Properties</h3>
                 <div class="segmented">
@@ -79,7 +79,7 @@
             </div>
           </header>
           <div class="layout-grid wells-layout">
-            <section class="panel wells-source-panel">
+            <section class="panel wells-source-panel" data-help="wells-fraclist">
               <div class="panel-title">
                 <h3>Frac-list</h3>
               </div>
@@ -106,7 +106,7 @@
               </div>
             </section>
 
-            <section class="panel wells-table-panel">
+            <section class="panel wells-table-panel" data-help="wells-table">
               <div class="panel-title">
                 <div>
                   <h3>Wells and sleeves</h3>
@@ -140,7 +140,7 @@
             <button class="primary-action" id="run-extraction">Run extraction</button>
           </header>
           <div class="layout-grid">
-            <section class="panel span-7">
+            <section class="panel span-7" data-help="extract-summary">
               <div class="panel-title"><h3>Input summary</h3></div>
               <div class="extraction-summary-grid">
                 <div><span>Models</span><strong id="extraction-model-count">0</strong></div>
@@ -150,7 +150,7 @@
               </div>
               <div class="extraction-source" id="extraction-source">No frac-list loaded</div>
             </section>
-            <section class="panel span-5">
+            <section class="panel span-5" data-help="extract-options">
               <div class="panel-title">
                 <h3>Run options</h3>
                 <div class="segmented extraction-source-toggle">
@@ -177,14 +177,14 @@
             <button class="primary-action" id="run-metrics">Calculate metrics</button>
           </header>
           <div class="layout-grid">
-            <section class="panel span-6">
+            <section class="panel span-6" data-help="metrics-inputs">
               <div class="panel-title"><h3>Inputs</h3></div>
               <label class="field"><span>Extracted table</span><div class="path-row"><input id="metrics-extracted" type="text"><button class="icon-button" id="browse-metrics-extracted">...</button></div></label>
               <label class="field"><span>Intervals table</span><div class="path-row"><input id="metrics-intervals" type="text"><button class="icon-button" id="browse-metrics-intervals">...</button></div></label>
               <label class="field"><span>Output metrics XLSX</span><div class="path-row"><input id="metrics-output" type="text" placeholder="frac_list_metrics.xlsx"><button class="icon-button" id="browse-metrics-output">...</button></div></label>
               <div class="progress-shell"><div class="progress-bar" id="metrics-progress"></div></div>
             </section>
-            <section class="panel span-6">
+            <section class="panel span-6" data-help="metrics-channels">
               <div class="panel-title"><h3>Channels</h3><button class="soft-button" id="load-metrics-table">Read headers</button></div>
               <div class="form-grid">
                 <label class="field"><span>NTG</span><select id="metrics-ntg"></select></label>
@@ -196,11 +196,11 @@
               </div>
               <label class="field"><span>Reservoir values</span><input id="reservoir-values" type="text" placeholder="1, 2"></label>
             </section>
-            <section class="panel span-6">
+            <section class="panel span-6" data-help="metrics-additional">
               <div class="panel-title"><h3>Additional channels</h3></div>
               <div class="check-grid" id="metrics-properties"></div>
             </section>
-            <section class="panel span-6">
+            <section class="panel span-6" data-help="metrics-set">
               <div class="panel-title"><h3>Metric set</h3></div>
               <div class="check-grid" id="metric-keys"></div>
             </section>
@@ -216,7 +216,7 @@
             <button class="primary-action" id="draw-curves">Draw</button>
           </header>
           <div class="layout-grid">
-            <section class="panel span-6 curves-data-panel">
+            <section class="panel span-6 curves-data-panel" data-help="curves-data">
               <div class="panel-title"><h3>Data</h3><button class="soft-button" id="load-curve-table">Load table</button></div>
               <label class="field"><span>Extracted table</span><div class="path-row"><input id="curve-path" type="text"><button class="icon-button" id="browse-curve-path">...</button></div></label>
               <div class="curve-top-grid">
@@ -253,7 +253,7 @@
             </div>
           </header>
           <div class="layout-grid">
-            <section class="panel span-4 section-data-panel">
+            <section class="panel span-4 section-data-panel" data-help="sections-data">
               <div class="panel-title section-panel-title">
                 <h3>Data</h3>
                 <div class="section-title-actions section-model-controls">
@@ -328,6 +328,7 @@
       </main>
     </div>
     <script src="../../node_modules/plotly.js-dist-min/plotly.min.js"></script>
+    <script src="help.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

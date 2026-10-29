@@ -1270,3 +1270,97 @@ select {
 .section-horizon-item input {
   margin: 0;
 }
+
+.panel[data-help] {
+  position: relative;
+}
+
+.panel[data-help] > .panel-title {
+  padding-right: 30px;
+}
+
+.panel-help-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.panel-help-button:hover {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.help-modal {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.help-modal.wide {
+  width: min(880px, 100%);
+}
+
+.help-body {
+  overflow-y: auto;
+  padding-right: 4px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.help-body h4 {
+  margin: 14px 0 6px;
+  font-size: 14px;
+}
+
+.help-body p,
+.help-body ul,
+.help-body ol {
+  margin: 0 0 8px;
+}
+
+.help-body ul,
+.help-body ol {
+  padding-left: 20px;
+}
+
+.help-body code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #f1f5f9;
+  font-size: 12px;
+}
+
+.help-body table {
+  width: 100%;
+  margin: 4px 0 10px;
+  border-collapse: collapse;
+}
+
+.help-body th,
+.help-body td {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.help-body th {
+  background: #f8fafc;
+}

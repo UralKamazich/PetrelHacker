@@ -1,0 +1,346 @@
+// Panel help: a "?" button is added to every panel with data-help="<key>".
+// Content is static trusted HTML authored here.
+const panelHelp = {
+  'models-sources': {
+    title: 'Models → Sources',
+    body: `
+      <p>Здесь задаются до трёх моделей (M1, M2, M3), из которых будут читаться свойства.</p>
+      <h4>Как заполнить</h4>
+      <ol>
+        <li>Нажмите <b>...</b> у нужного слота и выберите источник:
+          <ul>
+            <li><code>.pet</code> — проект Petrel (читается напрямую);</li>
+            <li><code>.epc</code> — экспорт RESQML (рядом должен лежать <code>.h5</code> с тем же именем);</li>
+            <li>главный <code>.bin</code> Rescue или папку с Rescue-экспортом.</li>
+          </ul>
+        </li>
+        <li>Если в проекте Petrel несколько гридов, появится список <b>Petrel model</b> — выберите нужную модель. Под ним показано, сколько свойств в выбранной модели и всего в проекте.</li>
+        <li><b>Depth shift, m</b> — сдвиг глубин модели в метрах (например, чтобы согласовать модели с разными отметками). По умолчанию 0.</li>
+        <li>Нажмите <b>Load models</b> в правом верхнем углу экрана. После загрузки появятся свойства в карточке <b>Properties</b>, а в логе — сводка по каждой модели (размер грида, размеры ячеек, траектории).</li>
+      </ol>
+      <h4>Советы</h4>
+      <ul>
+        <li><b>x</b> очищает слот. Пустые слоты просто пропускаются.</li>
+        <li>Если одно и то же свойство выбрано из нескольких моделей, в выгрузке колонки получат префиксы <code>M1_</code>, <code>M2_</code>, <code>M3_</code>.</li>
+        <li>Пути и выбор сохраняются между запусками приложения.</li>
+      </ul>`
+  },
+  'models-properties': {
+    title: 'Models → Properties',
+    body: `
+      <p>Список свойств (кубов) загруженных моделей. Отмеченные свойства будут выгружены на шаге <b>Extraction</b>.</p>
+      <ul>
+        <li>Свойства сгруппированы по моделям и папкам проекта Petrel.</li>
+        <li><b>All</b> / <b>None</b> — отметить или снять все свойства.</li>
+        <li>Выбирайте только то, что понадобится для метрик и QC: каждое свойство добавляет колонки в выгрузку и время расчёта.</li>
+        <li>Типовой набор для метрик: NTG, PORO, PERM, литология/фации, Density, Shmin.</li>
+      </ul>
+      <h4>Преобразования при чтении</h4>
+      <ul>
+        <li>Проницаемость (в названии есть <code>perm</code>) переводится в мД.</li>
+        <li>Плотность из Rescue умножается на 1000, чтобы совпадать с RESQML (~2500).</li>
+        <li>Служебные значения NoData выгружаются пустыми ячейками.</li>
+      </ul>`
+  },
+  'wells-fraclist': {
+    title: 'Wells → Frac-list',
+    body: `
+      <p>Загрузка таблицы муфт ГРП (frac-list) и сопоставление её колонок с полями программы.</p>
+      <h4>Порядок</h4>
+      <ol>
+        <li>Нажмите <b>...</b> и выберите файл XLSX или CSV.</li>
+        <li>В блоке <b>Required column mapping</b> для каждого поля выберите колонку из файла:
+          <ul>
+            <li><b>Well *</b> — скважина (обязательно);</li>
+            <li><b>Port *</b> — номер муфты/порта/стадии (обязательно);</li>
+            <li><b>X</b>, <b>Y</b> — координаты муфты;</li>
+            <li><b>TVDSS_PORT</b> — абсолютная глубина муфты;</li>
+            <li><b>MD</b> — глубина по стволу (нужна для расчёта X/Y по траектории и для выгрузки из Section workspace).</li>
+          </ul>
+        </li>
+        <li>Нажмите <b>Load frac-list</b> вверху экрана.</li>
+      </ol>
+      <p>Счётчики внизу: <b>Rows</b> — строк в файле, <b>Wells</b> — скважин, <b>Selected</b> — отмечено скважин, <b>Coordinates</b> — у скольких муфт есть X/Y.</p>
+      <h4>Расчёт X/Y по траектории</h4>
+      <p>Если в файле нет координат, но есть MD: назначьте скважинам траектории в таблице справа и нажмите <b>Calculate and save X/Y</b>. Координаты будут рассчитаны по MD и записаны прямо в файл frac-list. Флажок <b>Overwrite all X/Y</b> перезаписывает и уже заполненные координаты; без него заполняются только пустые.</p>
+      <p>Названия скважин нормализуются: кириллица и латиница одинакового вида (<code>6А031</code> / <code>6A031</code>) считаются одним именем.</p>`
+  },
+  'wells-table': {
+    title: 'Wells → Wells and sleeves',
+    body: `
+      <p>Таблица скважин из frac-list: выбор скважин для расчёта и привязка к траекториям моделей.</p>
+      <h4>Колонки</h4>
+      <ul>
+        <li><b>Флажок</b> — скважина участвует в выгрузке, разрезах и расчёте X/Y.</li>
+        <li><b>Sleeves</b> — число муфт; <b>X/Y</b> — сколько муфт имеют координаты (оранжевым — если не у всех).</li>
+        <li><b>Model</b> — модель, из которой брать траекторию. При выборе модели траектория с тем же именем подставляется автоматически.</li>
+        <li><b>Trajectory</b> — траектория скважины в модели; выберите вручную, если имена не совпали.</li>
+        <li><b>Max angle</b>, <b>Azimuth 500 m</b>, <b>Bottom MD</b> — максимальный зенитный угол, азимут последних 500 м и забой по MD. Удобно для контроля, что выбрана правильная траектория.</li>
+      </ul>
+      <h4>Кнопки</h4>
+      <ul>
+        <li>Поле поиска фильтрует список по имени скважины.</li>
+        <li><b>All</b> / <b>None</b> — выбрать все или снять выбор.</li>
+        <li><b>Save JSON</b> сохраняет привязки скважин к траекториям и выбор скважин в файл; <b>Load JSON</b> восстанавливает их. Удобно, если работаете с тем же месторождением повторно.</li>
+      </ul>`
+  },
+  'extract-summary': {
+    title: 'Extraction → Input summary',
+    body: `
+      <p>Сводка того, что пойдёт в выгрузку: число моделей, выбранных свойств, скважин и муфт, а также имя загруженного frac-list.</p>
+      <p>Если какое-то число равно 0 — вернитесь на соответствующий шаг:</p>
+      <ul>
+        <li><b>Models / Properties</b> — экран Models (загрузите модели и отметьте свойства);</li>
+        <li><b>Wells / Sleeves</b> — экран Wells (загрузите frac-list и отметьте скважины).</li>
+      </ul>`
+  },
+  'extract-options': {
+    title: 'Extraction → Run options',
+    body: `
+      <p>Выгрузка свойств по вертикали через каждую муфту. Для каждой муфты по X/Y находится колонка ячеек модели, и по всем ячейкам этой колонки записываются глубины и значения выбранных свойств.</p>
+      <h4>Источник данных</h4>
+      <ul>
+        <li><b>Models</b> — читать свойства прямо из моделей по координатам X/Y муфт.</li>
+        <li><b>Section workspace</b> — брать данные из сохранённых разрезов (экран Sections → Save). Требует MD у муфт. Ниже показано, найден ли сохранённый workspace для текущего frac-list.</li>
+      </ul>
+      <h4>Параметры</h4>
+      <ul>
+        <li><b>Skip inactive cells</b> — не выгружать неактивные ячейки грида.</li>
+        <li><b>Write property diagnostics</b> — для каждого свойства дописывать колонки <code>_Model</code>, <code>_I/_J/_K</code>, <code>_TVD_center</code>, <code>_Depth_KB</code>. Полезно для проверки, но файл становится шире; для финальной выгрузки можно отключить.</li>
+        <li><b>Parallel workers</b> — число параллельных потоков расчёта (1–32). Запись файла всё равно идёт в одном потоке.</li>
+        <li><b>Output XLSX / CSV</b> — имя выходного файла. Если строк больше лимита Excel (~1 млн), файл автоматически сохраняется как CSV с предупреждением в логе.</li>
+      </ul>
+      <p>Нажмите <b>Run extraction</b>. После завершения путь к выгрузке автоматически подставится на экранах <b>Metrics</b> и <b>Curves / QC</b>.</p>`
+  },
+  'metrics-inputs': {
+    title: 'Metrics → Inputs',
+    body: `
+      <p>Файлы для расчёта интервальных метрик.</p>
+      <ul>
+        <li><b>Extracted table</b> — выгрузка ячеек с экрана Extraction (подставляется автоматически). Обязательные колонки: <code>Well</code>, <code>Port</code>, <code>TVD_top</code>, <code>TVD_base</code>, <code>CellHeight</code>.</li>
+        <li><b>Intervals table</b> — таблица интервалов, обычно это frac-list с границами, сохранёнными на экране Sections. Обязательные колонки:
+          <code>Well</code>, <code>Port</code>, <code>TVDSS_TOP_TOTAL</code>, <code>TVDSS_BOT_TOTAL</code>, <code>TVDSS_TOP_LOCAL</code>, <code>TVDSS_BOT_LOCAL</code>.</li>
+        <li><b>Output metrics XLSX</b> — имя файла результата; сохраняется в папку таблицы интервалов. По умолчанию <code>&lt;имя интервалов&gt;_metrics.xlsx</code>.</li>
+      </ul>
+      <p>Ячейки сопоставляются с интервалом по <code>Well</code> + <code>Port</code>; если не нашлись — по X/Y (с точностью 0.001 м). Названия «Скважина», «Муфта», «Порт», «Стадия» распознаются автоматически.</p>
+      <p>Рядом с результатом пишется файл <code>.txt</code> с описанием расчёта: какие каналы выбраны, формулы и все предупреждения.</p>
+      <p>Подробное описание интервалов и метрик — в справке карточки <b>Metric set</b>.</p>`
+  },
+  'metrics-channels': {
+    title: 'Metrics → Channels',
+    body: `
+      <p>Фиксированные каналы. Здесь вы указываете, какая колонка выгрузки является NTG, PORO и т.д. В результате колонки <b>всегда называются одинаково</b> (<code>NTG_…</code>, <code>PORO_…</code>, <code>Density_…</code>, <code>Shmin_…</code>), независимо от того, как свойство называлось в модели. Поэтому файлы метрик разных моделей можно собирать в одну таблицу — колонки совпадут.</p>
+      <h4>Порядок</h4>
+      <ol>
+        <li>Нажмите <b>Read headers</b> — списки заполнятся колонками выгрузки, и программа попробует угадать каналы по названию.</li>
+        <li>Проверьте и при необходимости поправьте выбор в каждом списке. Пустое значение = канал не используется.</li>
+      </ol>
+      <h4>Каналы</h4>
+      <ul>
+        <li><b>NTG</b> — песчанистость; используется как вес в NetThickness, KH, PHIH и для определения Net (NTG &gt; 0).</li>
+        <li><b>PORO</b> — пористость. Если NTG не выбран, NTG заменяется маской PORO &gt; 0 (1 или 0).</li>
+        <li><b>PERM</b> — проницаемость. Если не выбрана, берётся первая колонка, в имени которой есть <code>perm</code>.</li>
+        <li><b>Lithology</b> — литология/фации; работает вместе с <b>Reservoir values</b>.</li>
+        <li><b>Density</b>, <b>Shmin</b> — считаются по набору «Additional» метрик (avg, median, min, max…) и пишутся как <code>Density_&lt;метрика&gt;_&lt;интервал&gt;</code>, <code>Shmin_&lt;метрика&gt;_&lt;интервал&gt;</code>. Если канал не выбран, колонки всё равно создаются пустыми — структура файла не меняется.</li>
+      </ul>
+      <h4>Reservoir values</h4>
+      <p>Коды литологии, которые считаются коллектором, через запятую, например <code>1, 2</code>. Если заданы литология и коды — Net определяется по литологии (это приоритетнее NTG и PORO).</p>
+      <p>Колонки, выбранные здесь, не считаются повторно в Additional channels.</p>`
+  },
+  'metrics-additional': {
+    title: 'Metrics → Additional channels',
+    body: `
+      <p>Любые другие свойства из выгрузки, по которым нужно посчитать статистику (например, модуль Юнга, Пуассон, UCS).</p>
+      <ul>
+        <li>Список заполняется после <b>Read headers</b> в карточке Channels. Показываются только свойства, выбранные на экране Models (служебные и диагностические колонки скрыты).</li>
+        <li>Колонки называются по исходному имени: <code>&lt;свойство&gt;_&lt;метрика&gt;_&lt;интервал&gt;</code>, например <code>M1_YME_STA_avg_Global</code>. Поэтому у разных моделей они могут отличаться — если канал нужен во всех моделях одинаково, его лучше сделать фиксированным.</li>
+        <li>В файле результата дополнительные каналы стоят <b>справа</b> от фиксированных (NTG/PORO/PERM → Density → Shmin → дополнительные).</li>
+        <li>Каждый канал даёт до 11 метрик × 15 интервалов = 165 колонок. Отмечайте только нужное.</li>
+      </ul>`
+  },
+  'metrics-set': {
+    title: 'Metrics → Metric set: расписание метрик',
+    wide: true,
+    body: `
+      <p>Здесь выбирается, какие метрики считать. Ниже — полное описание: по каким интервалам, по каким ячейкам и по каким формулам считается каждая колонка.</p>
+
+      <h4>1. Интервалы (5 штук)</h4>
+      <p>Границы берутся из таблицы интервалов (Intervals table) для каждой муфты:</p>
+      <table>
+        <tr><th>Суффикс</th><th>От</th><th>До</th></tr>
+        <tr><td><code>Global</code></td><td>TVDSS_TOP_TOTAL</td><td>TVDSS_BOT_TOTAL</td></tr>
+        <tr><td><code>Local</code></td><td>TVDSS_TOP_LOCAL</td><td>TVDSS_BOT_LOCAL</td></tr>
+        <tr><td><code>Total_pm15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
+        <tr><td><code>TopTotal_m15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_TOP_TOTAL</td></tr>
+        <tr><td><code>BotTotal_p15m</code></td><td>TVDSS_BOT_TOTAL</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
+      </table>
+      <p>Global и Local — это пласт целиком и пропласток у муфты (задаются на экране Sections точками TT/BT и TL/BL). Три интервала по 15 м — окружение пласта: всё вместе, кровля и подошва (покрышки).</p>
+      <p>Ячейки, частично попадающие в интервал, учитываются только своей частью: <b>h</b> = мощность пересечения ячейки с интервалом.</p>
+
+      <h4>2. Выборки внутри интервала (×3)</h4>
+      <table>
+        <tr><th>Суффикс</th><th>Какие ячейки</th></tr>
+        <tr><td><i>(без суффикса)</i></td><td>все ячейки интервала</td></tr>
+        <tr><td><code>_Net</code></td><td>коллектор</td></tr>
+        <tr><td><code>_NonNet</code></td><td>всё, что не вошло в Net</td></tr>
+      </table>
+      <p>Как определяется Net (по приоритету):</p>
+      <ol>
+        <li>выбраны Lithology и Reservoir values → ячейки с литологией из списка кодов;</li>
+        <li>иначе выбран NTG → ячейки с NTG &gt; 0;</li>
+        <li>иначе выбран PORO → ячейки с PORO &gt; 0;</li>
+        <li>иначе все ячейки считаются Net (в логе будет предупреждение).</li>
+      </ol>
+      <p>Итого 5 интервалов × 3 выборки = <b>15 суффиксов</b> на каждую метрику, например
+        <code>PORO_avg_Global</code>, <code>PORO_avg_Global_Net</code>, <code>PORO_avg_Global_NonNet</code>, <code>PORO_avg_Local</code>, …</p>
+
+      <h4>3. Имена колонок</h4>
+      <p><code>&lt;Канал&gt;_&lt;метрика&gt;_&lt;интервал&gt;[_Net|_NonNet]</code></p>
+      <p>Порядок колонок в файле: сначала все колонки таблицы интервалов (Well, Port, X, Y, границы…), затем базовые метрики (Thickness … PHIH) по всем 15 суффиксам, затем <code>Density_*</code>, затем <code>Shmin_*</code>, затем дополнительные каналы. Старые колонки метрик, если они были в таблице интервалов, удаляются и считаются заново.</p>
+
+      <h4>4. Базовые метрики (каналы NTG / PORO / PERM)</h4>
+      <table>
+        <tr><th>Галочка</th><th>Колонка</th><th>Формула</th></tr>
+        <tr><td>Thickness</td><td><code>Thickness_*</code></td><td>Σ h — мощность интервала</td></tr>
+        <tr><td>Net thickness</td><td><code>NetThickness_*</code></td><td>Σ (h · NTG). Не пишется для суффиксов <code>_Net</code>. Без NTG — маска PORO &gt; 0; без обоих — пусто</td></tr>
+        <tr><td>NTG avg</td><td><code>NTG_avg_*</code></td><td>Σ (NTG · h) / Σ h</td></tr>
+        <tr><td>NTG median</td><td><code>NTG_median_*</code></td><td>медиана NTG по ячейкам (без веса)</td></tr>
+        <tr><td>PORO avg</td><td><code>PORO_avg_*</code></td><td>Σ (PORO · h) / Σ h</td></tr>
+        <tr><td>PORO median</td><td><code>PORO_median_*</code></td><td>медиана PORO</td></tr>
+        <tr><td>PERM arithmetic avg</td><td><code>PERM_avg_arith_*</code></td><td>Σ (PERM · h) / Σ h</td></tr>
+        <tr><td>PERM geometric avg</td><td><code>PERM_avg_geom_*</code></td><td>exp(Σ (ln PERM · h) / Σ h), только PERM &gt; 0</td></tr>
+        <tr><td>PERM median</td><td><code>PERM_median_*</code></td><td>медиана PERM</td></tr>
+        <tr><td>KH</td><td><code>KH_*</code></td><td>Σ (PERM · h · NTG); без NTG — маска PORO &gt; 0; без PORO множитель 1</td></tr>
+        <tr><td>PHIH</td><td><code>PHIH_*</code></td><td>Σ (PORO · h · NTG); правила те же, что у KH</td></tr>
+      </table>
+
+      <h4>5. Метрики Density, Shmin и дополнительных каналов</h4>
+      <p>Галочки «Additional: …» применяются ко всем каналам этого типа: Density, Shmin и выбранным в Additional channels. Обозначение <i>value</i> — значение канала в ячейке.</p>
+      <table>
+        <tr><th>Галочка</th><th>Колонка</th><th>Формула</th></tr>
+        <tr><td>avg</td><td><code>&lt;канал&gt;_avg_*</code></td><td>Σ (value · h) / Σ h — средневзвешенное по мощности</td></tr>
+        <tr><td>arithmetic mean</td><td><code>&lt;канал&gt;_mean_arith_*</code></td><td>то же, что avg (Σ (value · h) / Σ h)</td></tr>
+        <tr><td>geometric mean</td><td><code>&lt;канал&gt;_geom_*</code></td><td>exp(Σ (ln value · h) / Σ h), только value &gt; 0</td></tr>
+        <tr><td>median</td><td><code>&lt;канал&gt;_median_*</code></td><td>медиана (без веса)</td></tr>
+        <tr><td>min / max</td><td><code>&lt;канал&gt;_min_*</code>, <code>_max_*</code></td><td>минимум / максимум</td></tr>
+        <tr><td>integral</td><td><code>&lt;канал&gt;_integral_*</code></td><td>Σ (value · h)</td></tr>
+        <tr><td>min*</td><td><code>&lt;канал&gt;_min_star_*</code></td><td>среднее нижних 10 % значений после удаления выбросов (правило 1.5 · IQR)</td></tr>
+        <tr><td>max*</td><td><code>&lt;канал&gt;_max_star_*</code></td><td>среднее верхних 10 % значений после удаления выбросов</td></tr>
+        <tr><td>std</td><td><code>&lt;канал&gt;_std_*</code></td><td>стандартное отклонение, взвешенное по h</td></tr>
+        <tr><td>delta</td><td><code>&lt;канал&gt;_delta_*</code></td><td>max* − min* — устойчивый размах (контраст)</td></tr>
+      </table>
+
+      <h4>6. Обработка данных</h4>
+      <ul>
+        <li>Пустые и нечисловые значения не участвуют в статистике.</li>
+        <li>Если в выборке нет валидных значений — ячейка результата пустая (Thickness, integral, KH, PHIH в этом случае = 0).</li>
+        <li>median, min, max, min*, max* не взвешиваются по мощности; остальные метрики используют h.</li>
+        <li>Если для муфты не нашлось ячеек или нет границ интервала — строка остаётся, метрики пустые, причина пишется в лог и в <code>.txt</code>.</li>
+      </ul>
+
+      <h4>7. Сколько будет колонок</h4>
+      <p>Каждая отмеченная метрика даёт 15 колонок на канал. Пример: 11 базовых метрик = до 165 колонок; Density + Shmin по 11 метрик = 330 колонок; каждый дополнительный канал — ещё до 165. Если нужен компактный файл — оставьте только нужные галочки (например avg, median, min*, max*, delta).</p>`
+  },
+  'curves-data': {
+    title: 'Curves / QC → Data',
+    body: `
+      <p>Просмотр выгрузки в виде каротажных кривых по одной муфте — для проверки свойств и границ.</p>
+      <ol>
+        <li><b>Extracted table</b> — выгрузка с экрана Extraction (подставляется автоматически). Нажмите <b>Load table</b>.</li>
+        <li>Выберите <b>Well</b> и <b>Port</b>.</li>
+        <li>Выберите до четырёх каналов (<b>Channel 1–4</b>). Для каждого можно задать шкалу <b>Min/Max</b> (пусто = автоматически) и сдвиг по глубине <b>Shift m</b>.</li>
+        <li><b>Draw</b> перерисовывает график.</li>
+      </ol>
+      <h4>Depth mode</h4>
+      <ul>
+        <li><b>Common grid</b> — все каналы на общей сетке глубин выгрузки (<code>TVD_top</code>).</li>
+        <li><b>Individual cell</b> — каждый канал по глубине центров своих исходных ячеек (<code>&lt;канал&gt;_TVD_center</code>, нужны диагностические колонки). Удобно для сравнения разных моделей/форматов.</li>
+      </ul>
+      <p><b>Depth min/max</b> задают диапазон глубин. Масштаб можно менять и мышью прямо на графике — значения в полях обновятся. Если в выгрузке есть границы интервалов, они рисуются горизонтальными линиями.</p>`
+  },
+  'sections-data': {
+    title: 'Sections → Data',
+    wide: true,
+    body: `
+      <p>Разрез модели вдоль траектории скважины и расстановка границ интервалов для метрик (Global/Local).</p>
+      <h4>Источник</h4>
+      <ul>
+        <li><b>New section</b> — построить новый разрез из загруженных моделей.</li>
+        <li><b>Saved sections</b> — открыть ранее сохранённые разрезы (section workspace) без загрузки моделей.</li>
+      </ul>
+      <h4>Построение разреза</h4>
+      <ol>
+        <li><b>Load selected wells</b> — загрузить траектории скважин, отмеченных на экране Wells; <b>Load all wells</b> — все траектории моделей.</li>
+        <li>Выберите <b>Well trajectory</b> и <b>Property</b>. Для авторасстановки границ берите свойство, где коллектор ≠ 0 (NTG, литология, PORO).</li>
+        <li><b>Named surfaces</b> — отметьте поверхности, которые нужно показать на разрезе.</li>
+        <li><b>Sample step, m</b> — шаг отбора вдоль ствола. <b>Skip inactive cells</b> — не показывать неактивные ячейки.</li>
+        <li>Нажмите <b>Draw section</b>. Повторно открытые разрезы берутся из кэша мгновенно.</li>
+      </ol>
+      <h4>Отображение</h4>
+      <ul>
+        <li><b>Depth min/max</b>, <b>Value min/max</b> — диапазон глубин и цветовой шкалы.</li>
+        <li><b>X axis</b> — горизонтальное расстояние, 3D-расстояние вдоль ствола или MD.</li>
+        <li>Колесо мыши — масштаб; перетаскивание по осям: середина оси сдвигает, края оси растягивают. Наведение на ячейку показывает её значения под графиком.</li>
+      </ul>
+      <h4>Границы интервалов</h4>
+      <ul>
+        <li><b>Auto boundaries</b> — для каждой муфты по колонке разреза находятся тела коллектора (значение свойства ≠ 0):
+          <ul>
+            <li><b>TT/BT</b> (Global) — кровля первого и подошва последнего тела;</li>
+            <li><b>TL/BL</b> (Local) — тело, ближайшее к муфте;</li>
+            <li><b>Boundary gap, m</b> — неколлектор тоньше этого значения внутри тела считается частью тела (склейка);</li>
+            <li><b>Min layer, m</b> — коллектор тоньше этого значения отбрасывается.</li>
+          </ul>
+        </li>
+        <li><b>Add local barrier points</b> — дополнительно ставит <b>TB/BB</b>: внешние границы непродуктивных барьеров над и под локальным телом (и их мощность).</li>
+        <li>Любую точку можно перетащить мышью по вертикали. <b>Show boundary points</b> скрывает/показывает точки.</li>
+        <li><b>Boundary file</b> — имя файла, куда сохраняются границы; по умолчанию <code>&lt;frac-list&gt;_boundaries.xlsx</code> рядом с frac-list (копия frac-list с колонками <code>TVDSS_TOP/BOT_TOTAL</code>, <code>TVDSS_TOP/BOT_LOCAL</code> и барьерами).</li>
+        <li><b>Save</b> — записать границы текущей скважины, сохранить разрез в workspace и PNG рядом. Этот файл автоматически становится таблицей интервалов на экране Metrics. Если для какой-то муфты не заданы Global-границы — появится предупреждение.</li>
+        <li><b>Clear cache</b> — удалить кэш разрезов (если модель изменилась).</li>
+      </ul>
+      <p>Вверху экрана: <b>Save PNG</b> — сохранить картинку разреза, <b>Copy image</b> — скопировать её в буфер обмена.</p>`
+  }
+};
+
+function installPanelHelp() {
+  document.querySelectorAll('[data-help]').forEach(panel => {
+    const help = panelHelp[panel.dataset.help];
+    if (!help || panel.querySelector(':scope > .panel-help-button')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'panel-help-button';
+    button.textContent = '?';
+    button.title = 'Справка';
+    button.setAttribute('aria-label', `Справка: ${help.title}`);
+    button.addEventListener('click', () => showPanelHelp(help));
+    panel.appendChild(button);
+  });
+}
+
+function showPanelHelp(help) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-card help-modal${help.wide ? ' wide' : ''}" role="dialog" aria-modal="true">
+      <div class="modal-title-row">
+        <div class="modal-title"></div>
+        <button class="icon-button" type="button" aria-label="Закрыть">x</button>
+      </div>
+      <div class="help-body">${help.body}</div>
+    </div>
+  `;
+  overlay.querySelector('.modal-title').textContent = help.title;
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = event => {
+    if (event.key === 'Escape') close();
+  };
+  overlay.querySelector('.icon-button').addEventListener('click', close);
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+}
