@@ -39,7 +39,7 @@ class _ModelReader:
 def test_load_models_returns_selected_internal_grid(monkeypatch):
     reader = _ModelReader()
     events = []
-    monkeypatch.setattr(cli, "open_model_reader", lambda _path: reader)
+    monkeypatch.setattr(cli, "open_model_reader", lambda _path, progress=None: reader)
     monkeypatch.setattr(cli, "_emit", lambda event, **payload: events.append((event, payload)))
 
     cli.load_models(

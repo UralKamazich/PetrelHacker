@@ -240,34 +240,28 @@ function renderModels() {
   state.models.forEach((model, index) => {
     const grids = Array.isArray(model.internalGrids) ? model.internalGrids : [];
     const selectedGrid = grids.find(grid => grid.uuid === model.gridUuid) || null;
-    const gridSelect = grids.length > 1 ? `
-      <label class="field model-grid-field">
-        <span>Petrel model</span>
-        <select data-model-grid="${index}">
-          <option value="" ${model.gridUuid ? '' : 'selected'}>Select Petrel model</option>
-          ${grids.map(grid => `<option value="${escapeHtml(grid.uuid)}" ${grid.uuid === model.gridUuid ? 'selected' : ''}>${escapeHtml(gridLabel(grid))}</option>`).join('')}
-        </select>
-      </label>
+    const projectSummary = `${grids.length} Petrel models, ${Number(model.propertyCount || 0)} properties in project`;
+    const gridSelect = model.path && grids.length > 1 ? `
+      <select class="model-grid-select" data-model-grid="${index}" title="${escapeHtml(selectedGrid ? `${gridTooltip(selectedGrid)}\n${projectSummary}` : projectSummary)}">
+        <option value="" ${model.gridUuid ? '' : 'selected'}>Select Petrel model</option>
+        ${grids.map(grid => `<option value="${escapeHtml(grid.uuid)}" title="${escapeHtml(gridTooltip(grid))}" ${grid.uuid === model.gridUuid ? 'selected' : ''}>${escapeHtml(gridLabel(grid))}</option>`).join('')}
+      </select>
     ` : '';
-    const sourceNote = model.sourceKind === 'petrel-project'
-      ? `<div class="model-source-note">${grids.length} Petrel model(s), ${selectedGrid ? `${Number(selectedGrid.propertyCount || 0)} in selected / ` : ''}${Number(model.propertyCount || 0)} properties total</div>`
-      : '';
     const card = document.createElement('div');
     card.className = `model-card${gridSelect ? ' has-grid-select' : ''}`;
     card.innerHTML = `
       <div class="model-badge">${model.label}</div>
-      <div class="model-path-stack">
-        <label class="field"><span>Model file / folder</span><input type="text" value="${escapeHtml(model.path)}" data-model-path="${index}" placeholder="Select .pet, .epc, Rescue .bin, or folder"></label>
-        ${gridSelect}
-        ${sourceNote}
-      </div>
-      <label class="field"><span>Depth shift, m</span><input type="number" step="0.1" value="${model.depthOffset}" data-model-offset="${index}"></label>
+      <input class="model-path" type="text" value="${escapeHtml(model.path)}" data-model-path="${index}" title="${escapeHtml(model.path)}" placeholder="Select .pet, .epc, Rescue .bin, or folder">
+      ${gridSelect}
+      <label class="model-offset" title="Depth shift, m"><span>Δz</span><input type="number" step="0.1" value="${model.depthOffset}" data-model-offset="${index}"></label>
       <button class="icon-button" data-model-browse="${index}" type="button" title="Select model">...</button>
       <button class="icon-button model-clear-button" data-model-clear="${index}" type="button" title="Clear model" aria-label="Clear ${escapeHtml(model.label)}">x</button>
     `;
     root.appendChild(card);
   });
   root.querySelectorAll('[data-model-path]').forEach(input => {
+    // Show the end of long paths (file name) rather than the common prefix.
+    input.scrollLeft = input.scrollWidth;
     input.addEventListener('input', () => {
       state.models[Number(input.dataset.modelPath)].path = input.value;
       saveState();
@@ -368,25 +362,75 @@ async function inspectModelSource(index) {
 
 function gridLabel(grid) {
   const title = grid.title || grid.uuid || 'Petrel model';
-  const type = grid.gridType || grid.grid_type || '';
-  const shape = [grid.ni, grid.nj, grid.nk].every(value => value)
-    ? ` ${grid.ni} x ${grid.nj} x ${grid.nk}`
-    : '';
-  const propertyNames = Array.isArray(grid.propertyNames) ? grid.propertyNames : [];
-  const propertyCount = Number.isFinite(Number(grid.propertyCount))
-    ? Number(grid.propertyCount)
-    : propertyNames.length;
-  const examples = propertyNames.slice(0, 5).join(', ');
-  const propertySummary = ` - ${propertyCount} propert${propertyCount === 1 ? 'y' : 'ies'}${examples ? `: ${examples}${propertyNames.length > 5 ? ', ...' : ''}` : ''}`;
-  return `${title}${type ? ` - ${type}` : ''}${shape}${propertySummary}`;
+  const shape = [grid.ni, grid.nj, grid.nk].every(value => value) ? ` · ${grid.ni}×${grid.nj}×${grid.nk}` : '';
+  return `${title}${shape} · ${gridPropertyCount(grid)} props`;
+}
+
+function gridTooltip(grid) {
+  const names = Array.isArray(grid.propertyNames) ? grid.propertyNames : [];
+  const examples = names.slice(0, 8).join(', ');
+  return `${gridLabel(grid)}${examples ? `\n${examples}${names.length > 8 ? ', ...' : ''}` : ''}`;
+}
+
+function gridPropertyCount(grid) {
+  const names = Array.isArray(grid.propertyNames) ? grid.propertyNames : [];
+  return Number.isFinite(Number(grid.propertyCount)) ? Number(grid.propertyCount) : names.length;
+}
+
+// Load models progress: each phase owns a share of the bar and backend
+// progress events (real completed steps) are mapped into it.
+function setModelsPhase(start, end, label) {
+  state.modelsProgressPhase = { start, end, label };
+  setModelsProgress(start, label);
+}
+
+function setModelsProgress(value, label) {
+  setProgress('models-progress', value);
+  if ($('models-progress-label')) $('models-progress-label').textContent = label || '';
+}
+
+function updateModelsPhaseFromBackend(message) {
+  const phase = state.modelsProgressPhase;
+  if (!phase) return;
+  const fraction = Math.max(0, Math.min(100, Number(message.value) || 0)) / 100;
+  const detail = message.message ? `${phase.label}: ${message.message}` : phase.label;
+  setModelsProgress(phase.start + (phase.end - phase.start) * fraction, detail);
+}
+
+function isModelLoaded(requested) {
+  return state.loadedModels.some(loaded => loaded.label === requested.label
+    && loaded.path === requested.path
+    && (!requested.gridUuid || requested.gridUuid === loaded.gridUuid));
 }
 
 async function loadModels() {
   setBusy('Loading models', 'Reading properties, wells, and named surfaces');
   try {
-    const result = await window.petrel.run('load-models', { models: requestModels() });
-    state.loadedModels = result.models || [];
-    state.loadedModels.forEach(loaded => {
+    // Only new or changed models are read; already loaded ones are kept.
+    // With nothing changed, all models are re-read (refresh).
+    const requested = requestModels();
+    let toLoad = requested.filter(model => !isModelLoaded(model));
+    const refreshAll = !toLoad.length;
+    if (refreshAll) toLoad = requested;
+    const kept = refreshAll ? [] : state.loadedModels.filter(loaded => requested.some(model => model.label === loaded.label)
+      && !toLoad.some(model => model.label === loaded.label));
+    kept.forEach(loaded => {
+      const model = requested.find(item => item.label === loaded.label);
+      loaded.depthOffset = model.depthOffset;
+    });
+    // Models that were loaded before and are now replaced or removed.
+    const droppedModels = refreshAll ? state.loadedModels : state.loadedModels.filter(loaded => !kept.includes(loaded));
+    const changedLabels = refreshAll ? null : new Set(state.loadedModels
+      .filter(loaded => !kept.includes(loaded))
+      .map(loaded => loaded.label)
+      .concat(toLoad.map(model => model.label)));
+    if (kept.length) appendLog(`Keeping loaded models: ${kept.map(model => model.label).join(', ')}`);
+    setModelsPhase(0, 70, `Loading ${toLoad.map(model => model.label).join(', ')}`);
+    const result = await window.petrel.run('load-models', { models: toLoad });
+    const order = state.models.map(model => model.label);
+    state.loadedModels = kept.concat(result.models || [])
+      .sort((left, right) => order.indexOf(left.label) - order.indexOf(right.label));
+    (result.models || []).forEach(loaded => {
       const model = state.models.find(item => item.label === loaded.label);
       if (model) {
         if (loaded.path) model.path = loaded.path;
@@ -400,15 +444,18 @@ async function loadModels() {
     renderProperties();
     if (state.sectionSource === 'models') renderSectionModels();
     const loadedTrajectories = await loadSectionTrajectoriesFromModels(state.loadedModels);
-    state.sectionMemoryCache.clear();
-    reconcileWellAssignmentsWithLoadedModels();
+    if (droppedModels.length) state.sectionMemoryCache.clear();
+    reconcileWellAssignmentsWithLoadedModels(changedLabels);
     ensureWellAssignments();
     if (!sectionContextExistsInLoadedModels(loadedTrajectories)) clearRenderedSection();
     state.sectionTrajectories = state.sectionUseExtractionSelection
       ? await resolveSectionTrajectoriesFromExtraction(loadedTrajectories, sectionExtractionWellNames())
       : loadedTrajectories;
+    setModelsPhase(70, 75, 'Saved sections index');
     await recoverSectionCacheIndex();
-    await refreshWellTrajectoryAnalyses();
+    setModelsPhase(75, 97, 'Analyzing frac-list well trajectories');
+    await refreshWellTrajectoryAnalyses(wellsWithoutTrajectoryAnalysis());
+    setModelsPhase(97, 100, 'Saved section boundaries');
     await refreshSectionSavedWellsFromBoundaryFile();
     if (state.sectionSource === 'workspace') renderWorkspaceSectionSelectors();
     else fillSectionWells(state.sectionTrajectories);
@@ -417,8 +464,15 @@ async function loadModels() {
     const surfaceCount = sectionHorizonOptions().length;
     $('section-summary').textContent = `Wells: ${state.sectionTrajectories.length}, surfaces: ${surfaceCount}`;
     saveState();
-    setReady(`Loaded ${state.loadedModels.length} model(s), ${state.sectionTrajectories.length} wells, ${surfaceCount} surfaces`);
+    const loadedNote = refreshAll ? 'reloaded all' : `loaded ${toLoad.map(model => model.label).join(', ')}`;
+    const summary = `Loaded ${state.loadedModels.length} model(s) (${loadedNote}), ${state.sectionTrajectories.length} wells, ${surfaceCount} surfaces`;
+    state.modelsProgressPhase = null;
+    setModelsProgress(100, summary);
+    setReady(summary);
   } catch (error) {
+    const phase = state.modelsProgressPhase;
+    state.modelsProgressPhase = null;
+    if ($('models-progress-label')) $('models-progress-label').textContent = `Failed${phase ? ` during: ${phase.label}` : ''}`;
     fail(error);
   }
 }
@@ -719,11 +773,14 @@ function ensureWellAssignments() {
   });
 }
 
-function reconcileWellAssignmentsWithLoadedModels() {
+// changedLabels: models that were (re)loaded or removed; analyses of wells on
+// other models are kept. null resets all analyses.
+function reconcileWellAssignmentsWithLoadedModels(changedLabels = null) {
   const fracWells = new Map((state.sleeves && state.sleeves.wells || [])
     .map(well => [wellAssignmentKey(well.name), well.name]));
-  state.wellTrajectoryAnalyses = {};
+  if (!changedLabels) state.wellTrajectoryAnalyses = {};
   Object.entries(state.wellAssignments || {}).forEach(([key, assignment]) => {
+    if (changedLabels && changedLabels.has(assignment.modelLabel)) delete state.wellTrajectoryAnalyses[key];
     const wellName = assignment.wellName || fracWells.get(key) || '';
     if (!wellName) {
       delete state.wellAssignments[key];
@@ -766,6 +823,12 @@ function clearRenderedSection() {
   $('section-plot').innerHTML = '';
   clearSectionCellInspector($('section-cell-inspector'));
   setSectionImageActionsEnabled(false);
+}
+
+function wellsWithoutTrajectoryAnalysis() {
+  return (state.sleeves ? state.sleeves.wells || [] : [])
+    .map(well => well.name)
+    .filter(name => !state.wellTrajectoryAnalyses[wellAssignmentKey(name)]);
 }
 
 async function refreshWellTrajectoryAnalyses(wellNames = null) {
@@ -1388,7 +1451,7 @@ function propertyRow(model, group, savedUuids) {
     ? `<select class="property-variant" data-property-variant>${group.map((item, index) => (
       `<option value="${escapeHtml(item.uuid)}" ${item.uuid === prop.uuid ? 'selected' : ''}>Component ${index + 1} · ${escapeHtml(formatFileSize(propertyBlobBytes(item)))}</option>`
     )).join('')}</select>`
-    : `<span class="muted">${escapeHtml(prop.property_kind || prop.property_type || '')}</span>`;
+    : '';
   row.innerHTML = `
     <input type="checkbox" ${checked} data-property="${escapeHtml(prop.uuid)}" data-model="${escapeHtml(model.label)}" data-property-title="${escapeHtml(prop.title)}">
     <strong>${escapeHtml(model.label)}</strong>
@@ -5026,6 +5089,7 @@ function handleBackendEvent(message) {
     if (message.command === 'extract' || message.command === 'extract-section-workspace') setProgress('extraction-progress', message.value || 0);
     if (message.command === 'metrics') setProgress('metrics-progress', message.value || 0);
     if (message.command === 'model-section') setProgress('section-progress', message.value || 0);
+    if (message.command === 'load-models' || message.command === 'trajectory-analysis') updateModelsPhaseFromBackend(message);
   }
   if (message.event === 'error') appendLog(`ERROR: ${message.message}`);
 }

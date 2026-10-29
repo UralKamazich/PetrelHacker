@@ -29,7 +29,7 @@ from core.model_section import extract_well_section
 from core.model_reader import open_model_reader, resolve_model_path
 from core.multi_model_extractor import ExtractionModelSpec, MultiModelPropertyExtractor
 from core.output_planner import choose_output_plan
-from core.petrel_project_reader import describe_petrel_project, is_petrel_project_path
+from core.petrel_project_reader import PetrelProjectReader, describe_petrel_project, is_petrel_project_path
 from core.property_extractor import INTERVAL_BOUNDARY_COLUMNS, ExtractionSettings, write_extraction_log
 from core.resqml_reader import ResqmlReader
 from core.sleeves_loader import (
@@ -132,16 +132,56 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
+class _ProgressReporter:
+    """Emit progress for completed work units, skipping redundant updates."""
+
+    def __init__(self) -> None:
+        self._last: tuple[int, str] | None = None
+
+    def __call__(self, value: float, message: str) -> None:
+        key = (int(max(0.0, min(100.0, value)) * 2), message)
+        if key == self._last:
+            return
+        self._last = key
+        _emit("progress", value=round(max(0.0, min(100.0, value)), 1), message=message)
+
+
+# Share of one model's progress span taken by each loading stage.
+_LOAD_OPEN_SPAN = (0.0, 0.6)
+_LOAD_TRAJECTORY_SPAN = (0.65, 0.98)
+
+
 def load_models(payload: JsonDict) -> None:
     results = []
-    for index, model in enumerate(_models(payload), start=1):
+    models = [
+        (index, model)
+        for index, model in enumerate(_models(payload), start=1)
+        if str(model.get("path", "")).strip()
+    ]
+    report = _ProgressReporter()
+    for model_number, (index, model) in enumerate(models):
         path = str(model.get("path", "")).strip()
-        if not path:
-            continue
         label = str(model.get("label") or f"M{index}")
         depth_offset = _to_float(model.get("depthOffset"), 0.0)
+        span = 100.0 / len(models)
+        base = model_number * span
+
+        def at(fraction: float, message: str, label: str = label, base: float = base, span: float = span) -> None:
+            report(base + span * fraction, f"{label} · {message}")
+
+        def open_progress(step: str, done: int, total: int) -> None:
+            start, end = _LOAD_OPEN_SPAN
+            at(start + (end - start) * done / max(total, 1), f"{step} ({done}/{total})")
+
+        def trajectory_progress(done: int, total: int) -> None:
+            if done != total and done % max(1, total // 100):
+                return
+            start, end = _LOAD_TRAJECTORY_SPAN
+            at(start + (end - start) * done / max(total, 1), f"Well trajectories {done}/{total}")
+
         _emit("log", message=f"Opening model {label}: {path}")
-        reader = open_model_reader(path)
+        at(0.0, "Opening model")
+        reader = open_model_reader(path, progress=open_progress)
         grids = reader.list_grids()
         selected_grid_uuid = ""
         if grids:
@@ -150,6 +190,7 @@ def load_models(payload: JsonDict) -> None:
             reader.select_grid(grid.uuid)
             selected_grid_uuid = grid.uuid
             grids = reader.list_grids()
+        at(_LOAD_OPEN_SPAN[1], "Selected model")
         properties = reader.list_properties()
         list_horizons = getattr(reader, "list_named_horizons", None)
         try:
@@ -158,11 +199,16 @@ def load_models(payload: JsonDict) -> None:
             named_horizons = []
             _emit("log", message=f"Warning: cannot read named surfaces from {label}: {exc}")
         list_trajectories = getattr(reader, "list_well_trajectories", None)
+        at(_LOAD_TRAJECTORY_SPAN[0], "Well trajectories")
         try:
-            trajectories = list_trajectories() if callable(list_trajectories) else []
+            if isinstance(reader, PetrelProjectReader):
+                trajectories = reader.list_well_trajectories(progress=trajectory_progress)
+            else:
+                trajectories = list_trajectories() if callable(list_trajectories) else []
         except Exception as exc:  # noqa: BLE001
             trajectories = []
             _emit("log", message=f"Warning: cannot read well trajectories from {label}: {exc}")
+        at(_LOAD_TRAJECTORY_SPAN[1], "Summary")
         summary = _model_summary(label, reader, grids, properties, trajectories, named_horizons)
         _emit("log", message=summary)
         grid_to_dict = getattr(reader, "grid_to_dict", None)
@@ -186,6 +232,7 @@ def load_models(payload: JsonDict) -> None:
                 "namedHorizons": [_dataclass_dict(horizon) for horizon in named_horizons],
             }
         )
+        at(1.0, "Loaded")
     if not results:
         raise ValueError("Select at least one model path.")
     _emit("result", models=results)
@@ -722,7 +769,10 @@ def trajectory_analysis(payload: JsonDict) -> None:
     readers: dict[str, object] = {}
     trajectories_by_path: dict[str, dict[str, object]] = {}
     results: list[JsonDict] = []
-    for assignment in assignments:
+    report = _ProgressReporter()
+    total = len(assignments)
+    for assignment_number, assignment in enumerate(assignments):
+        report(100.0 * assignment_number / max(total, 1), f"Well {assignment_number + 1}/{total}")
         if not isinstance(assignment, dict):
             continue
         path = str(assignment.get("path", "")).strip()
@@ -732,6 +782,7 @@ def trajectory_analysis(payload: JsonDict) -> None:
         try:
             reader = readers.get(path)
             if reader is None:
+                report(100.0 * assignment_number / max(total, 1), f"Opening model {Path(path).name}")
                 reader = _open_trajectory_reader(path)
                 readers[path] = reader
                 trajectories_by_path[path] = {
@@ -751,6 +802,7 @@ def trajectory_analysis(payload: JsonDict) -> None:
             )
         except Exception as exc:  # noqa: BLE001
             results.append({"key": assignment.get("key"), "trajectoryUuid": trajectory_uuid, "error": str(exc)})
+    report(100.0, f"Well {total}/{total}")
     _emit("result", analyses=results)
 
 
@@ -1305,6 +1357,7 @@ def _prune_section_cache(cache_dir: Path, max_bytes: int) -> None:
         try:
             total -= path.stat().st_size
             path.unlink()
+            path.with_name(path.name.replace(".json.gz", ".meta.json")).unlink(missing_ok=True)
         except OSError:
             pass
         if total <= max_bytes:

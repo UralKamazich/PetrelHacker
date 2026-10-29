@@ -129,22 +129,36 @@ class PetrelProjectReader:
             raise RuntimeError("Petrel project is not opened.")
         return self.project.data_path
 
-    def open(self) -> None:
+    def open(self, progress=None) -> None:
+        """Open the project; ``progress(label, done, total)`` is called after each step."""
+        total = 7
+
+        def step(done: int, label: str) -> None:
+            if progress is not None:
+                progress(label, done, total)
+
         self.project = resolve_petrel_project_path(self.input_path)
         object_rows = _query_project_objects(
             self.data_path,
             ("PillarGrid2", "FloatProperty", "IntProperty"),
         )
+        step(1, "Project index")
         self._model_names = read_petrel_object_names(
             self.project.ptd_path,
             [row[1] for row in object_rows],
         )
+        step(2, "Object names")
         self._grids = self._load_grids()
+        step(3, "Grids")
         self._properties = self._load_properties()
+        step(4, "Properties")
         self._named_horizons = read_petrel_named_horizons(self.project.project_path)
+        step(5, "Named surfaces")
         self._apply_native_grid_shapes_from_properties()
         self._apply_native_metadata_summary()
+        step(6, "Grid shapes")
         self._enrich_from_companion_resqml()
+        step(7, "Companion RESQML")
         if len(self._grids) == 1:
             self._selected_grid_uuid = self._grids[0].uuid
 
@@ -198,9 +212,10 @@ class PetrelProjectReader:
     def list_md_datums(self) -> list[object]:
         return []
 
-    def list_well_trajectories(self) -> list[WellTrajectoryInfo]:
+    def list_well_trajectories(self, progress=None) -> list[WellTrajectoryInfo]:
+        """List trajectories; ``progress(done, total)`` reports each processed record."""
         if self._trajectories is None:
-            self._load_trajectories()
+            self._load_trajectories(progress)
         return list(self._trajectories or [])
 
     def get_well_trajectory_points(self, trajectory_uuid: str) -> list[WellTrajectoryPoint]:
@@ -423,7 +438,7 @@ class PetrelProjectReader:
             )
         return properties
 
-    def _load_trajectories(self) -> None:
+    def _load_trajectories(self, progress=None) -> None:
         if self.project is None:
             raise RuntimeError("Petrel project is not opened.")
         rows = _query_project_objects(self.data_path, ("DummyWellTraceSubjectShape",))
@@ -433,7 +448,9 @@ class PetrelProjectReader:
             rows = _query_project_objects(self.data_path, ("XYZTrajectoryProviderData",))
             well_names = read_petrel_parent_names(self.project.ptd_path, [row[1] for row in rows])
         trajectories: list[WellTrajectoryInfo] = []
-        for data_pk, droid, blob_type, _time_stamp, _bytes_size in rows:
+        for row_index, (data_pk, droid, blob_type, _time_stamp, _bytes_size) in enumerate(rows, start=1):
+            if progress is not None:
+                progress(row_index, len(rows))
             normalized = _plain_uuid(droid)
             well_name = well_names.get(normalized)
             if not well_name:

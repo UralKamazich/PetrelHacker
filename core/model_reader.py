@@ -7,15 +7,20 @@ from core.resqml_reader import ResqmlReader
 from core.rescue_reader import RescueReader, is_rescue_path
 
 
-def open_model_reader(path: str | Path):
+def open_model_reader(path: str | Path, progress=None):
+    """Open a model; ``progress(label, done, total)`` is reported for Petrel projects."""
     model_path = resolve_model_path(path)
     if is_petrel_project_path(model_path):
         reader = PetrelProjectReader(model_path)
-    elif is_rescue_path(model_path):
+        reader.open(progress=progress)
+        return reader
+    if is_rescue_path(model_path):
         reader = RescueReader(model_path)
     else:
         reader = ResqmlReader(model_path)
     reader.open()
+    if progress is not None:
+        progress("Model opened", 1, 1)
     return reader
 
 

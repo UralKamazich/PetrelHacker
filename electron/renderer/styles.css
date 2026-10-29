@@ -405,18 +405,37 @@ select {
 
 .model-stack {
   display: grid;
-  gap: 8px;
+  gap: 5px;
 }
 
 .model-card {
   display: grid;
-  grid-template-columns: 44px 1fr 96px 34px 34px;
-  gap: 8px;
+  grid-template-columns: 38px minmax(0, 1fr) 92px 32px 32px;
+  gap: 6px;
   align-items: center;
-  padding: 8px;
+  padding: 5px 6px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 7px;
   background: var(--panel-2);
+}
+
+.model-card.has-grid-select {
+  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 1.3fr) 92px 32px 32px;
+}
+
+.model-card input,
+.model-card select {
+  min-height: 30px;
+  height: 30px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.model-card .icon-button {
+  width: 32px;
+  height: 30px;
+  min-height: 30px;
+  align-self: center;
 }
 
 .model-clear-button {
@@ -429,50 +448,29 @@ select {
   background: #fecaca;
 }
 
-.model-card.has-grid-select {
-  align-items: start;
-}
-
-.model-card > .icon-button {
-  align-self: start;
-}
-
 .model-badge {
   display: grid;
   place-items: center;
   width: 38px;
-  height: 32px;
-  border-radius: 8px;
+  height: 30px;
+  border-radius: 7px;
   background: #dbeafe;
   color: #1d4ed8;
   font-weight: 800;
 }
 
-#view-models .model-card .field {
-  margin-bottom: 0;
-}
-
-#view-models .model-card > .field span,
-#view-models .model-path-stack > .field:first-child span {
-  display: none;
-}
-
-.model-path-stack {
-  display: grid;
-  gap: 6px;
-}
-
-.model-grid-field span {
-  display: block;
-  margin-bottom: 3px;
+.model-offset {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
-.model-source-note {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.25;
+.model-offset input {
+  min-width: 0;
+  flex: 1;
 }
 
 .mapping-grid,
@@ -698,9 +696,9 @@ select {
 }
 
 .property-row {
-  grid-template-columns: auto 42px minmax(0, 1fr) minmax(118px, 190px);
-  min-height: 30px;
-  padding: 4px 8px;
+  grid-template-columns: auto 34px minmax(0, 1fr) auto;
+  min-height: 26px;
+  padding: 2px 8px;
   gap: 7px;
   border-radius: 6px;
   font-size: 13px;
@@ -1463,4 +1461,54 @@ select {
 .coverage-note {
   margin-top: 2px;
   color: var(--text);
+}
+
+.progress-label {
+  min-height: 18px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#view-models .view-header {
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+#view-models .panel:first-child .panel-title {
+  margin-bottom: 6px;
+}
+
+#view-models .panel:first-child .progress-shell {
+  height: 6px;
+  margin-top: 8px;
+}
+
+#view-models .progress-label {
+  min-height: 0;
+  margin-top: 4px;
+}
+
+#view-models .property-table {
+  gap: 3px;
+}
+
+#view-models .property-folder-content {
+  gap: 3px;
+}
+
+#view-models .property-folder > summary {
+  min-height: 26px;
+  padding: 3px 8px;
+}
+
+#view-models .property-table,
+#view-models .property-folder-content {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-content: start;
+}
+
+#view-models .property-folder,
+#view-models .property-empty {
+  grid-column: 1 / -1;
 }
