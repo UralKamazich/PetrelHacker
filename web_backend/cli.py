@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             "preview-sleeves",
             "suggest-output",
             "extract",
+            "model-coverage",
             "table-info",
             "metrics",
             "curve-data",
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             "preview-sleeves": preview_sleeves,
             "suggest-output": suggest_output,
             "extract": extract,
+            "model-coverage": model_coverage,
             "table-info": table_info,
             "metrics": metrics,
             "curve-data": curve_data,
@@ -277,14 +279,10 @@ def suggest_output(payload: JsonDict) -> None:
     _emit("result", outputPath=str(default_extraction_output_path(sleeves_path)))
 
 
-def extract(payload: JsonDict) -> None:
+def _extraction_sleeves(payload: JsonDict) -> pd.DataFrame:
     sleeves_path = str(payload.get("sleevesPath", "")).strip()
-    output_path = str(payload.get("outputPath", "")).strip()
     if not sleeves_path:
         raise ValueError("Sleeves path is empty.")
-    if not output_path:
-        raise ValueError("Output path is empty.")
-
     sleeves = load_sleeves_table(sleeves_path, payload.get("columnMapping") or None)
     original_count = len(sleeves)
     selected_wells = payload.get("selectedWells")
@@ -301,7 +299,10 @@ def extract(payload: JsonDict) -> None:
         raise ValueError(
             "Sleeves table has no X/Y coordinates. Generate them on the Sections page and use the saved *_boundaries.xlsx file."
         )
+    return sleeves
 
+
+def _extraction_specs(payload: JsonDict) -> list[ExtractionModelSpec]:
     specs = []
     for index, model in enumerate(_models(payload), start=1):
         path = str(model.get("path", "")).strip()
@@ -319,6 +320,50 @@ def extract(payload: JsonDict) -> None:
         )
     if not specs:
         raise ValueError("Select at least one model.")
+    return specs
+
+
+def _coverage_warnings(coverage: list[JsonDict]) -> list[str]:
+    warnings = []
+    for item in coverage:
+        if item["inside"] < item["total"]:
+            properties = ", ".join(item["properties"]) or "no properties"
+            warnings.append(
+                f"{item['label']} ({item['gridTitle']}): {item['total'] - item['inside']} of {item['total']} "
+                f"sleeves are outside the model; {properties} will be empty for them."
+            )
+    return warnings
+
+
+def _log_coverage(coverage: list[JsonDict]) -> None:
+    for item in coverage:
+        _emit(
+            "log",
+            message=f"Coverage {item['label']} ({item['gridTitle']}): {item['inside']} of {item['total']} sleeves inside.",
+        )
+    for warning in _coverage_warnings(coverage):
+        _emit("log", message=f"Warning: {warning}")
+
+
+def model_coverage(payload: JsonDict) -> None:
+    sleeves = _extraction_sleeves(payload)
+    extractor = MultiModelPropertyExtractor(_extraction_specs(payload))
+    extractor.open(log_callback=lambda message: _emit("log", message=message))
+    coverage = extractor.model_coverage(sleeves)
+    _log_coverage(coverage)
+    _emit("result", coverage=coverage)
+
+
+def extract(payload: JsonDict) -> None:
+    sleeves_path = str(payload.get("sleevesPath", "")).strip()
+    output_path = str(payload.get("outputPath", "")).strip()
+    if not sleeves_path:
+        raise ValueError("Sleeves path is empty.")
+    if not output_path:
+        raise ValueError("Output path is empty.")
+
+    sleeves = _extraction_sleeves(payload)
+    specs = _extraction_specs(payload)
 
     extractor = MultiModelPropertyExtractor(
         specs,
@@ -330,6 +375,8 @@ def extract(payload: JsonDict) -> None:
     metadata = extractor.metadata
     if metadata is None:
         raise ValueError("Model metadata was not initialized.")
+    coverage = extractor.model_coverage(sleeves)
+    _log_coverage(coverage)
 
     output_plan = choose_output_plan(
         output_path,
@@ -352,6 +399,7 @@ def extract(payload: JsonDict) -> None:
     )
     if output_plan.warning:
         stats.warnings.append(output_plan.warning)
+    stats.warnings[:0] = _coverage_warnings(coverage)
 
     settings = ExtractionSettings(
         sampling_mode="fast",
@@ -372,7 +420,13 @@ def extract(payload: JsonDict) -> None:
         settings=settings,
         stats=stats,
     )
-    _emit("result", outputPath=str(output_plan.path), logPath=str(log_path), stats=_dataclass_dict(stats))
+    _emit(
+        "result",
+        outputPath=str(output_plan.path),
+        logPath=str(log_path),
+        stats=_dataclass_dict(stats),
+        coverage=coverage,
+    )
 
 
 def table_info(payload: JsonDict) -> None:

@@ -1404,3 +1404,63 @@ select {
 .help-body th {
   background: #f8fafc;
 }
+
+.coverage-block {
+  margin-top: 12px;
+}
+
+.coverage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.coverage-list {
+  display: grid;
+  gap: 6px;
+}
+
+.coverage-empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.coverage-row {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.coverage-row.ok {
+  border-left-color: #16a34a;
+}
+
+.coverage-row.warn {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.coverage-row.bad {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+}
+
+.coverage-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.coverage-count {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.coverage-note {
+  margin-top: 2px;
+  color: var(--text);
+}

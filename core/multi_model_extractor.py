@@ -265,6 +265,34 @@ class MultiModelPropertyExtractor:
         stats.finished = datetime.now()
         return stats
 
+    def model_coverage(self, sleeves_df: pd.DataFrame) -> list[dict]:
+        """Count sleeves that fall inside each model's grid footprint.
+
+        Sleeves outside a model get empty values for all of its properties.
+        """
+        if not self.contexts:
+            raise ValueError("Models are not opened.")
+        xy = np.column_stack(
+            [
+                pd.to_numeric(sleeves_df["X"], errors="coerce").to_numpy(dtype=float),
+                pd.to_numeric(sleeves_df["Y"], errors="coerce").to_numpy(dtype=float),
+            ]
+        )
+        coverage = []
+        for context in self.contexts:
+            with context.lock:
+                matches = context.indexer.find_columns(xy)
+            coverage.append(
+                {
+                    "label": context.label,
+                    "gridTitle": context.indexer.grid.title,
+                    "properties": list(context.output_names.values()),
+                    "inside": sum(match is not None for match in matches),
+                    "total": len(matches),
+                }
+            )
+        return coverage
+
     def _extract_sleeve(self, sleeve_index: int, sleeve, *, cancel_requested: bool) -> "SleeveExtractionResult":
         well = _row_value(sleeve, "Well")
         port = _row_value(sleeve, "Port")

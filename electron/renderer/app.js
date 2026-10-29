@@ -166,6 +166,7 @@ function bindActions() {
   $('well-search').addEventListener('input', renderWells);
   $('select-all-properties').addEventListener('click', () => setAllProperties(true));
   $('clear-properties').addEventListener('click', () => setAllProperties(false));
+  $('check-coverage').addEventListener('click', checkModelCoverage);
   $('browse-metrics-extracted').addEventListener('click', async () => setPath('metrics-extracted', await pickTable('metrics-extracted')));
   $('browse-metrics-intervals').addEventListener('click', browseMetricsIntervals);
   $('browse-metrics-output').addEventListener('click', browseMetricsOutput);
@@ -856,6 +857,7 @@ function updateWorkflowSummaries() {
   if ($('extraction-well-count')) $('extraction-well-count').textContent = String(selectedWellCount);
   if ($('extraction-sleeve-count')) $('extraction-sleeve-count').textContent = String(selectedSleeves);
   if ($('extraction-source')) $('extraction-source').textContent = basename($('sleeves-path').value.trim()) || 'No frac-list loaded';
+  if (state.modelCoverageKey && state.modelCoverageKey !== modelCoverageKey()) renderModelCoverage(null);
   updateExtractionSourceUi();
 }
 
@@ -1602,6 +1604,66 @@ function selectedModelsWithProperties() {
   }));
 }
 
+function extractionModelsPayload() {
+  return {
+    models: selectedModelsWithProperties(),
+    sleevesPath: $('sleeves-path').value.trim(),
+    selectedWells: state.selectedWells,
+    columnMapping: currentColumnMapping()
+  };
+}
+
+function modelCoverageKey() {
+  const payload = extractionModelsPayload();
+  return JSON.stringify({
+    models: payload.models.filter(model => model.path).map(model => [model.path, model.gridUuid || '', model.selectedPropertyUuids]),
+    sleevesPath: payload.sleevesPath,
+    wells: payload.selectedWells.slice().sort()
+  });
+}
+
+async function checkModelCoverage() {
+  if (state.extractionSource === 'workspace') {
+    return setAttention('Coverage check applies to the Models source.');
+  }
+  setBusy('Checking coverage', 'Matching sleeves to model footprints');
+  try {
+    const result = await window.petrel.run('model-coverage', extractionModelsPayload());
+    renderModelCoverage(result.coverage || []);
+    const missing = (result.coverage || []).filter(item => item.inside < item.total);
+    if (missing.length) setAttention(`Coverage: ${missing.length} model(s) do not cover all sleeves`);
+    else setReady('Coverage: all models cover all sleeves');
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function renderModelCoverage(coverage) {
+  const root = $('model-coverage');
+  if (!root) return;
+  if (!coverage) {
+    state.modelCoverageKey = '';
+    root.innerHTML = '<span class="coverage-empty">Not checked</span>';
+    return;
+  }
+  state.modelCoverageKey = modelCoverageKey();
+  root.innerHTML = coverage.map(item => {
+    const level = item.inside === 0 ? 'bad' : (item.inside < item.total ? 'warn' : 'ok');
+    const note = level === 'bad'
+      ? 'No sleeves inside: its columns will be empty.'
+      : (level === 'warn' ? `${item.total - item.inside} sleeve(s) outside: empty values for them.` : 'All sleeves inside.');
+    const properties = (item.properties || []).join(', ') || 'no properties selected';
+    return `
+      <div class="coverage-row ${level}">
+        <div class="coverage-main">
+          <strong>${escapeHtml(item.label)} · ${escapeHtml(item.gridTitle)}</strong>
+          <span class="coverage-count">${Number(item.inside)} / ${Number(item.total)}</span>
+        </div>
+        <div class="coverage-note">${escapeHtml(note)} <span class="muted">${escapeHtml(properties)}</span></div>
+      </div>`;
+  }).join('');
+}
+
 async function runExtraction() {
   setBusy('Extracting', 'Building output table');
   try {
@@ -1625,7 +1687,13 @@ async function runExtraction() {
     $('curve-path').value = result.outputPath || '';
     applyMetricsDefaultsFromSleeves($('sleeves-path').value.trim());
     setProgress('extraction-progress', 100);
-    setReady('Extraction complete');
+    if (result.coverage) renderModelCoverage(result.coverage);
+    const uncovered = (result.coverage || []).filter(item => item.inside < item.total);
+    if (uncovered.length) {
+      setAttention(`Extraction complete, but ${uncovered.map(item => item.label).join(', ')} do not cover all sleeves (see Model coverage)`);
+    } else {
+      setReady('Extraction complete');
+    }
     saveState();
   } catch (error) {
     fail(error);
