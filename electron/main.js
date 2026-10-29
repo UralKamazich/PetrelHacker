@@ -199,6 +199,20 @@ ipcMain.handle('dialog:show-warning', async (_event, options) => {
   return true;
 });
 
+ipcMain.handle('dialog:confirm', async (_event, options) => {
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: String(options && options.title || 'Confirm'),
+    message: String(options && options.message || ''),
+    detail: String(options && options.detail || ''),
+    buttons: [String(options && options.confirmLabel || 'Continue'), 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+});
+
 ipcMain.handle('file:read-text', async (_event, filePath) => {
   if (!filePath) return '';
   return fs.promises.readFile(filePath, 'utf8');

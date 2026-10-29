@@ -1628,14 +1628,36 @@ async function checkModelCoverage() {
   }
   setBusy('Checking coverage', 'Matching sleeves to model footprints');
   try {
-    const result = await window.petrel.run('model-coverage', extractionModelsPayload());
-    renderModelCoverage(result.coverage || []);
-    const missing = (result.coverage || []).filter(item => item.inside < item.total);
+    const coverage = await runModelCoverage();
+    const missing = coverage.filter(item => item.inside < item.total);
     if (missing.length) setAttention(`Coverage: ${missing.length} model(s) do not cover all sleeves`);
     else setReady('Coverage: all models cover all sleeves');
   } catch (error) {
     fail(error);
   }
+}
+
+async function runModelCoverage() {
+  const result = await window.petrel.run('model-coverage', extractionModelsPayload());
+  const coverage = result.coverage || [];
+  renderModelCoverage(coverage);
+  return coverage;
+}
+
+async function confirmModelCoverage(coverage) {
+  const missing = coverage.filter(item => item.inside < item.total);
+  if (!missing.length) return true;
+  const detail = missing.map(item => {
+    const properties = (item.properties || []).join(', ') || 'no properties';
+    return `${item.label} · ${item.gridTitle}: ${item.inside} of ${item.total} sleeves inside. `
+      + `${properties} will be empty for ${item.total - item.inside} sleeve(s).`;
+  }).join('\n\n');
+  return window.petrel.confirm({
+    title: 'Model coverage',
+    message: `${missing.length} model(s) do not cover all selected sleeves.`,
+    detail: `${detail}\n\nContinue extraction?`,
+    confirmLabel: 'Run extraction'
+  });
 }
 
 function renderModelCoverage(coverage) {
@@ -1665,8 +1687,16 @@ function renderModelCoverage(coverage) {
 }
 
 async function runExtraction() {
-  setBusy('Extracting', 'Building output table');
   try {
+    if (state.extractionSource !== 'workspace') {
+      setBusy('Checking coverage', 'Matching sleeves to model footprints');
+      const coverage = await runModelCoverage();
+      if (!(await confirmModelCoverage(coverage))) {
+        setAttention('Extraction cancelled: check Model coverage');
+        return;
+      }
+    }
+    setBusy('Extracting', 'Building output table');
     if (state.extractionSource === 'workspace') {
       const info = await refreshSectionWorkspaceInfo();
       if (!info || !info.exists) throw new Error('No saved section workspace was found for this frac-list.');
