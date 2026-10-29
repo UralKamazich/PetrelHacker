@@ -1,88 +1,117 @@
 # PetrelHacker
 
-Desktop extractor for Petrel geological/geomechanical grids. The application maps frac sleeves/ports to model XY columns, extracts selected property cubes along depth, writes XLSX/CSV tables, calculates interval metrics, and provides a curve QC view.
+Desktop application for extracting Petrel model properties along frac sleeves.
+It maps frac-list sleeves to model grid columns, extracts selected property
+cubes along depth, places reservoir boundaries on well sections, calculates
+interval metrics and provides curve QC.
 
-The code supports two Petrel export families:
+- UI: Electron (`electron/`), plain HTML/CSS/JS renderer with Plotly.
+- Backend: Python (`web_backend/cli.py` + `core/`), one process per command,
+  JSON events over stdout. Packaged builds ship it as a PyInstaller executable.
+- Model sources: native Petrel projects (`.pet`), RESQML (`.epc` + `.h5`),
+  Petrel Rescue (`.bin` folder). Up to three models at once.
 
-- RESQML/EPC: an `.epc` ZIP package with XML metadata plus a sibling `.h5` file with arrays.
-- Petrel Rescue: a folder or main `.bin` model file with many sidecar `*.bin.<id>` binary files.
+## Branches
 
-This README is intentionally explicit about indexing and storage rules so another engineer or LLM can reason about the files without rediscovering them from scratch.
+- `mac` — main branch, macOS desktop build.
+- `win` — same application plus Windows packaging (`electron/build-desktop-win.ps1`).
+  Merge `mac` into `win` before building a new Windows release.
 
-## Setup
+## Development setup
 
-Use the repository virtual environment from the shared work directory when available:
-
-```powershell
-& 'D:\Yandex.Disk\!!!!DataAnalizePython Work\.venv\Scripts\python.exe' -m pip install -r requirements.txt
-& 'D:\Yandex.Disk\!!!!DataAnalizePython Work\.venv\Scripts\python.exe' main.py
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+npm install
+bash electron/run-electron.sh          # macOS dev run
 ```
 
-Or create a local one:
+The renderer picks the backend Python from `.venv`. In VS Code terminals
+`ELECTRON_RUN_AS_NODE=1` is set; unset it when launching Electron
+(`env -u ELECTRON_RUN_AS_NODE bash electron/run-electron.sh`).
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python main.py
+Run tests:
+
+```bash
+.venv/bin/python -m pytest
 ```
 
-## GUI Workflow
+## Building
 
-1. Open `Model`.
-2. Select up to three models. Each model can be `.epc`, a Rescue main `.bin`, or a Rescue folder.
-3. Set optional depth offsets in meters for each model.
-4. Click `Load models`.
-5. Check properties on the `Properties` tab.
-6. Load the sleeves table on `Sleeves`.
-7. Map frac-list columns in the dialog. The dialog is shown every time a sleeves table is loaded, even when column names are already recognized.
-8. Click `Выбор скважин` to choose wells in a checkbox dialog. All wells are selected by default and the selected names are shown in the long field on `Sleeves`.
-9. Run extraction on `Run`.
-10. Use `Preview`, `Curves`, and `Metrics` for QC and interval calculations.
+macOS (Apple Silicon):
 
-`Curves / QC` can draw channels in two depth modes. `Common grid` uses the
-shared output grid depth (`TVD_top`) for every channel. `Individual cell` uses
-the channel diagnostic depth (`<channel>_TVD_center`) when available, which is
-better for checking whether the original RESQML and Rescue cells match.
+```bash
+bash electron/build-web.sh
+# -> dist-electron-web/mac-arm64/PetrelHacker Web.app
+```
 
-`Run` has two performance controls for multi-model extraction:
+Windows x64 portable exe (on the `win` branch, on Windows):
 
-- `Write property diagnostics` writes `<channel>_Model`, `<channel>_I/J/K`,
-  `<channel>_TVD_center`, and `<channel>_Depth_KB`. Disable it for faster and
-  narrower production exports after QC is complete.
-- `Parallel workers` parallelizes sleeve/port row calculation. Final XLSX/CSV
-  writing remains single-threaded to keep output order stable and avoid writer
-  contention.
+```powershell
+$env:PETRELHACKER_PYTHON = "<path to .venv>\Scripts\python.exe"   # Python 3.12 x64 + requirements + pyinstaller
+$env:PETRELHACKER_NODE = "<path to node.exe>"                       # Node >= 22.12 x64
+powershell -ExecutionPolicy Bypass -File electron\build-desktop-win.ps1
+# -> dist-electron-web\PetrelHacker-<version>-x64-portable.exe
+```
 
-The model loader now prints and displays a summary for each model: backend, grid shape, estimated cell sizes, well datum count, and available property cubes.
+The x64 build also runs on Windows on ARM (emulation).
+
+## Workflow
+
+Every panel has a `?` button with a detailed guide (`electron/renderer/help.js`).
+
+1. **Models** — select up to three sources (M1–M3), pick the internal Petrel
+   model, optional depth shift `Δz`, press **Load models**. Only new or changed
+   models are loaded; with nothing changed all models are reloaded. Select
+   properties in the per-model blocks.
+2. **Wells** — load the frac-list, map columns (`Well`, `Port`, `X`, `Y`,
+   `TVDSS_PORT`, `MD`), select wells, assign model trajectories. X/Y can be
+   calculated from MD along the trajectory.
+3. **Sections** — draw a property section along a trajectory, place interval
+   boundaries (auto or manual) and save them to `<frac-list>_boundaries.xlsx`
+   (also stores the section workspace).
+4. **Extraction** — export model cells under every sleeve to XLSX/CSV.
+   Model coverage (sleeves inside each model footprint) is checked before
+   extraction; sleeves outside a model get empty values for its properties.
+5. **Curves / QC** — overlay up to four channels for one stage; step through
+   stages with ◀ ▶ or the arrow keys (neighbouring stages are prefetched).
+6. **Metrics** — interval metrics per sleeve. Fixed channels (NTG, PORO, PERM,
+   lithology, Density, Shmin) always produce the same column names so metric
+   files from different models can be combined; additional channels follow on
+   the right. Only channels selected on the page are calculated.
+
+## Metrics
+
+Intervals per sleeve (from the boundaries table): `Global`, `Local`,
+`Total_pm15m`, `TopTotal_m15m`, `BotTotal_p15m`; each also as `_Net` and
+`_NonNet` (net by lithology codes, else NTG > 0, else PORO > 0). Column names:
+`<Channel>_<metric>_<interval>[_Net|_NonNet]`. Formulas are listed in the
+in-app help of the Metric set panel and in the `.txt` written next to every
+metrics file. Empty `_Net` values mean the interval has no reservoir cells.
 
 ## Sleeve Input Contract
 
-The sleeves table must contain columns that can be mapped to:
+The frac-list must contain columns that can be mapped to `Well`, `Port` and
+either `X`/`Y` or `MD` (X/Y are then calculated from the trajectory).
+`TVDSS_PORT` is used for relative depths. If RESQML well datums are present,
+output also includes KB-depth columns (`Datum_Z`, `Depth_KB_PORT`,
+`Depth_KB_top`, `Depth_KB_base`, `Depth_KB_center`). Well names are
+normalized, including Cyrillic/Latin lookalikes such as `6А031` vs `6A031`.
 
-- `Well`
-- `Port`
-- `X`
-- `Y`
-- `TVDSS_PORT` or compatible depth column
+## Native Petrel Projects
 
-Coordinates are used to select the nearest model XY column. `TVDSS_PORT` is used for relative depth calculations. If RESQML well datums are present, output also includes KB-depth columns:
+`core.petrel_project_reader.PetrelProjectReader` reads `.pet` / `.ptd`
+projects directly (no RESQML export needed):
 
-- `Datum_Z`
-- `Depth_KB_PORT`
-- `Depth_KB_top`
-- `Depth_KB_base`
-- `Depth_KB_center`
-
-The app normalizes some well aliases, including Cyrillic/Latin lookalikes such as `6А031` vs `6A031`.
-
-The `Sleeves` tab always asks how source columns should map to the required
-fields. This handles frac lists where `Well`, `Port`, `X`, `Y`, or `TVDSS_PORT`
-are named differently. After loading, the `Выбор скважин` button opens a
-checkbox dialog populated from the normalized `Well` column. The selected wells
-are displayed in the long field on the tab, and the extraction worker filters
-the frac list to those wells before building the output plan and progress
-counters. Leaving all wells checked keeps the historical behavior.
+- `Data.ptd` is SQLite; object blobs are LZ4-compressed BXML streams.
+- Grids are `PillarGrid2` objects. Pillar record markers are derived from the
+  file's BXML dictionary (tag numbers shift when a grid stores extra sections
+  such as `connections`).
+- Faulted pillars (types 4/5) are read using their first z-sequence; cells next
+  to a fault may be offset by the fault throw.
+- Grids larger than 256 MB are indexed in a streaming pass over de-framed BXML
+  pages. Pillar indexes are cached in `~/Library/Caches/PetrelHacker/grid-index`.
+- Decode failures name the actual cause (grid or property and the reason).
 
 ## RESQML / EPC Storage
 
@@ -276,54 +305,22 @@ Validation results after the Rescue geometry fix:
 - `YME_STA` values match exactly by `I/J/K`.
 - False micro-intervals are removed by the `0.001 m` boundary merge.
 
-## Metrics
+## Caches
 
-Metrics are calculated from extracted XLSX/CSV and an interval table.
+macOS paths (Windows: `%LOCALAPPDATA%\PetrelHacker\...`):
 
-Interval table columns:
+- `~/Library/Caches/PetrelHacker/grid-index` — Petrel pillar indexes.
+- `~/Library/Caches/PetrelHacker/curve-cache` — parquet copies of extracted
+  tables (Curves and Metrics read through them; rebuilt when the file changes).
+- `~/Library/Caches/PetrelHacker/section-cache` — drawn sections (+ `.meta.json`).
 
-- `Well`
-- `Port`
-- `TVDSS_TOP_TOTAL`
-- `TVDSS_BOT_TOTAL`
-- `TVDSS_TOP_LOCAL`
-- `TVDSS_BOT_LOCAL`
+## Project Layout
 
-Supported interval families include:
+- `electron/` — main process, preload, renderer (`renderer/app.js`, `help.js`).
+- `web_backend/cli.py` — backend commands called by the UI.
+- `core/` — readers (Petrel, RESQML, Rescue), extraction, metrics, sections.
+- `scripts/` — command-line utilities (RESQML/Rescue inspection, batch extraction, metrics).
+- `research/` — Petrel format research tools, not used by the app (see `research/README.md`).
+- `tests/` — pytest suite.
 
-- Global
-- Local
-- Total +/- 15 m
-- TopTotal - 15 m to TopTotal
-- BotTotal to BotTotal + 15 m
-
-Metrics can be calculated for reservoir/net, non-reservoir, and full ranges depending on configured channels and suffixes.
-
-## Useful Commands
-
-Inspect RESQML:
-
-```powershell
-& 'D:\Yandex.Disk\!!!!DataAnalizePython Work\.venv\Scripts\python.exe' scripts\inspect_resqml.py GeolModel\UR_stat_RESQML\6A_GMM_STAT.epc
-```
-
-Run tests:
-
-```powershell
-& 'D:\Yandex.Disk\!!!!DataAnalizePython Work\.venv\Scripts\python.exe' -m pytest
-```
-
-Compile check:
-
-```powershell
-& 'D:\Yandex.Disk\!!!!DataAnalizePython Work\.venv\Scripts\python.exe' -m compileall core app tests
-```
-
-## Git Hygiene
-
-Large local model/export files are not meant to be committed. Keep source changes scoped to:
-
-- `app/`
-- `core/`
-- `tests/`
-- scripts and docs
+Large local model/export files are not committed (see `.gitignore`).
