@@ -65,6 +65,7 @@ const state = {
   curvePorts: [],
   curvePortsByWell: {},
   curveSelectionRevision: 0,
+  curveRowCache: new Map(),
   curvePlotContext: null,
   curveAxisSyncing: false,
   sectionTrajectories: [],
@@ -97,7 +98,37 @@ const state = {
 
 const $ = id => document.getElementById(id);
 
+// Path inputs keep the full path as their value (read by the rest of the code)
+// but are shown as a read-only file name with the full path in the tooltip.
+function installPathDisplay(id) {
+  const input = $(id);
+  if (!input || input.dataset.pathDisplay) return;
+  const display = document.createElement('input');
+  display.type = 'text';
+  display.readOnly = true;
+  display.className = 'path-display';
+  display.placeholder = 'No file selected';
+  input.dataset.pathDisplay = '1';
+  input.insertAdjacentElement('beforebegin', display);
+  input.type = 'hidden';
+  const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  const sync = value => {
+    display.value = basename(value || '');
+    display.title = value || '';
+  };
+  Object.defineProperty(input, 'value', {
+    configurable: true,
+    get() { return native.get.call(this); },
+    set(value) {
+      native.set.call(this, value);
+      sync(value);
+    }
+  });
+  sync(input.value);
+}
+
 function init() {
+  ['metrics-extracted', 'metrics-intervals', 'curve-path'].forEach(installPathDisplay);
   renderModels();
   renderMetricKeys();
   renderCurveControls();
@@ -217,6 +248,9 @@ function bindActions() {
   $('section-barrier-thickness').addEventListener('change', saveState);
   $('clear-log').addEventListener('click', () => $('log-view').textContent = '');
   $('curve-well').addEventListener('change', handleCurveWellChange);
+  $('curve-prev').addEventListener('click', () => navigateCurveStage(-1));
+  $('curve-next').addEventListener('click', () => navigateCurveStage(1));
+  document.addEventListener('keydown', handleCurveNavigationKey);
   $('curve-port').addEventListener('change', refreshCurveSelection);
   $('curve-depth-mode').addEventListener('change', () => {
     saveState();
@@ -250,22 +284,14 @@ function renderModels() {
     const card = document.createElement('div');
     card.className = `model-card${gridSelect ? ' has-grid-select' : ''}`;
     card.innerHTML = `
-      <div class="model-badge">${model.label}</div>
-      <input class="model-path" type="text" value="${escapeHtml(model.path)}" data-model-path="${index}" title="${escapeHtml(model.path)}" placeholder="Select .pet, .epc, Rescue .bin, or folder">
+      <div class="model-badge" data-model-color="${escapeHtml(model.label)}">${model.label}</div>
+      <input class="model-path" type="text" readonly value="${escapeHtml(basename(model.path))}" data-model-path="${index}" title="${escapeHtml(model.path)}" placeholder="Select .pet, .epc, Rescue .bin, or folder">
       ${gridSelect}
       <label class="model-offset" title="Depth shift, m"><span>Δz</span><input type="number" step="0.1" value="${model.depthOffset}" data-model-offset="${index}"></label>
       <button class="icon-button" data-model-browse="${index}" type="button" title="Select model">...</button>
       <button class="icon-button model-clear-button" data-model-clear="${index}" type="button" title="Clear model" aria-label="Clear ${escapeHtml(model.label)}">x</button>
     `;
     root.appendChild(card);
-  });
-  root.querySelectorAll('[data-model-path]').forEach(input => {
-    // Show the end of long paths (file name) rather than the common prefix.
-    input.scrollLeft = input.scrollWidth;
-    input.addEventListener('input', () => {
-      state.models[Number(input.dataset.modelPath)].path = input.value;
-      saveState();
-    });
   });
   root.querySelectorAll('[data-model-offset]').forEach(input => {
     input.addEventListener('input', () => {
@@ -1369,13 +1395,34 @@ function renderProperties() {
   const saved = state.extractionSelectedProperties;
   state.loadedModels.forEach(model => {
     const savedForModel = saved && Array.isArray(saved[model.label]) ? new Set(saved[model.label]) : null;
-    renderPropertyTree(root, model, groupPropertyVariants(model.properties || []), savedForModel);
+    const groups = groupPropertyVariants(model.properties || []);
+    if (!groups.length) return;
+    // One collapsible block per model so models are clearly separated.
+    const block = document.createElement('details');
+    block.className = 'property-model';
+    block.open = true;
+    block.dataset.modelBlock = model.label;
+    block.dataset.modelColor = model.label;
+    const grid = (model.grids || []).find(item => item.uuid === model.gridUuid);
+    block.innerHTML = `
+      <summary>
+        <span class="model-badge" data-model-color="${escapeHtml(model.label)}">${escapeHtml(model.label)}</span>
+        <span class="property-model-name">${escapeHtml(basename(model.path))}${grid ? ` · ${escapeHtml(grid.title)}` : ''}</span>
+        <span class="property-model-count" data-model-count="${escapeHtml(model.label)}"></span>
+      </summary>`;
+    const content = document.createElement('div');
+    content.className = 'property-model-content';
+    renderPropertyTree(content, model, groups, savedForModel);
+    block.appendChild(content);
+    root.appendChild(block);
   });
   if (!root.children.length) {
     root.innerHTML = '<div class="property-empty">No properties in the selected internal model. Select another Petrel model above.</div>';
   }
+  updatePropertyModelCounts();
   root.querySelectorAll('[data-property]').forEach(input => {
     input.addEventListener('change', () => {
+      updatePropertyModelCounts();
       state.extractionSelectedProperties = currentExtractionSelectedProperties();
       if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
       updateWorkflowSummaries();
@@ -1394,6 +1441,15 @@ function renderProperties() {
     });
   });
   updateWorkflowSummaries();
+}
+
+function updatePropertyModelCounts() {
+  document.querySelectorAll('[data-model-count]').forEach(counter => {
+    const block = counter.closest('[data-model-block]');
+    const inputs = block ? block.querySelectorAll('[data-property]') : [];
+    const checked = Array.prototype.filter.call(inputs, input => input.checked).length;
+    counter.textContent = `${checked} / ${inputs.length} selected`;
+  });
 }
 
 function groupPropertyVariants(properties) {
@@ -1454,7 +1510,6 @@ function propertyRow(model, group, savedUuids) {
     : '';
   row.innerHTML = `
     <input type="checkbox" ${checked} data-property="${escapeHtml(prop.uuid)}" data-model="${escapeHtml(model.label)}" data-property-title="${escapeHtml(prop.title)}">
-    <strong>${escapeHtml(model.label)}</strong>
     <span>${escapeHtml(prop.title)}</span>
     ${variantControl}
   `;
@@ -1640,6 +1695,7 @@ function findSectionPropertyByValue(value) {
 
 function setAllProperties(checked) {
   document.querySelectorAll('[data-property]').forEach(input => input.checked = checked);
+  updatePropertyModelCounts();
   state.extractionSelectedProperties = currentExtractionSelectedProperties();
   if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
   updateWorkflowSummaries();
@@ -1904,6 +1960,7 @@ async function loadCurveTable() {
       prepareCurveCache: true
     });
     state.tableColumns = result.columns || [];
+    state.curveRowCache.clear();
     const wells = result.wells || [];
     const ports = result.ports || [];
     const saved = state.curveSettings || {};
@@ -1993,6 +2050,8 @@ async function drawCurves() {
     state.curveRows = result.rows || [];
     autoFitCurveValueRanges(columns, state.curveRows, true);
     paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+    updateCurveNavLabel();
+    prefetchCurveStages();
     saveState();
     setReady(`Curve rows: ${state.curveRows.length}`);
   } catch (error) {
@@ -2014,6 +2073,8 @@ async function autoFitAndDrawCurves() {
   autoFitCurveRanges(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows);
   applySavedCurveRanges();
   paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+  updateCurveNavLabel();
+  prefetchCurveStages();
   saveState();
 }
 
@@ -2064,6 +2125,8 @@ async function refreshCurveSelection() {
     autoFitCurveDepthRange(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows);
     autoFitCurveValueRanges(columns, state.curveRows, true);
     paintCurves(result.depthColumn, result.channelDepthColumns || {}, columns, state.curveRows, result.boundaries || {});
+    updateCurveNavLabel();
+    prefetchCurveStages();
     saveState();
     setReady(`Curve rows: ${state.curveRows.length}`);
   } catch (error) {
@@ -2071,14 +2134,110 @@ async function refreshCurveSelection() {
   }
 }
 
+// Curve rows are cached in memory per stage; neighbouring stages are
+// prefetched in one batch backend call so stepping through stages is instant.
+const CURVE_PREFETCH_AHEAD = 10;
+const CURVE_PREFETCH_BEHIND = 2;
+const CURVE_CACHE_LIMIT = 300;
+
+function curveCacheKey(columns, well, port) {
+  return [$('curve-path').value.trim(), $('curve-depth-mode').value, columns.join('\u0001'), well, port].join('\u0002');
+}
+
+function rememberCurveRows(key, promise) {
+  state.curveRowCache.set(key, promise);
+  promise.catch(() => state.curveRowCache.delete(key));
+  while (state.curveRowCache.size > CURVE_CACHE_LIMIT) {
+    state.curveRowCache.delete(state.curveRowCache.keys().next().value);
+  }
+  return promise;
+}
+
 async function loadCurveRows(columns) {
-  return window.petrel.run('curve-data', {
+  const well = $('curve-well').value;
+  const port = $('curve-port').value;
+  const key = curveCacheKey(columns, well, port);
+  const cached = state.curveRowCache.get(key);
+  if (cached) return cached;
+  return rememberCurveRows(key, window.petrel.run('curve-data', {
     path: $('curve-path').value.trim(),
-    well: $('curve-well').value,
-    port: $('curve-port').value,
+    well,
+    port,
     depthMode: $('curve-depth-mode').value,
     columns
+  }));
+}
+
+function prefetchCurveStages() {
+  const columns = selectedCurveColumns();
+  const stages = curveStages();
+  const index = currentCurveStageIndex(stages);
+  if (!columns.length || index < 0) return;
+  const wanted = stages
+    .slice(Math.max(0, index - CURVE_PREFETCH_BEHIND), index + CURVE_PREFETCH_AHEAD + 1)
+    .filter(stage => !state.curveRowCache.has(curveCacheKey(columns, stage.well, stage.port)));
+  if (!wanted.length) return;
+  const batch = window.petrel.run('curve-data-batch', {
+    path: $('curve-path').value.trim(),
+    depthMode: $('curve-depth-mode').value,
+    columns,
+    stages: wanted
   });
+  wanted.forEach((stage, position) => {
+    rememberCurveRows(curveCacheKey(columns, stage.well, stage.port), batch.then(result => {
+      const item = (result.stages || [])[position];
+      if (!item) throw new Error('Stage was not returned by the backend.');
+      return item;
+    }));
+  });
+  batch.catch(error => appendLog(`Warning: curve prefetch failed: ${error.message}`));
+}
+
+function curveStages() {
+  const wells = Array.prototype.map.call($('curve-well').options, option => option.value).filter(Boolean);
+  return wells.flatMap(well => (state.curvePortsByWell[well] || state.curvePorts || []).map(port => ({ well, port })));
+}
+
+function currentCurveStageIndex(stages = curveStages()) {
+  const well = $('curve-well').value;
+  const port = $('curve-port').value;
+  return stages.findIndex(stage => stage.well === well && String(stage.port) === String(port));
+}
+
+function updateCurveNavLabel() {
+  const stages = curveStages();
+  const index = currentCurveStageIndex(stages);
+  $('curve-nav-label').textContent = index >= 0
+    ? `${$('curve-well').value} · Port ${$('curve-port').value} (${index + 1}/${stages.length})`
+    : 'No stage';
+  $('curve-prev').disabled = index <= 0;
+  $('curve-next').disabled = index < 0 || index >= stages.length - 1;
+}
+
+// Step to the previous/next stage; after the last stage of a well the next
+// well's first stage follows.
+async function navigateCurveStage(delta) {
+  const stages = curveStages();
+  const index = currentCurveStageIndex(stages);
+  const target = stages[index + delta];
+  if (index < 0 || !target) return;
+  if ($('curve-well').value !== target.well) {
+    $('curve-well').value = target.well;
+    fillCurvePorts(target.port);
+  }
+  $('curve-port').value = target.port;
+  updateCurveNavLabel();
+  await refreshCurveSelection();
+}
+
+function handleCurveNavigationKey(event) {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (!$('view-curves').classList.contains('active')) return;
+  const target = event.target;
+  if (target && (target.tagName === 'TEXTAREA' || (target.tagName === 'INPUT' && target.type !== 'checkbox'))) return;
+  event.preventDefault();
+  navigateCurveStage(event.key === 'ArrowRight' ? 1 : -1).catch(fail);
 }
 
 function selectedCurveColumns() {

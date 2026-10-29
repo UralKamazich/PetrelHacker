@@ -696,7 +696,7 @@ select {
 }
 
 .property-row {
-  grid-template-columns: auto 34px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   min-height: 26px;
   padding: 2px 8px;
   gap: 7px;
@@ -919,9 +919,28 @@ select {
   padding: 8px;
 }
 
+.curve-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.curve-nav .soft-button {
+  min-width: 44px;
+}
+
+.curve-nav-label {
+  min-width: 220px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
 #curve-plot {
   width: 100%;
-  height: calc(100vh - 146px);
+  height: calc(100vh - 186px);
   min-height: 650px;
   border-radius: 8px;
   background: #ffffff;
@@ -1502,13 +1521,91 @@ select {
   padding: 3px 8px;
 }
 
-#view-models .property-table,
+#view-models .property-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#view-models .property-model-content,
 #view-models .property-folder-content {
+  display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   align-content: start;
+  gap: 3px;
 }
 
 #view-models .property-folder,
 #view-models .property-empty {
   grid-column: 1 / -1;
+}
+
+/* Per-model colors, shared by Sources and the property list. */
+[data-model-color="M1"] { --model-color: #1d4ed8; --model-soft: #dbeafe; }
+[data-model-color="M2"] { --model-color: #047857; --model-soft: #d1fae5; }
+[data-model-color="M3"] { --model-color: #b45309; --model-soft: #fef3c7; }
+
+.model-badge[data-model-color] {
+  background: var(--model-soft);
+  color: var(--model-color);
+}
+
+.property-model {
+  flex: none;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--model-color, var(--line));
+  border-radius: 8px;
+}
+
+.property-model > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  cursor: pointer;
+  font-size: 13px;
+  list-style: none;
+}
+
+.property-model > summary::-webkit-details-marker {
+  display: none;
+}
+
+.property-model > summary::before {
+  content: '▸';
+  color: var(--muted);
+}
+
+.property-model[open] > summary::before {
+  content: '▾';
+}
+
+.property-model > summary .model-badge {
+  width: 34px;
+  height: 24px;
+  font-size: 12px;
+}
+
+.property-model-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.property-model-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.property-model-content {
+  padding: 6px;
 }

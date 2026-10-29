@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             "table-info",
             "metrics",
             "curve-data",
+            "curve-data-batch",
             "well-trajectories",
             "trajectory-analysis",
             "calculate-sleeve-coordinates",
@@ -102,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             "table-info": table_info,
             "metrics": metrics,
             "curve-data": curve_data,
+            "curve-data-batch": curve_data_batch,
             "well-trajectories": well_trajectories,
             "trajectory-analysis": trajectory_analysis,
             "calculate-sleeve-coordinates": calculate_sleeve_coordinates,
@@ -566,11 +568,56 @@ def curve_data(payload: JsonDict) -> None:
     if not path:
         raise ValueError("Curve table path is empty.")
     cache_path, metadata = _ensure_curve_table_cache(path)
-    well = _empty_to_none(payload.get("well"))
-    port = _empty_to_none(payload.get("port"))
+    result = _curve_stage_rows(
+        path,
+        cache_path,
+        metadata,
+        well=_empty_to_none(payload.get("well")),
+        port=_empty_to_none(payload.get("port")),
+        depth_mode=str(payload.get("depthMode") or "individual"),
+        requested_columns=payload.get("columns") or [],
+        limit=int(payload.get("limit") or 20000),
+    )
+    _emit("result", **result)
+
+
+def curve_data_batch(payload: JsonDict) -> None:
+    """Return curve rows for several well/port stages in one backend call."""
+    path = str(payload.get("path", "")).strip()
+    if not path:
+        raise ValueError("Curve table path is empty.")
+    cache_path, metadata = _ensure_curve_table_cache(path)
+    stages = []
+    for stage in payload.get("stages") or []:
+        well = _empty_to_none(stage.get("well"))
+        port = _empty_to_none(stage.get("port"))
+        result = _curve_stage_rows(
+            path,
+            cache_path,
+            metadata,
+            well=well,
+            port=port,
+            depth_mode=str(payload.get("depthMode") or "individual"),
+            requested_columns=payload.get("columns") or [],
+            limit=int(payload.get("limit") or 20000),
+        )
+        stages.append({"well": stage.get("well"), "port": stage.get("port"), **result})
+    _emit("result", stages=stages)
+
+
+def _curve_stage_rows(
+    path: str,
+    cache_path: Path,
+    metadata: JsonDict,
+    *,
+    well: str | None,
+    port: str | None,
+    depth_mode: str,
+    requested_columns: list,
+    limit: int,
+) -> JsonDict:
     available_columns = [str(value) for value in metadata["columns"]]
-    columns = [str(value) for value in payload.get("columns") or [] if str(value) in available_columns]
-    depth_mode = str(payload.get("depthMode") or "individual")
+    columns = [str(value) for value in requested_columns if str(value) in available_columns]
     depth_col = next(
         (name for name in ("TVD_top", "TVD_center", "TVDSS_top", "TVDSS_center") if name in available_columns),
         None,
@@ -626,14 +673,13 @@ def curve_data(payload: JsonDict) -> None:
     df = df.drop(columns=list(INTERVAL_BOUNDARY_COLUMNS), errors="ignore")
     if depth_col in df:
         df = df.sort_values(depth_col)
-    _emit(
-        "result",
-        depthColumn=depth_col,
-        channelDepthColumns=channel_depth_columns,
-        columns=columns,
-        boundaries=boundaries,
-        rows=_records(df.head(int(payload.get("limit") or 20000))),
-    )
+    return {
+        "depthColumn": depth_col,
+        "channelDepthColumns": channel_depth_columns,
+        "columns": columns,
+        "boundaries": boundaries,
+        "rows": _records(df.head(limit)),
+    }
 
 
 def _ensure_curve_table_cache(
