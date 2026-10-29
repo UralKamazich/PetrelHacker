@@ -165,26 +165,24 @@ def extract_petrel_object_names(raw: bytes, droids: list[str]) -> dict[str, str]
     except ValueError:
         return {}
 
-    result: dict[str, str] = {}
+    wanted: dict[bytes, str] = {}
     for droid in droids:
         normalized = _plain_uuid(droid)
-        if normalized is None:
-            continue
-        guid = uuid.UUID(normalized).bytes_le
-        search_offset = 0
-        candidates: list[str] = []
-        while True:
-            guid_offset = raw.find(guid, search_offset)
-            if guid_offset < 0:
-                break
-            search_offset = guid_offset + 1
-            if guid_offset == 0 or raw[guid_offset - 1] != 0xB1:
-                continue
-            name = _read_name_after_guid(raw, guid_offset + len(guid), name_tag)
+        if normalized is not None:
+            wanted[uuid.UUID(normalized).bytes_le] = normalized
+
+    # One pass over GUID markers (0xB1 + 16 bytes) instead of a full scan per
+    # droid; later occurrences win, as before.
+    result: dict[str, str] = {}
+    marker_offset = raw.find(b"\xb1")
+    while marker_offset >= 0:
+        guid_offset = marker_offset + 1
+        normalized = wanted.get(raw[guid_offset : guid_offset + 16])
+        if normalized is not None:
+            name = _read_name_after_guid(raw, guid_offset + 16, name_tag)
             if name:
-                candidates.append(name)
-        if candidates:
-            result[normalized] = candidates[-1]
+                result[normalized] = name
+        marker_offset = raw.find(b"\xb1", guid_offset)
     return result
 
 

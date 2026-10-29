@@ -263,23 +263,47 @@ ipcMain.handle('cache:list-sections', async () => {
   const entries = [];
   for (const name of names.filter(item => /^[a-f0-9]{64}\.json\.gz$/i.test(item))) {
     try {
-      const filePath = path.join(sectionCacheDirectory(), name);
-      const compressed = await fs.promises.readFile(filePath);
-      const parsed = JSON.parse((await gunzip(compressed)).toString('utf8'));
-      const result = parsed && parsed.result;
-      if (!result || typeof result !== 'object') continue;
-      entries.push({
-        cacheKey: name.slice(0, 64),
-        modelPath: result.model_path || '',
-        propertyUuid: result.property_uuid || '',
-        trajectoryUuid: result.trajectory_uuid || ''
-      });
+      const entry = await sectionCacheEntry(path.join(sectionCacheDirectory(), name), name.slice(0, 64));
+      if (entry) entries.push(entry);
     } catch (_error) {
       // A damaged cache entry must not prevent other saved sections from loading.
     }
   }
   return entries;
 });
+
+// Listing needs only three fields of each cached section, so they are kept in a
+// small <key>.meta.json sidecar instead of decompressing every section. The
+// sidecar is rebuilt when the cached section is newer than it.
+async function sectionCacheEntry(filePath, cacheKey) {
+  const metaPath = path.join(path.dirname(filePath), `${cacheKey}.meta.json`);
+  const [dataStat, metaStat] = await Promise.all([
+    fs.promises.stat(filePath),
+    fs.promises.stat(metaPath).catch(() => null)
+  ]);
+  if (metaStat && metaStat.mtimeMs >= dataStat.mtimeMs) {
+    try {
+      return JSON.parse(await fs.promises.readFile(metaPath, 'utf8'));
+    } catch (_error) {
+      // Rebuild a damaged sidecar below.
+    }
+  }
+  const parsed = JSON.parse((await gunzip(await fs.promises.readFile(filePath))).toString('utf8'));
+  const result = parsed && parsed.result;
+  if (!result || typeof result !== 'object') return null;
+  const entry = {
+    cacheKey,
+    modelPath: result.model_path || '',
+    propertyUuid: result.property_uuid || '',
+    trajectoryUuid: result.trajectory_uuid || ''
+  };
+  try {
+    await fs.promises.writeFile(metaPath, JSON.stringify(entry), 'utf8');
+  } catch (_error) {
+    // Listing still works without the sidecar; it is just slower next time.
+  }
+  return entry;
+}
 
 ipcMain.handle('backend:run', async (_event, command, payload) => {
   return runBackend(command, payload || {});
