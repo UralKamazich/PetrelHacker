@@ -103,6 +103,7 @@ function createWindow() {
     minHeight: 760,
     backgroundColor: '#eef2f7',
     title: 'PetrelHacker',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -113,7 +114,12 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'));
+  }
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
