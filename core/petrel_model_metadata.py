@@ -1,14 +1,30 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from bisect import bisect_right
 import uuid
 
-from core.petrel_lz4 import read_petrel_lz4_file
+from core.petrel_lz4 import PETREL_LZ4_MAGIC, read_petrel_lz4_bytes, read_petrel_lz4_file
 from core.petrel_property_reader import _read_bxml_dictionary, _read_varint, _tag
+from core.petrel_trajectory_reader import _join_bxml_pages
 
 
 PETREL_MODEL_DATA = "Model.ptd"
+
+
+@dataclass(frozen=True)
+class PetrelProjectNode:
+    uuid: str
+    parent_uuid: str | None
+    visual_name: str | None
+
+
+@dataclass(frozen=True)
+class PetrelPropertyPath:
+    title: str | None
+    grid_uuid: str | None
+    folder_path: tuple[str, ...]
 
 
 def read_petrel_object_names(ptd_path: str | Path, droids: list[str]) -> dict[str, str]:
@@ -25,6 +41,121 @@ def read_petrel_parent_names(ptd_path: str | Path, droids: list[str]) -> dict[st
         return {}
     raw = read_petrel_lz4_file(model_path, max_bytes=256 * 1024 * 1024)
     return extract_petrel_parent_names(raw, droids)
+
+
+def read_petrel_property_paths(
+    project_path: str | Path,
+    property_droids: list[str],
+    grid_droids: list[str],
+) -> dict[str, PetrelPropertyPath]:
+    path = Path(project_path)
+    if not path.is_file():
+        return {}
+    source = path.read_bytes()
+    lz4_offset = source.find(PETREL_LZ4_MAGIC)
+    if lz4_offset < 0:
+        return {}
+    try:
+        raw = read_petrel_lz4_bytes(source[lz4_offset:], max_bytes=64 * 1024 * 1024)
+        nodes = extract_petrel_project_nodes(raw)
+    except (EOFError, OSError, UnicodeDecodeError, ValueError):
+        return {}
+    return resolve_petrel_property_paths(nodes, property_droids, grid_droids)
+
+
+def extract_petrel_project_nodes(raw: bytes) -> dict[str, PetrelProjectNode]:
+    names, body_offset = _read_bxml_dictionary(raw)
+    stream = _join_bxml_pages(raw, body_offset)
+    try:
+        unique_marker = _tag(names.index("uniqueTag")) + b"\xb1"
+        parent_marker = _tag(names.index("parentTag"))
+        visual_marker = _tag(names.index("visualName"))
+    except ValueError:
+        return {}
+
+    nodes: dict[str, PetrelProjectNode] = {}
+    offset = 0
+    previous_end = 0
+    while True:
+        unique_offset = stream.find(unique_marker, offset)
+        if unique_offset < 0:
+            break
+        uuid_offset = unique_offset + len(unique_marker)
+        if uuid_offset + 16 > len(stream):
+            break
+        object_uuid = str(uuid.UUID(bytes_le=stream[uuid_offset : uuid_offset + 16])).lower()
+        parent_uuid = _stub_parent_uuid(stream, parent_marker, previous_end, unique_offset)
+        next_unique = stream.find(unique_marker, uuid_offset + 16)
+        value_end = min(len(stream), next_unique if next_unique >= 0 else uuid_offset + 1024)
+        visual_name = _stub_visual_name(stream, visual_marker, uuid_offset + 16, value_end)
+        current = nodes.get(object_uuid)
+        if current is None or visual_name:
+            nodes[object_uuid] = PetrelProjectNode(object_uuid, parent_uuid, visual_name)
+        previous_end = uuid_offset + 16
+        offset = uuid_offset + 16
+    return nodes
+
+
+def resolve_petrel_property_paths(
+    nodes: dict[str, PetrelProjectNode],
+    property_droids: list[str],
+    grid_droids: list[str],
+) -> dict[str, PetrelPropertyPath]:
+    grid_ids = {_plain_uuid(value) for value in grid_droids}
+    grid_ids.discard(None)
+    result: dict[str, PetrelPropertyPath] = {}
+    for droid in property_droids:
+        property_uuid = _plain_uuid(droid)
+        if property_uuid is None or property_uuid not in nodes:
+            continue
+        leaf = nodes[property_uuid]
+        folders: list[str] = []
+        grid_uuid: str | None = None
+        current_uuid = leaf.parent_uuid
+        visited = {property_uuid}
+        while current_uuid and current_uuid not in visited:
+            visited.add(current_uuid)
+            if current_uuid in grid_ids:
+                grid_uuid = current_uuid
+                break
+            current = nodes.get(current_uuid)
+            if current is None:
+                break
+            if current.visual_name and current.visual_name != "Properties":
+                folders.append(current.visual_name)
+            current_uuid = current.parent_uuid
+        result[property_uuid] = PetrelPropertyPath(
+            title=leaf.visual_name,
+            grid_uuid=grid_uuid,
+            folder_path=tuple(reversed(folders)),
+        )
+    return result
+
+
+def _stub_parent_uuid(data: bytes, marker: bytes, start: int, end: int) -> str | None:
+    offset = data.rfind(marker, max(start, end - 256), end)
+    value_offset = offset + len(marker) if offset >= 0 else -1
+    if value_offset < 0 or value_offset + 17 > len(data) or data[value_offset] != 0xB1:
+        return None
+    return str(uuid.UUID(bytes_le=data[value_offset + 1 : value_offset + 17])).lower()
+
+
+def _stub_visual_name(data: bytes, marker: bytes, start: int, end: int) -> str | None:
+    offset = data.find(marker, start, end)
+    value_offset = offset + len(marker) if offset >= 0 else -1
+    if value_offset < 0 or value_offset >= len(data) or data[value_offset] != 0x99:
+        return None
+    try:
+        size, text_offset = _read_varint(data, value_offset + 1)
+    except (IndexError, ValueError):
+        return None
+    text_end = text_offset + size
+    if not size or text_end > len(data):
+        return None
+    try:
+        return data[text_offset:text_end].decode("utf-8").strip() or None
+    except UnicodeDecodeError:
+        return None
 
 
 def extract_petrel_object_names(raw: bytes, droids: list[str]) -> dict[str, str]:

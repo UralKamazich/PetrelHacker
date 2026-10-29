@@ -49,6 +49,13 @@ def test_strips_property_binary_segment_frame_with_long_varint():
     assert _strip_binary_segment_frame(framed, len(payload)) == payload
 
 
+def test_strips_final_int_page_before_next_segment_and_pads_nodata_tail():
+    payload = bytes((1, 2, 3, 4, 5, 6))
+    framed = payload[:2] + b"\xa0\x04" + payload[2:] + b"\xa0\x05"
+
+    assert _strip_binary_segment_frame(framed, 8, pad_byte=255) == payload + b"\xff\xff"
+
+
 def test_extracts_model_name_for_binary_petrel_guid():
     object_uuid = uuid.UUID("97867d75-2577-4780-80ab-f8b31dd19380")
     dictionary = b"BXML\x01\xa1\x04name\xa0"

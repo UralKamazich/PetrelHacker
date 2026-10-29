@@ -115,6 +115,7 @@ function bindNavigation() {
       document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
       button.classList.add('active');
       $(`view-${button.dataset.view}`).classList.add('active');
+      document.querySelector('.workspace').classList.toggle('models-view-active', button.dataset.view === 'models');
       handleViewActivated(button.dataset.view);
     });
   });
@@ -235,6 +236,7 @@ function renderModels() {
   root.innerHTML = '';
   state.models.forEach((model, index) => {
     const grids = Array.isArray(model.internalGrids) ? model.internalGrids : [];
+    const selectedGrid = grids.find(grid => grid.uuid === model.gridUuid) || null;
     const gridSelect = grids.length > 1 ? `
       <label class="field model-grid-field">
         <span>Petrel model</span>
@@ -245,7 +247,7 @@ function renderModels() {
       </label>
     ` : '';
     const sourceNote = model.sourceKind === 'petrel-project'
-      ? `<div class="model-source-note">${grids.length} Petrel model(s), ${Number(model.propertyCount || 0)} propert${Number(model.propertyCount || 0) === 1 ? 'y' : 'ies'}</div>`
+      ? `<div class="model-source-note">${grids.length} Petrel model(s), ${selectedGrid ? `${Number(selectedGrid.propertyCount || 0)} in selected / ` : ''}${Number(model.propertyCount || 0)} properties total</div>`
       : '';
     const card = document.createElement('div');
     card.className = `model-card${gridSelect ? ' has-grid-select' : ''}`;
@@ -367,10 +369,13 @@ function gridLabel(grid) {
   const shape = [grid.ni, grid.nj, grid.nk].every(value => value)
     ? ` ${grid.ni} x ${grid.nj} x ${grid.nk}`
     : '';
-  const properties = Array.isArray(grid.propertyNames) && grid.propertyNames.length
-    ? ` - ${grid.propertyNames.join(', ')}`
-    : '';
-  return `${title}${type ? ` - ${type}` : ''}${shape}${properties}`;
+  const propertyNames = Array.isArray(grid.propertyNames) ? grid.propertyNames : [];
+  const propertyCount = Number.isFinite(Number(grid.propertyCount))
+    ? Number(grid.propertyCount)
+    : propertyNames.length;
+  const examples = propertyNames.slice(0, 5).join(', ');
+  const propertySummary = ` - ${propertyCount} propert${propertyCount === 1 ? 'y' : 'ies'}${examples ? `: ${examples}${propertyNames.length > 5 ? ', ...' : ''}` : ''}`;
+  return `${title}${type ? ` - ${type}` : ''}${shape}${propertySummary}`;
 }
 
 async function loadModels() {
@@ -383,6 +388,8 @@ async function loadModels() {
       if (model) {
         if (loaded.path) model.path = loaded.path;
         loaded.gridUuid = loaded.gridUuid || model.gridUuid || '';
+        if (Array.isArray(loaded.grids)) model.internalGrids = loaded.grids;
+        model.propertyCount = Number(loaded.propertyCount || model.propertyCount || 0);
       }
     });
     pruneSectionHorizonSelections();
@@ -1295,20 +1302,11 @@ function renderProperties() {
   const saved = state.extractionSelectedProperties;
   state.loadedModels.forEach(model => {
     const savedForModel = saved && Array.isArray(saved[model.label]) ? new Set(saved[model.label]) : null;
-    (model.properties || []).forEach(prop => {
-      const row = document.createElement('label');
-      row.className = 'property-row';
-      const isChecked = savedForModel ? savedForModel.has(prop.uuid) : shouldAutoSelect(prop.title);
-      const checked = isChecked ? 'checked' : '';
-      row.innerHTML = `
-        <input type="checkbox" ${checked} data-property="${escapeHtml(prop.uuid)}" data-model="${escapeHtml(model.label)}" data-property-title="${escapeHtml(prop.title)}">
-        <strong>${escapeHtml(model.label)}</strong>
-        <span>${escapeHtml(prop.title)}</span>
-        <span class="muted">${escapeHtml(prop.property_kind || prop.property_type || '')}</span>
-      `;
-      root.appendChild(row);
-    });
+    renderPropertyTree(root, model, groupPropertyVariants(model.properties || []), savedForModel);
   });
+  if (!root.children.length) {
+    root.innerHTML = '<div class="property-empty">No properties in the selected internal model. Select another Petrel model above.</div>';
+  }
   root.querySelectorAll('[data-property]').forEach(input => {
     input.addEventListener('change', () => {
       state.extractionSelectedProperties = currentExtractionSelectedProperties();
@@ -1317,7 +1315,104 @@ function renderProperties() {
       saveState();
     });
   });
+  root.querySelectorAll('[data-property-variant]').forEach(select => {
+    select.addEventListener('change', () => {
+      const checkbox = select.closest('.property-row').querySelector('[data-property]');
+      checkbox.dataset.property = select.value;
+      state.extractionSelectedProperties = currentExtractionSelectedProperties();
+      renderSectionProperties();
+      if (state.tableColumns.length) renderMetricsProperties(state.tableColumns);
+      updateWorkflowSummaries();
+      saveState();
+    });
+  });
   updateWorkflowSummaries();
+}
+
+function groupPropertyVariants(properties) {
+  const groups = new Map();
+  (properties || []).forEach(prop => {
+    const key = JSON.stringify([propertyFolderPath(prop), String(prop.title || prop.uuid || 'Property')]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(prop);
+  });
+  return Array.from(groups.values());
+}
+
+function renderPropertyTree(root, model, groups, savedUuids) {
+  const tree = { folders: new Map(), groups: [] };
+  groups.forEach(group => {
+    let node = tree;
+    propertyFolderPath(group[0]).forEach(name => {
+      if (!node.folders.has(name)) node.folders.set(name, { folders: new Map(), groups: [] });
+      node = node.folders.get(name);
+    });
+    node.groups.push(group);
+  });
+  appendPropertyTreeNode(root, tree, model, savedUuids, 0);
+}
+
+function appendPropertyTreeNode(root, node, model, savedUuids, depth) {
+  node.groups.forEach(group => root.appendChild(propertyRow(model, group, savedUuids)));
+  node.folders.forEach((child, name) => {
+    const details = document.createElement('details');
+    details.className = 'property-folder';
+    details.open = true;
+    const summary = document.createElement('summary');
+    summary.innerHTML = `<span>${escapeHtml(name)}</span><span class="property-folder-count">${propertyTreeGroupCount(child)}</span>`;
+    const content = document.createElement('div');
+    content.className = 'property-folder-content';
+    appendPropertyTreeNode(content, child, model, savedUuids, depth + 1);
+    details.append(summary, content);
+    root.appendChild(details);
+  });
+}
+
+function propertyTreeGroupCount(node) {
+  let count = node.groups.length;
+  node.folders.forEach(child => { count += propertyTreeGroupCount(child); });
+  return count;
+}
+
+function propertyRow(model, group, savedUuids) {
+  const prop = preferredPropertyVariant(group, savedUuids);
+  const row = document.createElement('div');
+  row.className = 'property-row';
+  const isChecked = savedUuids ? group.some(item => savedUuids.has(item.uuid)) : shouldAutoSelect(prop.title);
+  const checked = isChecked ? 'checked' : '';
+  const variantControl = group.length > 1
+    ? `<select class="property-variant" data-property-variant>${group.map((item, index) => (
+      `<option value="${escapeHtml(item.uuid)}" ${item.uuid === prop.uuid ? 'selected' : ''}>Component ${index + 1} · ${escapeHtml(formatFileSize(propertyBlobBytes(item)))}</option>`
+    )).join('')}</select>`
+    : `<span class="muted">${escapeHtml(prop.property_kind || prop.property_type || '')}</span>`;
+  row.innerHTML = `
+    <input type="checkbox" ${checked} data-property="${escapeHtml(prop.uuid)}" data-model="${escapeHtml(model.label)}" data-property-title="${escapeHtml(prop.title)}">
+    <strong>${escapeHtml(model.label)}</strong>
+    <span>${escapeHtml(prop.title)}</span>
+    ${variantControl}
+  `;
+  return row;
+}
+
+function propertyFolderPath(prop) {
+  const path = prop.folder_path || prop.folderPath || [];
+  return Array.isArray(path) ? path.map(String).filter(Boolean) : [];
+}
+
+function preferredPropertyVariant(group, savedUuids = null) {
+  if (savedUuids) {
+    const saved = group.find(prop => savedUuids.has(prop.uuid));
+    if (saved) return saved;
+  }
+  return group.find(prop => propertyBlobBytes(prop) >= 1024 * 1024) || group[0];
+}
+
+function propertyBlobBytes(prop) {
+  for (const path of prop.hdf_paths || prop.hdfPaths || []) {
+    const match = String(path).match(/bytes=(\d+)/i);
+    if (match) return Number(match[1]);
+  }
+  return 0;
 }
 
 function renderSectionModels() {
@@ -1444,11 +1539,14 @@ function sectionPropertyOptions() {
   const options = [];
   state.loadedModels.forEach(model => {
     const selectedForModel = selectedSpecs.get(model.label) || new Set();
-    (model.properties || []).forEach(prop => {
-      if (state.sectionUseExtractionSelection && !selectedForModel.has(prop.uuid)) return;
+    groupPropertyVariants(model.properties || []).forEach(group => {
+      const selected = group.find(prop => selectedForModel.has(prop.uuid));
+      if (state.sectionUseExtractionSelection && !selected) return;
+      const prop = selected || preferredPropertyVariant(group);
+      const path = propertyFolderPath(prop);
       options.push({
         value: sectionPropertyValue(model, prop),
-        label: `${model.label} - ${prop.title}`
+        label: `${model.label} - ${path.length ? `${path.join(' / ')} / ` : ''}${prop.title}`
       });
     });
   });

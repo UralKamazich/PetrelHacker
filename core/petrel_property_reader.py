@@ -101,7 +101,11 @@ class PetrelPropertyReader:
         while remaining:
             count = min(self.layout.page_capacity, remaining)
             framed_page = stream.read_exact(count * self.layout.item_size + 4)
-            page_bytes = _strip_binary_segment_frame(framed_page, count * self.layout.item_size)
+            page_bytes = _strip_binary_segment_frame(
+                framed_page,
+                count * self.layout.item_size,
+                pad_byte=255 if self.layout.property_type == "IntProperty" else None,
+            )
             page = np.frombuffer(
                 page_bytes,
                 dtype=self.layout.dtype,
@@ -141,7 +145,11 @@ class PetrelPropertyReader:
         while remaining and target_cursor < len(ordered_targets):
             count = min(self.layout.page_capacity, remaining)
             framed_page = stream.read_exact(count * self.layout.item_size + 4)
-            page_bytes = _strip_binary_segment_frame(framed_page, count * self.layout.item_size)
+            page_bytes = _strip_binary_segment_frame(
+                framed_page,
+                count * self.layout.item_size,
+                pad_byte=255 if self.layout.property_type == "IntProperty" else None,
+            )
             page = np.frombuffer(page_bytes, dtype=self.layout.dtype, count=count)
             value_end = value_start + count
             while target_cursor < len(ordered_targets):
@@ -193,7 +201,11 @@ class PetrelPropertyReader:
         offset = self.layout.value_offset + page_index * self.layout.page_stride
         raw_size = count * self.layout.item_size
         framed = self.blob.read_range(offset, raw_size + 4)
-        return _strip_binary_segment_frame(framed, raw_size)
+        return _strip_binary_segment_frame(
+            framed,
+            raw_size,
+            pad_byte=255 if self.layout.property_type == "IntProperty" else None,
+        )
 
 
 class _DecompressedStream:
@@ -394,7 +406,12 @@ def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
             raise ValueError("Invalid Petrel BXML variable integer")
 
 
-def _strip_binary_segment_frame(data: bytes, expected_size: int) -> bytes:
+def _strip_binary_segment_frame(
+    data: bytes,
+    expected_size: int,
+    *,
+    pad_byte: int | None = None,
+) -> bytes:
     if len(data) == expected_size:
         return data
     if len(data) < expected_size or len(data) - expected_size > 10:
@@ -413,6 +430,12 @@ def _strip_binary_segment_frame(data: bytes, expected_size: int) -> bytes:
                 output = data[:marker_offset] + data[payload_offset:]
                 if len(output) == expected_size:
                     return output
+            payload_end = payload_offset + remaining_size
+            if payload_end < len(data) and data[payload_end] == 0xA0:
+                output = data[:marker_offset] + data[payload_offset:payload_end]
+                missing = expected_size - len(output)
+                if pad_byte is not None and 0 <= missing <= 16:
+                    return output + bytes((pad_byte,)) * missing
         marker_offset = data.find(b"\xa0", marker_offset + 1)
     raise ValueError("Cannot locate Petrel BXML binary segment frame")
 

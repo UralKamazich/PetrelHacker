@@ -9,7 +9,11 @@ import numpy as np
 
 from core.petrel_grid_reader import PetrelGridReader, read_petrel_grid_horizontal_shape
 from core.petrel_horizon_reader import PetrelNamedHorizon, read_petrel_named_horizons
-from core.petrel_model_metadata import read_petrel_object_names, read_petrel_parent_names
+from core.petrel_model_metadata import (
+    read_petrel_object_names,
+    read_petrel_parent_names,
+    read_petrel_property_paths,
+)
 from core.petrel_trajectory_reader import (
     read_petrel_trajectory,
     read_petrel_trajectory_point_count,
@@ -174,7 +178,11 @@ class PetrelProjectReader:
             matching = [prop for prop in scoped if prop.shape == matching_shape]
             if matching:
                 return matching
-        return scoped or list(self._properties)
+        if scoped:
+            return scoped
+        if not any(prop.supporting_grid_uuid for prop in self._properties):
+            return list(self._properties)
+        return []
 
     def list_named_horizons(self) -> list[PetrelNamedHorizon]:
         if self._selected_grid_uuid is None:
@@ -364,15 +372,25 @@ class PetrelProjectReader:
     def _load_properties(self) -> list[PropertyInfo]:
         rows = _query_project_objects(self.data_path, ("FloatProperty", "IntProperty"))
         grid_by_property = _property_grid_assignments(self.data_path)
-        grids_by_horizontal_shape = {
-            (grid.ni, grid.nj): grid.uuid
+        grids_by_horizontal_shape: dict[tuple[int, int], list[str]] = {}
+        for grid in self._grids:
+            if grid.ni is not None and grid.nj is not None:
+                grids_by_horizontal_shape.setdefault((grid.ni, grid.nj), []).append(grid.uuid)
+        hierarchy = read_petrel_property_paths(
+            self.project.project_path,
+            [row[1] for row in rows],
+            [grid.uuid for grid in self._grids],
+        ) if self.project else {}
+        grid_uuid_by_plain = {
+            _plain_uuid(grid.uuid): grid.uuid
             for grid in self._grids
-            if grid.ni is not None and grid.nj is not None
         }
         properties: list[PropertyInfo] = []
         for index, row in enumerate(rows):
             data_pk, droid, blob_type, time_stamp, bytes_size = row
-            title = self._model_names.get(_plain_uuid(str(droid)))
+            normalized = _plain_uuid(str(droid))
+            property_path = hierarchy.get(normalized)
+            title = property_path.title if property_path and property_path.title else self._model_names.get(normalized)
             if not title:
                 title = f"{blob_type} {index + 1}"
             if time_stamp and title.startswith(("FloatProperty ", "IntProperty ")):
@@ -383,9 +401,12 @@ class PetrelProjectReader:
             except (EOFError, OSError, ValueError):
                 ni, nj, nk = None, None, None
                 shape = None
-            supporting_grid_uuid = grids_by_horizontal_shape.get((ni, nj))
+            supporting_grid_uuid = grid_uuid_by_plain.get(property_path.grid_uuid) if property_path else None
+            shape_candidates = grids_by_horizontal_shape.get((ni, nj), [])
+            if supporting_grid_uuid is None and len(shape_candidates) == 1:
+                supporting_grid_uuid = shape_candidates[0]
             if supporting_grid_uuid is None:
-                supporting_grid_uuid = grid_by_property.get(_plain_uuid(str(droid)))
+                supporting_grid_uuid = grid_by_property.get(normalized)
             properties.append(
                 PropertyInfo(
                     index=index,
@@ -396,6 +417,7 @@ class PetrelProjectReader:
                     hdf_paths=(f"Data.ptd:data_pk={data_pk}; bytes={int(bytes_size or 0)}",),
                     shape=shape,
                     dtype="float32" if blob_type == "FloatProperty" else "int32",
+                    folder_path=property_path.folder_path if property_path else (),
                 )
             )
         return properties
@@ -520,6 +542,7 @@ class PetrelProjectReader:
                     hdf_paths=prop.hdf_paths,
                     shape=metadata.shape,
                     dtype=prop.dtype,
+                    folder_path=prop.folder_path,
                 )
             )
         self._properties = properties

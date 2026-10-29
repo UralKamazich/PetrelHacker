@@ -163,6 +163,11 @@ def load_models(payload: JsonDict) -> None:
             _emit("log", message=f"Warning: cannot read well trajectories from {label}: {exc}")
         summary = _model_summary(label, reader, grids, properties, trajectories, named_horizons)
         _emit("log", message=summary)
+        grid_to_dict = getattr(reader, "grid_to_dict", None)
+        grid_payloads = [
+            grid_to_dict(grid) if callable(grid_to_dict) else _dataclass_dict(grid)
+            for grid in grids
+        ]
         results.append(
             {
                 "path": str(reader.epc_path),
@@ -172,7 +177,8 @@ def load_models(payload: JsonDict) -> None:
                 "depthOffset": depth_offset,
                 "gridUuid": selected_grid_uuid,
                 "summary": summary,
-                "grids": [_dataclass_dict(grid) for grid in grids],
+                "grids": grid_payloads,
+                "propertyCount": len(getattr(reader, "_properties", properties)),
                 "properties": [_dataclass_dict(prop) for prop in properties],
                 "trajectories": [_dataclass_dict(trajectory) for trajectory in trajectories],
                 "namedHorizons": [_dataclass_dict(horizon) for horizon in named_horizons],

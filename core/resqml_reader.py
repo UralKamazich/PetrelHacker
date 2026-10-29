@@ -45,6 +45,7 @@ class PropertyInfo:
     hdf_paths: tuple[str, ...] = ()
     shape: tuple[int, ...] | None = None
     dtype: str | None = None
+    folder_path: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
