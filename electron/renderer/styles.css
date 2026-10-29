@@ -1609,3 +1609,31 @@ select {
 .property-model-content {
   padding: 6px;
 }
+
+.progress-shell.done .progress-bar {
+  background: #16a34a;
+}
+
+.progress-shell.failed .progress-bar {
+  background: #dc2626;
+}
+
+.progress-label {
+  min-height: 18px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-label.done {
+  color: #15803d;
+  font-weight: 700;
+}
+
+.progress-label.failed {
+  color: #b42318;
+  font-weight: 700;
+}

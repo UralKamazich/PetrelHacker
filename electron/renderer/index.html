@@ -172,6 +172,7 @@
               <label class="field"><span>Parallel workers</span><input id="parallel-workers" type="number" min="1" max="32" value="1"></label>
               <label class="field"><span>Output XLSX / CSV</span><div class="path-row"><input id="output-path" type="text" placeholder="extracted.xlsx"><button class="icon-button" id="browse-output">...</button></div></label>
               <div class="progress-shell"><div class="progress-bar" id="extraction-progress"></div></div>
+              <div class="progress-label" id="extraction-progress-label"></div>
             </section>
           </div>
         </section>
@@ -191,6 +192,7 @@
               <label class="field"><span>Intervals table</span><div class="path-row"><input id="metrics-intervals" type="text"><button class="icon-button" id="browse-metrics-intervals">...</button></div></label>
               <label class="field"><span>Output metrics XLSX</span><div class="path-row"><input id="metrics-output" type="text" placeholder="frac_list_metrics.xlsx"><button class="icon-button" id="browse-metrics-output">...</button></div></label>
               <div class="progress-shell"><div class="progress-bar" id="metrics-progress"></div></div>
+              <div class="progress-label" id="metrics-progress-label"></div>
             </section>
             <section class="panel span-6" data-help="metrics-channels">
               <div class="panel-title"><h3>Channels</h3><button class="soft-button" id="load-metrics-table">Read headers</button></div>
@@ -317,6 +319,7 @@
                 <span>Add local barrier points</span>
               </label>
               <div class="progress-shell"><div class="progress-bar" id="section-progress"></div></div>
+              <div class="progress-label" id="section-progress-label"></div>
               <div class="section-summary" id="section-summary">Load models, then load wells.</div>
             </section>
             <section class="panel span-8 section-plot-panel">

@@ -411,8 +411,7 @@ function setModelsPhase(start, end, label) {
 }
 
 function setModelsProgress(value, label) {
-  setProgress('models-progress', value);
-  if ($('models-progress-label')) $('models-progress-label').textContent = label || '';
+  setProgress('models-progress', value, value >= 100 ? `✓ Готово · ${label || ''}` : (label || ''));
 }
 
 function updateModelsPhaseFromBackend(message) {
@@ -498,8 +497,8 @@ async function loadModels() {
   } catch (error) {
     const phase = state.modelsProgressPhase;
     state.modelsProgressPhase = null;
-    if ($('models-progress-label')) $('models-progress-label').textContent = `Failed${phase ? ` during: ${phase.label}` : ''}`;
     fail(error);
+    stopProgress('models-progress', `Ошибка${phase ? ` (${phase.label})` : ''}: ${String(error && error.message || error).split('\n')[0]}`);
   }
 }
 
@@ -1806,12 +1805,14 @@ function renderModelCoverage(coverage) {
 }
 
 async function runExtraction() {
+  startProgress('extraction-progress');
   try {
     if (state.extractionSource !== 'workspace') {
       setBusy('Checking coverage', 'Matching sleeves to model footprints');
       const coverage = await runModelCoverage();
       if (!(await confirmModelCoverage(coverage))) {
         setAttention('Extraction cancelled: check Model coverage');
+        stopProgress('extraction-progress', 'Отменено: не все муфты покрыты моделями');
         return;
       }
     }
@@ -1924,6 +1925,7 @@ function renderMetricKeys() {
 
 async function runMetrics() {
   setBusy('Calculating metrics', 'Processing intervals');
+  startProgress('metrics-progress');
   try {
     const metricKeys = checkedValues('metric-key');
     if (!metricKeys.length) {
@@ -3093,6 +3095,7 @@ async function drawSection(options = {}) {
   await ensureSectionWellNameMapped(trajectoryValue);
   const sleeveMarkers = await loadSectionSleeveMarkers(sectionTrajectoryName(trajectory));
   setBusy('Drawing section', 'Sampling model along trajectory');
+  startProgress('section-progress');
   try {
     const sectionPayload = {
       path: model.path,
@@ -5374,13 +5377,45 @@ function setAttention(message) {
 
 function fail(error) {
   const message = error && error.message ? error.message : String(error);
+  if (state.activeProgressId) stopProgress(state.activeProgressId, `Ошибка: ${message.split('\n')[0]}`);
   $('status-title').textContent = 'Error';
   $('status-subtitle').textContent = message.split('\n')[0];
   appendLog(`ERROR: ${message}`);
 }
 
-function setProgress(id, value) {
-  $(id).style.width = `${Math.max(0, Math.min(100, Number(value) || 0))}%`;
+// Progress bars show a status line under the bar: percentage while running,
+// "Готово" when finished, "Ошибка"/"Отменено" otherwise.
+function setProgress(id, value, text = null) {
+  const percent = Math.max(0, Math.min(100, Number(value) || 0));
+  const bar = $(id);
+  bar.style.width = `${percent}%`;
+  const shell = bar.parentElement;
+  shell.classList.toggle('done', percent >= 100);
+  shell.classList.remove('failed');
+  const label = $(`${id}-label`);
+  if (label) {
+    label.classList.toggle('done', percent >= 100);
+    label.classList.remove('failed');
+    label.textContent = text !== null ? text : (percent >= 100 ? '✓ Готово' : `Выполняется… ${Math.round(percent)}%`);
+  }
+  state.activeProgressId = percent < 100 ? id : (state.activeProgressId === id ? '' : state.activeProgressId);
+}
+
+function startProgress(id) {
+  setProgress(id, 0, 'Выполняется…');
+}
+
+function stopProgress(id, text) {
+  const bar = $(id);
+  if (!bar) return;
+  bar.parentElement.classList.add('failed');
+  const label = $(`${id}-label`);
+  if (label) {
+    label.classList.remove('done');
+    label.classList.add('failed');
+    label.textContent = text;
+  }
+  if (state.activeProgressId === id) state.activeProgressId = '';
 }
 
 function extractionOutputPath() {
