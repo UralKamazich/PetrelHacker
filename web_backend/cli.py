@@ -50,7 +50,7 @@ from core.section_workspace import (
     workspace_info,
     workspace_path_for,
 )
-from core.table_io import read_table
+from core.table_io import read_table, read_table_headers
 from core.trajectory_analysis import analyze_trajectory, interpolate_trajectory_xy
 
 
@@ -482,6 +482,11 @@ def table_info(payload: JsonDict) -> None:
     path = str(payload.get("path", "")).strip()
     if not path:
         raise ValueError("Table path is empty.")
+    if bool(payload.get("headersOnly", False)):
+        cached = _valid_curve_table_cache(path)
+        columns = cached[1]["columns"] if cached else read_table_headers(path)
+        _emit("result", columns=columns, rows=cached[1]["rows"] if cached else None, headersOnly=True)
+        return
     if bool(payload.get("prepareCurveCache", False)):
         _cache_path, metadata = _ensure_curve_table_cache(path)
     else:
@@ -514,7 +519,7 @@ def metrics(payload: JsonDict) -> None:
         raise ValueError("Metrics paths are incomplete.")
     _emit("progress", value=5)
     _emit("log", message="Loading extracted cell table...")
-    extracted = read_table(extracted_path)
+    extracted = _read_table_via_cache(extracted_path)
     _emit("progress", value=35)
     _emit("log", message="Loading interval table...")
     intervals = read_table(intervals_path)
@@ -687,28 +692,12 @@ def _ensure_curve_table_cache(
     *,
     force: bool = False,
 ) -> tuple[Path, JsonDict]:
-    source = Path(path).expanduser().resolve()
-    if not source.exists():
-        raise FileNotFoundError(source)
-    cache_dir = _curve_cache_directory()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:24]
-    cache_path = cache_dir / f"{digest}.parquet"
-    metadata_path = cache_dir / f"{digest}.json"
-    source_stat = source.stat()
-    signature = {
-        "sourcePath": str(source),
-        "sourceSize": int(source_stat.st_size),
-        "sourceMtimeNs": int(source_stat.st_mtime_ns),
-    }
-
-    if not force and cache_path.exists() and metadata_path.exists():
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if all(metadata.get(key) == value for key, value in signature.items()):
-                return cache_path, metadata
-        except (OSError, ValueError, TypeError):
-            pass
+    source, cache_path, metadata_path, signature = _curve_table_cache_location(path)
+    if not force:
+        cached = _valid_curve_table_cache(path)
+        if cached:
+            return cached
+    _curve_cache_directory().mkdir(parents=True, exist_ok=True)
 
     df = _deduplicate_columns(read_table(source))
     columns = [str(column) for column in df.columns]
@@ -740,6 +729,45 @@ def _ensure_curve_table_cache(
         temporary_cache.unlink(missing_ok=True)
         temporary_metadata.unlink(missing_ok=True)
     return cache_path, metadata
+
+
+def _curve_table_cache_location(path: str | Path) -> tuple[Path, Path, Path, JsonDict]:
+    source = Path(path).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    cache_dir = _curve_cache_directory()
+    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:24]
+    source_stat = source.stat()
+    signature = {
+        "sourcePath": str(source),
+        "sourceSize": int(source_stat.st_size),
+        "sourceMtimeNs": int(source_stat.st_mtime_ns),
+    }
+    return source, cache_dir / f"{digest}.parquet", cache_dir / f"{digest}.json", signature
+
+
+def _valid_curve_table_cache(path: str | Path) -> tuple[Path, JsonDict] | None:
+    """Return the parquet cache of a table if it matches the current file."""
+    _source, cache_path, metadata_path, signature = _curve_table_cache_location(path)
+    if not cache_path.exists() or not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if all(metadata.get(key) == value for key, value in signature.items()):
+        return cache_path, metadata
+    return None
+
+
+def _read_table_via_cache(path: str | Path) -> pd.DataFrame:
+    """Read a large table through its parquet cache (built on first use)."""
+    try:
+        cache_path, _metadata = _ensure_curve_table_cache(path)
+        df = pd.read_parquet(cache_path)
+    except Exception:  # noqa: BLE001
+        return read_table(path)
+    return df.drop(columns=[CURVE_CACHE_WELL_KEY, CURVE_CACHE_PORT_KEY], errors="ignore")
 
 
 def _curve_cache_directory() -> Path:

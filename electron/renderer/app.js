@@ -1854,7 +1854,7 @@ async function loadMetricsTable() {
   if (!path) return fail(new Error('Select extracted table first.'));
   setBusy('Reading table', 'Loading headers');
   try {
-    const result = await window.petrel.run('table-info', { path });
+    const result = await window.petrel.run('table-info', { path, headersOnly: true });
     state.tableColumns = result.columns || [];
     fillSelect('metrics-ntg', state.tableColumns, guessColumn(state.tableColumns, ['NTG']));
     fillSelect('metrics-poro', state.tableColumns, guessColumn(state.tableColumns, ['PORO']));
