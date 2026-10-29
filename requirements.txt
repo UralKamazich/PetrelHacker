@@ -1,4 +1,3 @@
-PySide6
 resqpy
 h5py
 lz4
