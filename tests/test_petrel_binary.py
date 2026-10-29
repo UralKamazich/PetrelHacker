@@ -235,3 +235,19 @@ def test_maps_dense_cell_indices_through_sparse_property_mask():
     assert reader._stored_value_index(4) == 1
     assert reader._stored_value_index(5) == 2
     assert reader._stored_value_index(7) == 3
+
+
+def test_pillar_markers_follow_shifted_dictionary_tags() -> None:
+    from core.petrel_grid_reader import _pillar_markers
+
+    names = ["pillars", "pillar", "degree", "old_value", "is_truncated", "geometry", "position", "double",
+             "zmin", "zmax", "sequence", "max_truncated", "min_truncated", "zvalues", "float", "has_bools"]
+    extension = b"".join(b"\xa1" + bytes((len(name),)) + name.encode("ascii") for name in names)
+    # "pillars" uses tag 0x40 instead of the usual 0x3e (one extra name earlier in the file).
+    data = b"BXML\x01" + extension + b"\xa0\x80\x20\x01\x42\x40\x06\x08\x88\xff\x42\x42\x06\x00\x88\x07"
+
+    markers = _pillar_markers(data)
+
+    assert markers.straight == b"\x42\x06\x00\x88\x07"
+    assert markers.position == b"\x4e\x01\x93\x02"
+    assert markers.z_values == b"\x5c\x01\x91"

@@ -109,6 +109,7 @@ class PetrelProjectReader:
         self._companion_readers: dict[str, ResqmlReader] = {}
         self._column_centers_cache: dict[str, object] = {}
         self._native_grid_readers: dict[str, PetrelGridReader] = {}
+        self._native_errors: dict[str, str] = {}
         self._native_property_readers: dict[str, PetrelPropertyReader] = {}
         self._trajectories: list[WellTrajectoryInfo] | None = None
         self._trajectory_data_pks: dict[str, int] = {}
@@ -593,7 +594,7 @@ class PetrelProjectReader:
             raise ValueError("Select an internal Petrel model before reading project data.")
         reader = self._companion_readers.get(_petrel_droid(self._selected_grid_uuid))
         if reader is None and required:
-            raise NotImplementedError(_unsupported_decode_message())
+            raise NotImplementedError(_unsupported_decode_message(self._native_errors.get(self._selected_grid_uuid)))
         return reader
 
     def _native_property_reader(
@@ -616,9 +617,10 @@ class PetrelProjectReader:
             return None
         try:
             native = PetrelPropertyReader(self.data_path, data_pk, prop.property_type or "")
-        except ValueError:
+        except ValueError as exc:
             if required:
                 raise
+            self._native_errors[self._selected_grid_uuid or ""] = f"property {prop.title}: {exc}"
             return None
         selected_shape = self.get_grid_shape()
         native_shape = (native.layout.ni, native.layout.nj, native.layout.nk)
@@ -645,9 +647,10 @@ class PetrelProjectReader:
             return None
         try:
             native = PetrelGridReader(self.data_path, data_pk)
-        except ValueError:
+        except ValueError as exc:
             if required:
                 raise
+            self._native_errors[self._selected_grid_uuid] = f"grid {grid.title}: {exc}"
             return None
         selected_shape = self.get_grid_shape()
         native_shape = (native.layout.ni, native.layout.nj, native.layout.nk)
@@ -832,8 +835,6 @@ def _format_bytes(value: int) -> str:
         size /= 1024
 
 
-def _unsupported_decode_message() -> str:
-    return (
-        "Native Petrel project metadata is readable, but PillarGrid2 geometry "
-        "and property value decoding is not implemented yet."
-    )
+def _unsupported_decode_message(detail: str | None = None) -> str:
+    message = "Cannot decode Petrel model data natively"
+    return f"{message} ({detail})." if detail else f"{message}."

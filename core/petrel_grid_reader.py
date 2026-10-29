@@ -27,6 +27,25 @@ _VERTICAL_CURVE_XY_TOLERANCE = 1e-3
 
 
 @dataclass(frozen=True)
+class _PillarMarkers:
+    """Byte markers inside pillar records.
+
+    Each marker starts with a BXML tag byte whose value depends on the name's
+    position in the file dictionary, so it shifts when a grid stores extra
+    sections (for example ``connections``).
+    """
+
+    straight: bytes = _STRAIGHT_PILLAR_MARKER
+    position: bytes = _POSITION_MARKER
+    curve_size: bytes = _CURVE_SIZE_MARKER
+    vertices: bytes = _VERTICES_MARKER
+    z_values: bytes = _Z_VALUES_MARKER
+
+
+_DEFAULT_MARKERS = _PillarMarkers()
+
+
+@dataclass(frozen=True)
 class PetrelGridLayout:
     data_pk: int
     ni: int
@@ -110,10 +129,11 @@ class PetrelGridReader:
     def _build_pillar_index(self, ni: int, nj: int) -> _GridIndex:
         prefix = self.blob.read_range(0, min(self.blob.uncompressed_size, 16 * 1024 * 1024))
         geometry_mode = _detect_geometry_mode_prefix(prefix)
+        markers = _pillar_markers(prefix)
         if self.blob.uncompressed_size > 256 * 1024 * 1024:
             if geometry_mode != "position":
                 raise ValueError("Large Petrel curve grids are not supported by the streaming decoder")
-            return self._build_streaming_position_index(ni, nj)
+            return self._build_streaming_position_index(ni, nj, prefix, markers)
 
         raw = b"".join(self.blob.iter_blocks())
         pillar_count = (ni + 1) * (nj + 1)
@@ -121,15 +141,15 @@ class PetrelGridReader:
         pillar_data, pillar_pages, _names = _read_paged_section(raw, b"pillars")
 
         records: list[tuple[tuple[float, float], int, int]] = []
-        marker_offset = pillar_data.find(_STRAIGHT_PILLAR_MARKER)
+        marker_offset = pillar_data.find(markers.straight)
         while marker_offset >= 0:
             if geometry_mode == "position":
-                parsed = _parse_position_pillar_header(pillar_data, marker_offset)
+                parsed = _parse_position_pillar_header(pillar_data, marker_offset, markers)
             else:
-                parsed = _parse_vertical_curve_pillar_header(pillar_data, marker_offset)
+                parsed = _parse_vertical_curve_pillar_header(pillar_data, marker_offset, markers)
             if parsed is not None:
                 records.append(parsed)
-            marker_offset = pillar_data.find(_STRAIGHT_PILLAR_MARKER, marker_offset + 1)
+            marker_offset = pillar_data.find(markers.straight, marker_offset + 1)
 
         defined_indices = np.flatnonzero(pillar_types != 0)
         if len(records) != len(defined_indices):
@@ -156,45 +176,116 @@ class PetrelGridReader:
             geometry_mode=geometry_mode,
         )
 
-    def _build_streaming_position_index(self, ni: int, nj: int) -> _GridIndex:
+    def _build_streaming_position_index(
+        self,
+        ni: int,
+        nj: int,
+        prefix: bytes,
+        markers: _PillarMarkers = _DEFAULT_MARKERS,
+    ) -> _GridIndex:
+        """Index pillars of a large grid without loading the whole blob.
+
+        The pillars section is a sequence of BXML pages; page frames can split a
+        pillar record (even its marker), so markers are searched in the
+        de-framed logical stream and Z offsets are stored as logical offsets
+        together with the page map.
+        """
         pillar_count = (ni + 1) * (nj + 1)
+        try:
+            pillar_types, _type_pages = _read_pillar_types(prefix, pillar_count)
+            defined_indices = np.flatnonzero(pillar_types != 0)
+        except ValueError:
+            defined_indices = np.arange(pillar_count)
+        section_offset = prefix.find(b"\xa1\x07pillars")
+        if section_offset < 0:
+            raise ValueError("Petrel BXML has no pillars section")
+        _names, cursor = _read_dictionary_extension(prefix, section_offset)
+
         xy = np.full((pillar_count, 2), np.nan, dtype=np.float64)
         z_offsets = np.full(pillar_count, -1, dtype=np.int64)
         z_counts = np.zeros(pillar_count, dtype=np.uint32)
+        page_logical_starts: list[int] = []
+        page_raw_starts: list[int] = []
+        page_sizes: list[int] = []
         found_count = 0
-        stream_offset = 0
         carry = b""
-        last_marker_offset = -1
+        carry_logical = 0
+        logical = 0
+        last_marker = -1
 
-        for raw in self.blob.iter_blocks():
-            combined = carry + raw
-            combined_offset = stream_offset - len(carry)
-            marker_offset = combined.find(_STRAIGHT_PILLAR_MARKER)
+        def scan(chunk: bytes) -> None:
+            nonlocal carry, carry_logical, found_count, last_marker
+            combined = carry + chunk
+            base = carry_logical
+            marker_offset = combined.find(markers.straight)
             while marker_offset >= 0:
-                absolute_offset = combined_offset + marker_offset
-                if absolute_offset > last_marker_offset:
+                absolute = base + marker_offset
+                if absolute > last_marker:
                     if len(combined) - marker_offset < _PILLAR_HEADER_SIZE:
                         break
-                    parsed = _parse_framed_position_pillar_header(
-                        combined, marker_offset, combined_offset
-                    )
+                    parsed = _parse_position_pillar_header(combined, marker_offset, markers)
                     if parsed is not None:
-                        if found_count >= pillar_count:
+                        if found_count >= len(defined_indices):
                             raise ValueError("Petrel grid contains more pillars than its node dimensions")
-                        xy[found_count], z_offsets[found_count], z_counts[found_count] = parsed
+                        pillar_index = defined_indices[found_count]
+                        xy[pillar_index] = parsed[0]
+                        z_offsets[pillar_index] = base + parsed[1]
+                        z_counts[pillar_index] = parsed[2]
                         found_count += 1
-                        last_marker_offset = absolute_offset
-                marker_offset = combined.find(_STRAIGHT_PILLAR_MARKER, marker_offset + 1)
-            carry = combined[-_PILLAR_HEADER_SIZE:]
-            stream_offset += len(raw)
+                    last_marker = absolute
+                marker_offset = combined.find(markers.straight, marker_offset + 1)
+            keep = min(len(combined), _PILLAR_HEADER_SIZE)
+            carry = combined[len(combined) - keep :]
+            carry_logical = base + len(combined) - keep
 
-        if found_count != pillar_count:
+        stream = _BlobStream(self.blob)
+        total = self.blob.uncompressed_size
+        while cursor < total:
+            head = stream.read(cursor, 16)
+            if head[:1] == b"\xa0":
+                size, payload_offset = _read_varint(head, 1)
+                payload_start = cursor + payload_offset
+                if size <= 0 or payload_start + size > total:
+                    break
+                page_logical_starts.append(logical)
+                page_raw_starts.append(payload_start)
+                page_sizes.append(size)
+                scan(stream.read(payload_start, size))
+                logical += size
+                cursor = payload_start + size
+                continue
+            if head[:1] == b"\xa1":
+                try:
+                    _extra, extension_end = _read_dictionary_extension(stream.read(cursor, 4096), 0)
+                except (UnicodeDecodeError, ValueError):
+                    pass
+                else:
+                    cursor += extension_end
+                    continue
+            # Unframed tail: treat the rest of the blob as one page.
+            size = total - cursor
+            page_logical_starts.append(logical)
+            page_raw_starts.append(cursor)
+            page_sizes.append(size)
+            for chunk_start in range(cursor, total, 4 * 1024 * 1024):
+                scan(stream.read(chunk_start, min(4 * 1024 * 1024, total - chunk_start)))
+            break
+        scan(b"\0" * _PILLAR_HEADER_SIZE)
+
+        if found_count != len(defined_indices):
             raise ValueError(
                 f"Unsupported Petrel PillarGrid2 position geometry: found {found_count} pillars; "
-                f"expected {pillar_count}"
+                f"expected {len(defined_indices)}"
             )
-        empty = np.asarray([], dtype=np.int64)
-        return _GridIndex(xy, z_offsets, z_counts, empty, empty, empty, "position")
+        return _GridIndex(
+            xy=xy,
+            z_offsets=z_offsets,
+            z_counts=z_counts,
+            page_logical_starts=np.asarray(page_logical_starts, dtype=np.int64),
+            page_raw_starts=np.asarray(page_raw_starts, dtype=np.int64),
+            page_sizes=np.asarray(page_sizes, dtype=np.int64),
+            geometry_mode="position",
+        )
 
     @lru_cache(maxsize=128)
     def _read_pillar_z(self, pillar_index: int) -> np.ndarray:
@@ -240,6 +331,34 @@ class PetrelGridReader:
                 f"Petrel grid column is out of bounds: i={i}, j={j}; "
                 f"shape={self.layout.ni}/{self.layout.nj}/{self.layout.nk}"
             )
+
+
+class _BlobStream:
+    """Sequential reader over decompressed blob blocks with a small buffer."""
+
+    def __init__(self, blob: PetrelLz4Blob) -> None:
+        self._blocks = blob.iter_blocks()
+        self._buffer = bytearray()
+        self._start = 0
+
+    def read(self, offset: int, size: int) -> bytes:
+        if offset < self._start:
+            raise ValueError("Petrel blob stream cannot seek backwards")
+        while offset > self._start + len(self._buffer):
+            self._start += len(self._buffer)
+            self._buffer.clear()
+            block = next(self._blocks, None)
+            if block is None:
+                return b""
+            self._buffer.extend(block)
+        del self._buffer[: offset - self._start]
+        self._start = offset
+        while len(self._buffer) < size:
+            block = next(self._blocks, None)
+            if block is None:
+                break
+            self._buffer.extend(block)
+        return bytes(self._buffer[:size])
 
 
 def _parse_horizontal_shape(blob: PetrelLz4Blob) -> tuple[int, int]:
@@ -290,6 +409,38 @@ def _detect_geometry_mode_prefix(data: bytes) -> str:
     raise ValueError("Cannot determine Petrel pillar geometry encoding")
 
 
+def _pillar_markers(data: bytes) -> _PillarMarkers:
+    """Derive pillar record markers from the tags used by this file."""
+    marker = b"\xa1\x07pillars"
+    offset = data.find(marker)
+    if offset < 0:
+        return _DEFAULT_MARKERS
+    try:
+        names, cursor = _read_dictionary_extension(data, offset)
+        _size, payload = _read_varint(data, cursor + 1)
+    except (IndexError, UnicodeDecodeError, ValueError):
+        return _DEFAULT_MARKERS
+    # The page starts with the "pillars" element: [flag] 0x42 <tag>.
+    tag_offset = data.find(b"\x42", payload, payload + 8)
+    if tag_offset < 0 or names[0] != "pillars":
+        return _DEFAULT_MARKERS
+    base = data[tag_offset + 1]
+
+    def tag(name: str, default: bytes) -> bytes:
+        if name not in names:
+            return default[:1]
+        value = base + 2 * names.index(name)
+        return bytes((value,)) if value <= 0xFF else default[:1]
+
+    return _PillarMarkers(
+        straight=tag("pillar", _STRAIGHT_PILLAR_MARKER) + _STRAIGHT_PILLAR_MARKER[1:],
+        position=tag("double", _POSITION_MARKER) + _POSITION_MARKER[1:],
+        curve_size=tag("size", _CURVE_SIZE_MARKER) + _CURVE_SIZE_MARKER[1:],
+        vertices=tag("double", _VERTICES_MARKER) + _VERTICES_MARKER[1:],
+        z_values=tag("float", _Z_VALUES_MARKER) + _Z_VALUES_MARKER[1:],
+    )
+
+
 def _read_pillar_types(data: bytes, expected_count: int) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
     section, pages, _names = _read_paged_section(data, b"pillar_types")
     marker_offset = section.find(b"\x01\x8d")
@@ -301,7 +452,9 @@ def _read_pillar_types(data: bytes, expected_count: int) -> tuple[np.ndarray, li
             payload_offset = 0
         if count == expected_count and payload_offset + count * 4 <= len(section):
             values = np.frombuffer(section, dtype="<i4", count=count, offset=payload_offset).copy()
-            if np.isin(values, (0, 2)).all():
+            # 0 = undefined, 2 = straight; other small codes (4, 5) are faulted
+            # pillars, read as their first z-sequence.
+            if len(values) and int(values.min()) >= 0 and int(values.max()) < 64:
                 return values, pages
         marker_offset = section.find(b"\x01\x8d", marker_offset + 1)
     raise ValueError(f"Cannot read {expected_count} Petrel pillar type entries")
@@ -371,15 +524,16 @@ def _read_dictionary_extension(data: bytes, offset: int) -> tuple[list[str], int
 def _parse_position_pillar_header(
     data: bytes,
     marker_offset: int,
+    markers: _PillarMarkers = _DEFAULT_MARKERS,
 ) -> tuple[tuple[float, float], int, int] | None:
     header = data[marker_offset : marker_offset + _PILLAR_HEADER_SIZE]
-    position_offset = header.find(_POSITION_MARKER)
-    z_values_offset = header.find(_Z_VALUES_MARKER)
+    position_offset = header.find(markers.position)
+    z_values_offset = header.find(markers.z_values)
     if position_offset < 0 or z_values_offset < 0:
         return None
-    position_payload = position_offset + len(_POSITION_MARKER)
+    position_payload = position_offset + len(markers.position)
     x, y = struct.unpack_from("<dd", header, position_payload)
-    count, payload_offset = _read_varint(header, z_values_offset + len(_Z_VALUES_MARKER))
+    count, payload_offset = _read_varint(header, z_values_offset + len(markers.z_values))
     if count < 2:
         return None
     return (x, y), marker_offset + payload_offset, count
@@ -389,17 +543,18 @@ def _parse_framed_position_pillar_header(
     data: bytes,
     marker_offset: int,
     data_offset: int,
+    markers: _PillarMarkers = _DEFAULT_MARKERS,
 ) -> tuple[tuple[float, float], int, int] | None:
     header = data[marker_offset : marker_offset + _PILLAR_HEADER_SIZE]
     cleaned, original_offsets = _remove_bxml_page_frames(header)
-    position_offset = cleaned.find(_POSITION_MARKER)
-    z_values_offset = cleaned.find(_Z_VALUES_MARKER)
+    position_offset = cleaned.find(markers.position)
+    z_values_offset = cleaned.find(markers.z_values)
     if position_offset < 0 or z_values_offset < 0:
         return None
-    position_payload = original_offsets[position_offset + len(_POSITION_MARKER) - 1] + 1
+    position_payload = original_offsets[position_offset + len(markers.position) - 1] + 1
     x, y = struct.unpack_from("<dd", header, position_payload)
     count, cleaned_payload_offset = _read_varint(
-        cleaned, z_values_offset + len(_Z_VALUES_MARKER)
+        cleaned, z_values_offset + len(markers.z_values)
     )
     if count < 2:
         return None
@@ -410,16 +565,17 @@ def _parse_framed_position_pillar_header(
 def _parse_vertical_curve_pillar_header(
     data: bytes,
     marker_offset: int,
+    markers: _PillarMarkers = _DEFAULT_MARKERS,
 ) -> tuple[tuple[float, float], int, int] | None:
     header = data[marker_offset : marker_offset + _PILLAR_HEADER_SIZE]
-    if header.find(_CURVE_SIZE_MARKER) < 0:
+    if header.find(markers.curve_size) < 0:
         return None
-    vertices_offset = header.find(_VERTICES_MARKER)
-    z_values_offset = header.find(_Z_VALUES_MARKER)
+    vertices_offset = header.find(markers.vertices)
+    z_values_offset = header.find(markers.z_values)
     if vertices_offset < 0 or z_values_offset < 0:
         return None
     value_count, vertices_payload = _read_varint(
-        header, vertices_offset + len(_VERTICES_MARKER)
+        header, vertices_offset + len(markers.vertices)
     )
     if value_count != 9 or vertices_payload + value_count * 8 > len(header):
         return None
@@ -429,7 +585,7 @@ def _parse_vertical_curve_pillar_header(
         raise ValueError(
             "Petrel grid contains curved pillars that cannot be normalized as vertical geometry"
         )
-    count, payload_offset = _read_varint(header, z_values_offset + len(_Z_VALUES_MARKER))
+    count, payload_offset = _read_varint(header, z_values_offset + len(markers.z_values))
     if count < 2:
         return None
     xy = tuple(np.mean(vertices[:, :2], axis=0))
