@@ -1305,15 +1305,55 @@ select {
   color: #ffffff;
 }
 
-.help-modal {
-  width: min(640px, 100%);
-  max-height: calc(100vh - 48px);
+.help-window {
+  position: fixed;
+  z-index: 200;
   display: flex;
   flex-direction: column;
+  width: min(560px, calc(100vw - 48px));
+  height: min(640px, calc(100vh - 48px));
+  min-width: 320px;
+  min-height: 180px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
+  resize: both;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
 }
 
-.help-modal.wide {
-  width: min(880px, 100%);
+.help-window.wide {
+  width: min(820px, calc(100vw - 48px));
+}
+
+.help-window-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.help-window.dragging .help-window-header {
+  cursor: grabbing;
+}
+
+.help-window-title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.help-window .help-body {
+  flex: 1;
+  padding: 12px 16px 16px;
 }
 
 .help-body {

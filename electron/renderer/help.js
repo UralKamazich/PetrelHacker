@@ -317,30 +317,85 @@ function installPanelHelp() {
   });
 }
 
+// Floating, non-modal help window: the app stays usable underneath, so the
+// user can follow the instructions step by step. One window is reused.
+let panelHelpWindow = null;
+let panelHelpPosition = null;
+
 function showPanelHelp(help) {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `
-    <div class="modal-card help-modal${help.wide ? ' wide' : ''}" role="dialog" aria-modal="true">
-      <div class="modal-title-row">
-        <div class="modal-title"></div>
-        <button class="icon-button" type="button" aria-label="Закрыть">x</button>
-      </div>
-      <div class="help-body">${help.body}</div>
+  if (!panelHelpWindow) panelHelpWindow = createPanelHelpWindow();
+  const win = panelHelpWindow;
+  win.classList.toggle('wide', Boolean(help.wide));
+  win.querySelector('.help-window-title').textContent = help.title;
+  const body = win.querySelector('.help-body');
+  body.innerHTML = help.body;
+  body.scrollTop = 0;
+  if (!win.isConnected) document.body.appendChild(win);
+  win.style.width = '';
+  win.style.height = '';
+  placePanelHelpWindow(win);
+}
+
+function createPanelHelpWindow() {
+  const win = document.createElement('div');
+  win.className = 'help-window';
+  win.setAttribute('role', 'dialog');
+  win.innerHTML = `
+    <div class="help-window-header" title="Перетащите, чтобы переместить">
+      <div class="help-window-title"></div>
+      <button class="icon-button" type="button" aria-label="Закрыть">x</button>
     </div>
+    <div class="help-body"></div>
   `;
-  overlay.querySelector('.modal-title').textContent = help.title;
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener('keydown', onKey);
-  };
-  const onKey = event => {
-    if (event.key === 'Escape') close();
-  };
-  overlay.querySelector('.icon-button').addEventListener('click', close);
-  overlay.addEventListener('click', event => {
-    if (event.target === overlay) close();
+  win.querySelector('.icon-button').addEventListener('click', () => win.remove());
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && win.isConnected) win.remove();
   });
-  document.addEventListener('keydown', onKey);
-  document.body.appendChild(overlay);
+  bindPanelHelpDrag(win, win.querySelector('.help-window-header'));
+  window.addEventListener('resize', () => {
+    if (win.isConnected) placePanelHelpWindow(win);
+  });
+  return win;
+}
+
+function placePanelHelpWindow(win) {
+  const rect = win.getBoundingClientRect();
+  const position = panelHelpPosition || {
+    left: window.innerWidth - rect.width - 24,
+    top: 24
+  };
+  win.style.left = `${clampHelpCoordinate(position.left, window.innerWidth - rect.width)}px`;
+  win.style.top = `${clampHelpCoordinate(position.top, window.innerHeight - rect.height)}px`;
+}
+
+function clampHelpCoordinate(value, max) {
+  return Math.max(0, Math.min(value, Math.max(0, max)));
+}
+
+function bindPanelHelpDrag(win, handle) {
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button')) return;
+    const rect = win.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+    handle.setPointerCapture(event.pointerId);
+    win.classList.add('dragging');
+    const move = moveEvent => {
+      const left = clampHelpCoordinate(moveEvent.clientX - offsetX, window.innerWidth - rect.width);
+      const top = clampHelpCoordinate(moveEvent.clientY - offsetY, window.innerHeight - rect.height);
+      win.style.left = `${left}px`;
+      win.style.top = `${top}px`;
+      panelHelpPosition = { left, top };
+    };
+    const stop = () => {
+      win.classList.remove('dragging');
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', stop);
+      handle.removeEventListener('pointercancel', stop);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+    event.preventDefault();
+  });
 }
