@@ -83,7 +83,10 @@ Every panel has a `?` button with a detailed guide (`electron/renderer/help.js`)
 ## Metrics
 
 Intervals per sleeve (from the boundaries table): `Global`, `Local`,
-`Total_pm15m`, `TopTotal_m15m`, `BotTotal_p15m`; each also as `_Net` and
+`Total_pm15m`, `TopTotal_m15m`, `BotTotal_p15m`, and barrier intervals
+`LocalBarriers`, `TopBarrier`, `BotBarrier` built from the TB/BB points
+(barrier thickness capped at 15 m; zero/negative or missing barrier → empty
+metrics); each also as `_Net` and
 `_NonNet` (net by lithology codes, else NTG > 0, else PORO > 0). Column names:
 `<Channel>_<metric>_<interval>[_Net|_NonNet]`. Formulas are listed in the
 in-app help of the Metric set panel and in the `.txt` written next to every

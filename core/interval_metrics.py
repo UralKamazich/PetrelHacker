@@ -66,6 +66,13 @@ INTERVAL_DEFINITIONS = (
     ("TopTotal_m15m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -INTERVAL_BUFFER_METERS, 0.0),
     ("BotTotal_p15m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, INTERVAL_BUFFER_METERS),
 )
+# Barrier intervals are built from the TB/BB points placed on the Sections page.
+# Each barrier is limited to INTERVAL_BUFFER_METERS from the Local boundary; a barrier
+# with zero/negative thickness or without a point is absent and its metrics stay empty.
+BARRIER_TOP_COLUMN = "TVDSS_TOP_BARRIER_LOCAL"
+BARRIER_BOT_COLUMN = "TVDSS_BOT_BARRIER_LOCAL"
+BARRIER_INTERVAL_NAMES = ("LocalBarriers", "TopBarrier", "BotBarrier")
+ALL_INTERVAL_NAMES = tuple(name for name, *_rest in INTERVAL_DEFINITIONS) + BARRIER_INTERVAL_NAMES
 BASE_METRIC_KEYS = (
     "thickness",
     "net_thickness",
@@ -188,6 +195,21 @@ def calculate_interval_metrics(
             interval_sets[f"{name}_Net"] = net_cells
             interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
 
+        unavailable_suffixes: set[str] = set()
+        for name, bounds in _barrier_interval_bounds(interval).items():
+            if bounds is None:
+                interval_sets[name] = cells.iloc[0:0]
+                interval_sets[f"{name}_Net"] = cells.iloc[0:0]
+                interval_sets[f"{name}_NonNet"] = cells.iloc[0:0]
+                unavailable_suffixes.update({name, f"{name}_Net", f"{name}_NonNet"})
+                continue
+            interval_cells = _cells_in_interval(cells, *bounds)
+            net_cells = _net_cells(interval_cells, settings)
+            interval_sets[name] = interval_cells
+            interval_sets[f"{name}_Net"] = net_cells
+            interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
+
+        base_keys = set(row)
         metric_suffixes = _metric_suffixes()
         for suffix in metric_suffixes:
             _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings, metric_keys)
@@ -205,6 +227,7 @@ def calculate_interval_metrics(
                 )
         for suffix in metric_suffixes:
             _add_property_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, property_columns, metric_keys)
+        _blank_unavailable_metrics(row, base_keys, unavailable_suffixes)
 
         rows.append(row)
         if progress_callback:
@@ -212,7 +235,51 @@ def calculate_interval_metrics(
 
     warnings.extend(_missing_bounds_warnings(missing_bounds))
     warnings.extend(_missing_cells_warnings(missing_cells))
+    missing_barrier_columns = [column for column in (BARRIER_TOP_COLUMN, BARRIER_BOT_COLUMN) if column not in intervals]
+    if missing_barrier_columns:
+        warnings.append(
+            f"Intervals table has no barrier columns ({', '.join(missing_barrier_columns)}); "
+            "barrier metrics for the missing side stay empty. Place TB/BB points on the Sections page and save boundaries."
+        )
     return IntervalMetricResult(rows=rows, warnings=warnings)
+
+
+def _barrier_interval_bounds(interval: pd.Series) -> dict[str, tuple[float, float] | None]:
+    """Depth ranges of the barrier intervals for one sleeve; None = interval is absent."""
+    top_local = _to_float(interval.get("TVDSS_TOP_LOCAL"))
+    bot_local = _to_float(interval.get("TVDSS_BOT_LOCAL"))
+    top_barrier = _to_float(interval.get(BARRIER_TOP_COLUMN))
+    bot_barrier = _to_float(interval.get(BARRIER_BOT_COLUMN))
+    top_thickness = _barrier_thickness(top_local, top_barrier, upward=True)
+    bot_thickness = _barrier_thickness(bot_local, bot_barrier, upward=False)
+
+    top_range = (top_local - top_thickness, top_local) if top_thickness is not None else None
+    bot_range = (bot_local, bot_local + bot_thickness) if bot_thickness is not None else None
+    local_range = None
+    if top_local is not None and bot_local is not None and (top_range or bot_range):
+        local_range = (
+            top_range[0] if top_range else top_local,
+            bot_range[1] if bot_range else bot_local,
+        )
+    return {"LocalBarriers": local_range, "TopBarrier": top_range, "BotBarrier": bot_range}
+
+
+def _barrier_thickness(local: float | None, barrier: float | None, *, upward: bool) -> float | None:
+    if local is None or barrier is None:
+        return None
+    thickness = local - barrier if upward else barrier - local
+    if not math.isfinite(thickness) or thickness <= 0.0:
+        return None
+    return min(thickness, INTERVAL_BUFFER_METERS)
+
+
+def _blank_unavailable_metrics(row: dict, base_keys: set[str], unavailable_suffixes: set[str]) -> None:
+    if not unavailable_suffixes:
+        return
+    endings = tuple(f"_{suffix}" for suffix in unavailable_suffixes)
+    for key in row:
+        if key not in base_keys and key.endswith(endings):
+            row[key] = ""
 
 
 def write_interval_metrics_xlsx(result: IntervalMetricResult, output_path: str | Path) -> None:
@@ -262,6 +329,12 @@ def write_interval_metrics_description(
         "Total_pm15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_BOT_TOTAL + 15 м.",
         "TopTotal_m15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_TOP_TOTAL.",
         "BotTotal_p15m: от TVDSS_BOT_TOTAL до TVDSS_BOT_TOTAL + 15 м.",
+        "Барьерные интервалы строятся по точкам TB/BB со страницы Sections (TVDSS_TOP_BARRIER_LOCAL, TVDSS_BOT_BARRIER_LOCAL):",
+        "  толщина верхнего барьера = TVDSS_TOP_LOCAL - TVDSS_TOP_BARRIER_LOCAL, нижнего = TVDSS_BOT_BARRIER_LOCAL - TVDSS_BOT_LOCAL;",
+        "  толщина ограничивается 15 м от границы Local; если она <= 0 или точки нет, барьер считается отсутствующим.",
+        "TopBarrier: от TVDSS_TOP_LOCAL - толщина верхнего барьера до TVDSS_TOP_LOCAL; пусто, если верхнего барьера нет.",
+        "BotBarrier: от TVDSS_BOT_LOCAL до TVDSS_BOT_LOCAL + толщина нижнего барьера; пусто, если нижнего барьера нет.",
+        "LocalBarriers: Local вместе с имеющимися барьерами; пусто, если нет ни одного барьера.",
         "Для каждого интервала также рассчитываются выборки Net и NonNet.",
         "У граничных ячеек учитывается только фактическая мощность пересечения с интервалом (h).",
         "",
@@ -382,7 +455,7 @@ def _is_computed_metric_column(column: str) -> bool:
         return True
     if re.match(r"^(CellCount|CollectorCellCount)_(Global|Local)(?:_Net)?$", column):
         return True
-    interval_names = "|".join(re.escape(name) for name, *_rest in INTERVAL_DEFINITIONS)
+    interval_names = "|".join(re.escape(name) for name in ALL_INTERVAL_NAMES)
     suffix = rf"(?:{interval_names})(?:_(?:Net|NonNet))?"
     if re.match(rf"^(Thickness|NetThickness|NTG|PORO|PERM|KH|PHIH)_{suffix}$", column):
         return True
@@ -601,7 +674,7 @@ def _non_net_cells(cells: pd.DataFrame, net_cells: pd.DataFrame) -> pd.DataFrame
 
 def _metric_suffixes() -> tuple[str, ...]:
     values: list[str] = []
-    for name, _top_col, _bot_col, _top_delta, _bot_delta in INTERVAL_DEFINITIONS:
+    for name in ALL_INTERVAL_NAMES:
         values.extend([name, f"{name}_Net", f"{name}_NonNet"])
     return tuple(values)
 

@@ -178,7 +178,7 @@ const panelHelp = {
     body: `
       <p>Здесь выбирается, какие метрики считать. Ниже — полное описание: по каким интервалам, по каким ячейкам и по каким формулам считается каждая колонка.</p>
 
-      <h4>1. Интервалы (5 штук)</h4>
+      <h4>1. Интервалы (8 штук)</h4>
       <p>Границы берутся из таблицы интервалов (Intervals table) для каждой муфты:</p>
       <table>
         <tr><th>Суффикс</th><th>От</th><th>До</th></tr>
@@ -187,7 +187,11 @@ const panelHelp = {
         <tr><td><code>Total_pm15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
         <tr><td><code>TopTotal_m15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_TOP_TOTAL</td></tr>
         <tr><td><code>BotTotal_p15m</code></td><td>TVDSS_BOT_TOTAL</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
+        <tr><td><code>LocalBarriers</code></td><td>TVDSS_TOP_LOCAL − h<sub>TB</sub></td><td>TVDSS_BOT_LOCAL + h<sub>BB</sub></td></tr>
+        <tr><td><code>TopBarrier</code></td><td>TVDSS_TOP_LOCAL − h<sub>TB</sub></td><td>TVDSS_TOP_LOCAL</td></tr>
+        <tr><td><code>BotBarrier</code></td><td>TVDSS_BOT_LOCAL</td><td>TVDSS_BOT_LOCAL + h<sub>BB</sub></td></tr>
       </table>
+      <p>Барьерные интервалы строятся по точкам TB/BB (экран Sections): h<sub>TB</sub> = TVDSS_TOP_LOCAL − TVDSS_TOP_BARRIER_LOCAL, h<sub>BB</sub> = TVDSS_BOT_BARRIER_LOCAL − TVDSS_BOT_LOCAL, но не больше 15 м. Если толщина барьера ≤ 0 или точки нет, барьер отсутствует и его метрики пустые. LocalBarriers = Local вместе с имеющимися барьерами; пусто, только если нет ни одного барьера.</p>
       <p>Global и Local — это пласт целиком и пропласток у муфты (задаются на экране Sections точками TT/BT и TL/BL). Три интервала по 15 м — окружение пласта: всё вместе, кровля и подошва (покрышки).</p>
       <p>Ячейки, частично попадающие в интервал, учитываются только своей частью: <b>h</b> = мощность пересечения ячейки с интервалом.</p>
 
