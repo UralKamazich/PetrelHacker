@@ -79,18 +79,32 @@ Every panel has a `?` button with a detailed guide (`electron/renderer/help.js`)
    lithology, Density, Shmin) always produce the same column names so metric
    files from different models can be combined; additional channels follow on
    the right. Only channels selected on the page are calculated.
+7. **Merge** — combine metric files of different models into one table by two
+   key columns (see [Merge](#merge)).
 
 ## Metrics
 
 Intervals per sleeve (from the boundaries table): `Global`, `Local`,
 `Total_pm15m`, `TopTotal_m15m`, `BotTotal_p15m`, and barrier intervals
-`LocalBarriers`, `TopBarrier`, `BotBarrier` built from the TB/BB points
-(barrier thickness capped at 15 m; zero/negative or missing barrier → empty
-metrics); each also as `_Net` and
+`LocalBarriers`, `TopBarrier`, `BotBarrier` (barrier thickness capped at 15 m;
+kind written to `BARRIER_TOP_KIND`/`BARRIER_BOT_KIND`: `seal` = Local within
+1 m of the Total boundary, i.e. the cap rock, 15 m; otherwise `interlayer`
+from the TB/BB points; `none` → empty metrics); each also as `_Net` and
 `_NonNet` (net by lithology codes, else NTG > 0, else PORO > 0). Column names:
 `<Channel>_<metric>_<interval>[_Net|_NonNet]`. Formulas are listed in the
 in-app help of the Metric set panel and in the `.txt` written next to every
 metrics file. Empty `_Net` values mean the interval has no reservoir cells.
+
+## Merge
+
+The **Merge** page combines metric tables calculated with different models into
+one table by two key columns (default `Well` + `Port`). Each model fills metrics
+only for its own wells, so for every cell the first non-empty value in file
+order is taken; different non-empty values in several files are reported as
+conflicts (the upper file wins). Keys are compared ignoring case, surrounding
+spaces, `3` vs `3.0` and Cyrillic/Latin lookalikes. Rows missing in some files
+are kept. The optional `Merge_source` column names the files that supplied a
+row's own data. Backend: `core/table_merge.py`, command `merge-tables`.
 
 ## Sleeve Input Contract
 

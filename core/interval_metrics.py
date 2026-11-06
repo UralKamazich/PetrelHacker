@@ -66,11 +66,20 @@ INTERVAL_DEFINITIONS = (
     ("TopTotal_m15m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -INTERVAL_BUFFER_METERS, 0.0),
     ("BotTotal_p15m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, INTERVAL_BUFFER_METERS),
 )
-# Barrier intervals are built from the TB/BB points placed on the Sections page.
-# Each barrier is limited to INTERVAL_BUFFER_METERS from the Local boundary; a barrier
-# with zero/negative thickness or without a point is absent and its metrics stay empty.
+# Barrier intervals next to Local, one per side, limited to INTERVAL_BUFFER_METERS:
+# - "seal": Local is the outermost body on that side (its boundary is within
+#   SEAL_ADJACENCY_METERS of the Total boundary), so the cap rock above/below the
+#   reservoir is the barrier and the full INTERVAL_BUFFER_METERS are used;
+# - "interlayer": otherwise, the non-productive layer between Local and the next body,
+#   taken from the TB/BB points placed on the Sections page (thickness > 0);
+# - "none": Local is away from Total and there is no barrier point; metrics stay empty.
 BARRIER_TOP_COLUMN = "TVDSS_TOP_BARRIER_LOCAL"
 BARRIER_BOT_COLUMN = "TVDSS_BOT_BARRIER_LOCAL"
+BARRIER_KIND_COLUMNS = {"TopBarrier": "BARRIER_TOP_KIND", "BotBarrier": "BARRIER_BOT_KIND"}
+SEAL_ADJACENCY_METERS = 1.0
+# Sleeves whose Local-to-Total distance falls in this window are reported for review:
+# the seal/interlayer decision there depends on a fraction of a metre.
+SEAL_BORDERLINE_WINDOW = (SEAL_ADJACENCY_METERS - 0.5, SEAL_ADJACENCY_METERS + 2.0)
 BARRIER_INTERVAL_NAMES = ("LocalBarriers", "TopBarrier", "BotBarrier")
 ALL_INTERVAL_NAMES = tuple(name for name, *_rest in INTERVAL_DEFINITIONS) + BARRIER_INTERVAL_NAMES
 BASE_METRIC_KEYS = (
@@ -126,6 +135,8 @@ class IntervalMetricSettings:
 class IntervalMetricResult:
     rows: list[dict]
     warnings: list[str]
+    # Sleeves near the seal tolerance or without a barrier: {well, port, side, gap, kind, thickness, reason}.
+    barrier_notices: list[dict] = field(default_factory=list)
 
 
 def calculate_interval_metrics(
@@ -163,6 +174,8 @@ def calculate_interval_metrics(
     total_intervals = len(intervals)
     missing_cells: list[tuple[str, str]] = []
     missing_bounds: dict[str, list[tuple[str, str]]] = {}
+    barrier_kind_counts: dict[tuple[str, str], int] = {}
+    barrier_notices: list[dict] = []
     for interval_index, (_index, interval) in enumerate(intervals.iterrows(), start=1):
         well = _normalize_value(interval["Well"])
         port = _normalize_value(interval["Port"])
@@ -196,7 +209,12 @@ def calculate_interval_metrics(
             interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
 
         unavailable_suffixes: set[str] = set()
-        for name, bounds in _barrier_interval_bounds(interval).items():
+        barrier_bounds, barrier_kinds = _barrier_interval_bounds(interval)
+        for name, kind in barrier_kinds.items():
+            row[BARRIER_KIND_COLUMNS[name]] = kind
+            barrier_kind_counts[(name, kind)] = barrier_kind_counts.get((name, kind), 0) + 1
+        barrier_notices.extend(_barrier_notices(well, port, interval, barrier_bounds, barrier_kinds))
+        for name, bounds in barrier_bounds.items():
             if bounds is None:
                 interval_sets[name] = cells.iloc[0:0]
                 interval_sets[f"{name}_Net"] = cells.iloc[0:0]
@@ -239,19 +257,95 @@ def calculate_interval_metrics(
     if missing_barrier_columns:
         warnings.append(
             f"Intervals table has no barrier columns ({', '.join(missing_barrier_columns)}); "
-            "barrier metrics for the missing side stay empty. Place TB/BB points on the Sections page and save boundaries."
+            "only cap-rock barriers next to the Total boundaries are used on that side. "
+            "Place TB/BB points on the Sections page and save boundaries."
         )
-    return IntervalMetricResult(rows=rows, warnings=warnings)
+    for name, label in (("TopBarrier", "top"), ("BotBarrier", "bottom")):
+        absent = barrier_kind_counts.get((name, "none"), 0)
+        if absent:
+            warnings.append(
+                f"{absent} sleeve(s) have no {label} barrier: Local is more than {SEAL_ADJACENCY_METERS:g} m away "
+                f"from the Total boundary and there is no TB/BB barrier point; {name} metrics are empty."
+            )
+    zero = [notice for notice in barrier_notices if notice["reason"] == "zero"]
+    if zero:
+        warnings.append(
+            f"{len(zero)} sleeve barrier(s) have zero thickness by TB/BB points (or no point); "
+            "Local is at the Total boundary there, so the cap rock (15 m) was used. List: see .txt."
+        )
+    borderline = [notice for notice in barrier_notices if notice["reason"] == "borderline"]
+    if borderline:
+        low, high = SEAL_BORDERLINE_WINDOW
+        warnings.append(
+            f"{len(borderline)} sleeve barrier(s) are near the seal tolerance ({SEAL_ADJACENCY_METERS:g} m): "
+            f"Local is {low:g}-{high:g} m from the Total boundary. Check them: "
+            + ", ".join(_format_barrier_notice(notice) for notice in borderline[:20])
+            + (f" and {len(borderline) - 20} more (see .txt)." if len(borderline) > 20 else ".")
+        )
+    return IntervalMetricResult(rows=rows, warnings=warnings, barrier_notices=barrier_notices)
 
 
-def _barrier_interval_bounds(interval: pd.Series) -> dict[str, tuple[float, float] | None]:
-    """Depth ranges of the barrier intervals for one sleeve; None = interval is absent."""
+def _barrier_notices(
+    well: str,
+    port: str,
+    interval: pd.Series,
+    bounds: dict[str, tuple[float, float] | None],
+    kinds: dict[str, str],
+) -> list[dict]:
+    notices = []
+    low, high = SEAL_BORDERLINE_WINDOW
+    for name, side, local_col, total_col, point_col, upward in (
+        ("TopBarrier", "top", "TVDSS_TOP_LOCAL", "TVDSS_TOP_TOTAL", BARRIER_TOP_COLUMN, True),
+        ("BotBarrier", "bottom", "TVDSS_BOT_LOCAL", "TVDSS_BOT_TOTAL", BARRIER_BOT_COLUMN, False),
+    ):
+        local = _to_float(interval.get(local_col))
+        total = _to_float(interval.get(total_col))
+        point = _to_float(interval.get(point_col))
+        gap = None if local is None or total is None else (local - total if upward else total - local)
+        point_thickness = None if local is None or point is None else (local - point if upward else point - local)
+        kind = kinds[name]
+        if kind == "none":
+            reason = "none"
+        elif gap is not None and low < gap <= high:
+            reason = "borderline"
+        elif point_thickness is None or not math.isfinite(point_thickness) or point_thickness <= 0.0:
+            reason = "zero"
+        else:
+            continue
+        span = bounds.get(name)
+        notices.append(
+            {
+                "well": well,
+                "port": port,
+                "side": side,
+                "gap": round(gap, 2) if gap is not None else None,
+                "kind": kind,
+                "thickness": round(span[1] - span[0], 2) if span else None,
+                "pointThickness": round(point_thickness, 2) if point_thickness is not None and math.isfinite(point_thickness) else None,
+                "reason": reason,
+            }
+        )
+    return notices
+
+
+def _format_barrier_notice(notice: dict) -> str:
+    gap = "n/a" if notice["gap"] is None else f"{notice['gap']:g} m"
+    used = "no barrier" if notice["thickness"] is None else f"{notice['kind']} {notice['thickness']:g} m"
+    return f"{notice['well']}/{notice['port']} {notice['side']} (to Total {gap}, {used})"
+
+
+def _barrier_interval_bounds(
+    interval: pd.Series,
+) -> tuple[dict[str, tuple[float, float] | None], dict[str, str]]:
+    """Depth ranges of the barrier intervals for one sleeve (None = absent) and the barrier kinds."""
     top_local = _to_float(interval.get("TVDSS_TOP_LOCAL"))
     bot_local = _to_float(interval.get("TVDSS_BOT_LOCAL"))
-    top_barrier = _to_float(interval.get(BARRIER_TOP_COLUMN))
-    bot_barrier = _to_float(interval.get(BARRIER_BOT_COLUMN))
-    top_thickness = _barrier_thickness(top_local, top_barrier, upward=True)
-    bot_thickness = _barrier_thickness(bot_local, bot_barrier, upward=False)
+    top_thickness, top_kind = _barrier_side(
+        top_local, _to_float(interval.get(BARRIER_TOP_COLUMN)), _to_float(interval.get("TVDSS_TOP_TOTAL")), upward=True
+    )
+    bot_thickness, bot_kind = _barrier_side(
+        bot_local, _to_float(interval.get(BARRIER_BOT_COLUMN)), _to_float(interval.get("TVDSS_BOT_TOTAL")), upward=False
+    )
 
     top_range = (top_local - top_thickness, top_local) if top_thickness is not None else None
     bot_range = (bot_local, bot_local + bot_thickness) if bot_thickness is not None else None
@@ -261,16 +355,32 @@ def _barrier_interval_bounds(interval: pd.Series) -> dict[str, tuple[float, floa
             top_range[0] if top_range else top_local,
             bot_range[1] if bot_range else bot_local,
         )
-    return {"LocalBarriers": local_range, "TopBarrier": top_range, "BotBarrier": bot_range}
+    bounds = {"LocalBarriers": local_range, "TopBarrier": top_range, "BotBarrier": bot_range}
+    return bounds, {"TopBarrier": top_kind, "BotBarrier": bot_kind}
 
 
-def _barrier_thickness(local: float | None, barrier: float | None, *, upward: bool) -> float | None:
-    if local is None or barrier is None:
-        return None
-    thickness = local - barrier if upward else barrier - local
-    if not math.isfinite(thickness) or thickness <= 0.0:
-        return None
-    return min(thickness, INTERVAL_BUFFER_METERS)
+def _barrier_side(
+    local: float | None,
+    barrier: float | None,
+    total: float | None,
+    *,
+    upward: bool,
+) -> tuple[float | None, str]:
+    """Barrier thickness used for metrics on one side of Local and its kind."""
+    if local is None:
+        return None, "none"
+    if total is not None:
+        # Distance from the Local boundary outwards to the Total boundary; <= tolerance
+        # (or negative: Local reaches beyond Total) means Local is the outermost body and
+        # the cap rock is the barrier, whatever TB/BB points say.
+        gap = local - total if upward else total - local
+        if gap <= SEAL_ADJACENCY_METERS:
+            return INTERVAL_BUFFER_METERS, "seal"
+    if barrier is not None:
+        thickness = local - barrier if upward else barrier - local
+        if math.isfinite(thickness) and thickness > 0.0:
+            return min(thickness, INTERVAL_BUFFER_METERS), "interlayer"
+    return None, "none"
 
 
 def _blank_unavailable_metrics(row: dict, base_keys: set[str], unavailable_suffixes: set[str]) -> None:
@@ -329,11 +439,15 @@ def write_interval_metrics_description(
         "Total_pm15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_BOT_TOTAL + 15 м.",
         "TopTotal_m15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_TOP_TOTAL.",
         "BotTotal_p15m: от TVDSS_BOT_TOTAL до TVDSS_BOT_TOTAL + 15 м.",
-        "Барьерные интервалы строятся по точкам TB/BB со страницы Sections (TVDSS_TOP_BARRIER_LOCAL, TVDSS_BOT_BARRIER_LOCAL):",
-        "  толщина верхнего барьера = TVDSS_TOP_LOCAL - TVDSS_TOP_BARRIER_LOCAL, нижнего = TVDSS_BOT_BARRIER_LOCAL - TVDSS_BOT_LOCAL;",
-        "  толщина ограничивается 15 м от границы Local; если она <= 0 или точки нет, барьер считается отсутствующим.",
-        "TopBarrier: от TVDSS_TOP_LOCAL - толщина верхнего барьера до TVDSS_TOP_LOCAL; пусто, если верхнего барьера нет.",
-        "BotBarrier: от TVDSS_BOT_LOCAL до TVDSS_BOT_LOCAL + толщина нижнего барьера; пусто, если нижнего барьера нет.",
+        "Барьер с каждой стороны Local определяется так (тип пишется в BARRIER_TOP_KIND / BARRIER_BOT_KIND):",
+        f"  seal — граница Local не дальше {SEAL_ADJACENCY_METERS:g} м от границы Total (или за ней): Local — крайний пласт,",
+        "    барьером считается покрышка, толщина 15 м; точки TB/BB с этой стороны не используются;",
+        "  interlayer — иначе непродуктивный прослой между Local и соседним пластом по точкам TB/BB со страницы Sections:",
+        "    толщина верхнего = TVDSS_TOP_LOCAL - TVDSS_TOP_BARRIER_LOCAL, нижнего = TVDSS_BOT_BARRIER_LOCAL - TVDSS_BOT_LOCAL (если > 0);",
+        "  none — Local далеко от Total и точки барьера нет; метрики этого барьера пустые.",
+        "  Толщина барьера ограничивается 15 м от границы Local.",
+        "TopBarrier: от TVDSS_TOP_LOCAL - толщина верхнего барьера до TVDSS_TOP_LOCAL.",
+        "BotBarrier: от TVDSS_BOT_LOCAL до TVDSS_BOT_LOCAL + толщина нижнего барьера.",
         "LocalBarriers: Local вместе с имеющимися барьерами; пусто, если нет ни одного барьера.",
         "Для каждого интервала также рассчитываются выборки Net и NonNet.",
         "У граничных ячеек учитывается только фактическая мощность пересечения с интервалом (h).",
@@ -380,6 +494,15 @@ def write_interval_metrics_description(
             "Пустые и нечисловые значения свойства не участвуют в его статистике.",
             "Если для показателя нет валидных значений, соответствующая ячейка результата остается пустой.",
             "Медиана, min, max и min*/max* не взвешиваются по мощности; остальные указанные формулы используют h.",
+            "",
+            "МУФТЫ У ПОГРАНИЧНЫХ УСЛОВИЙ БАРЬЕРОВ",
+            f"borderline — расстояние от Local до Total {SEAL_BORDERLINE_WINDOW[0]:g}-{SEAL_BORDERLINE_WINDOW[1]:g} м "
+            f"(допуск покрышки {SEAL_ADJACENCY_METERS:g} м); zero — по точкам TB/BB толщина барьера 0 или точки нет,",
+            "взята покрышка 15 м; none — барьер не определен, метрики пустые.",
+            *(
+                [f"- {notice['reason']}: {_format_barrier_notice(notice)}" for notice in result.barrier_notices]
+                or ["Нет."]
+            ),
             "",
             "ПРЕДУПРЕЖДЕНИЯ РАСЧЕТА",
         ]

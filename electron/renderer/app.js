@@ -43,6 +43,8 @@ const sleeveMappingTargets = [
 ];
 
 const state = {
+  mergeFiles: [],
+  mergeKeys: ['Well', 'Port'],
   models: [{ label: 'M1', path: '', depthOffset: 0 }, { label: 'M2', path: '', depthOffset: 0 }, { label: 'M3', path: '', depthOffset: 0 }],
   loadedModels: [],
   sleeves: null,
@@ -138,6 +140,7 @@ function init() {
   bindActions();
   updateWorkflowSummaries();
   installPanelHelp();
+  initLanguage();
   window.petrel.onBackendEvent(handleBackendEvent);
 }
 
@@ -204,6 +207,17 @@ function bindActions() {
   $('metrics-intervals').addEventListener('change', syncMetricsOutputFilename);
   $('load-metrics-table').addEventListener('click', loadMetricsTable);
   $('run-metrics').addEventListener('click', runMetrics);
+  $('merge-add-files').addEventListener('click', addMergeFiles);
+  $('merge-clear-files').addEventListener('click', clearMergeFiles);
+  $('merge-file-list').addEventListener('click', handleMergeFileAction);
+  $('browse-merge-output').addEventListener('click', browseMergeOutput);
+  $('run-merge').addEventListener('click', runMerge);
+  ['merge-key-1', 'merge-key-2'].forEach(id => $(id).addEventListener('change', () => {
+    state.mergeKeys = [$('merge-key-1').value, $('merge-key-2').value];
+    renderMergeFiles();
+    saveState();
+  }));
+  ['merge-output', 'merge-source-column'].forEach(id => $(id).addEventListener('change', saveState));
   $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable('curve-table')));
   $('load-curve-table').addEventListener('click', loadCurveTable);
   $('draw-curves').addEventListener('click', drawCurves);
@@ -1035,12 +1049,12 @@ function updateSectionSourceUi() {
 }
 
 async function browseSectionWorkspace() {
-  const selected = await window.petrel.openDirectory({
+  const selected = await window.petrel.openDirectory(i18nDialogOptions({
     dialogKey: 'section-workspace',
     title: 'Select Section workspace folder',
     buttonLabel: 'Open workspace',
     defaultPath: state.sectionWorkspacePath || dirname($('sleeves-path').value.trim())
-  });
+  }));
   if (!selected) return;
   state.sectionSelectionRevision += 1;
   clearRenderedSection();
@@ -1770,12 +1784,12 @@ async function confirmModelCoverage(coverage) {
     return `${item.label} · ${item.gridTitle}: ${item.inside} of ${item.total} sleeves inside. `
       + `${properties} will be empty for ${item.total - item.inside} sleeve(s).`;
   }).join('\n\n');
-  return window.petrel.confirm({
+  return window.petrel.confirm(i18nDialogOptions({
     title: 'Model coverage',
     message: `${missing.length} model(s) do not cover all selected sleeves.`,
     detail: `${detail}\n\nContinue extraction?`,
     confirmLabel: 'Run extraction'
-  });
+  }));
 }
 
 function renderModelCoverage(coverage) {
@@ -1926,6 +1940,7 @@ function renderMetricKeys() {
 async function runMetrics() {
   setBusy('Calculating metrics', 'Processing intervals');
   startProgress('metrics-progress');
+  renderMetricsBarrierNotices([]);
   try {
     const metricKeys = checkedValues('metric-key');
     if (!metricKeys.length) {
@@ -1946,10 +1961,250 @@ async function runMetrics() {
       metricKeys
     });
     setProgress('metrics-progress', 100);
+    renderMetricsBarrierNotices(result.barrierNotices || []);
     setReady(`Metrics rows: ${result.rowsWritten || 0}`);
   } catch (error) {
     fail(error);
   }
+}
+
+// ---- Merge page: combine metric tables of different models by two key columns ----
+
+const MERGE_TABLE_FILTERS = [{ name: 'Tables', extensions: ['xlsx', 'xlsm', 'csv'] }, { name: 'All files', extensions: ['*'] }];
+
+async function addMergeFiles() {
+  const paths = await window.petrel.openFiles({ dialogKey: 'merge-files', filters: MERGE_TABLE_FILTERS });
+  const known = new Set(state.mergeFiles.map(file => file.path));
+  const added = (paths || []).filter(path => !known.has(path)).map(path => ({ path, columns: [], loading: true, error: '' }));
+  if (!added.length) return;
+  state.mergeFiles.push(...added);
+  renderMergeFiles();
+  saveState();
+  await refreshMergeHeaders(added);
+}
+
+async function refreshMergeHeaders(files) {
+  setBusy('Reading headers', `${files.length} file(s)`);
+  await Promise.all(files.map(async file => {
+    try {
+      const result = await window.petrel.run('table-info', { path: file.path, headersOnly: true });
+      file.columns = (result.columns || []).map(String);
+      file.rows = result.rows;
+      file.error = '';
+    } catch (error) {
+      file.columns = [];
+      file.error = error && error.message ? error.message.split('\n')[0] : String(error);
+    }
+    file.loading = false;
+  }));
+  renderMergeFiles();
+  if (!$('merge-output').value.trim()) $('merge-output').value = defaultMergeOutputPath();
+  saveState();
+  const failed = files.filter(file => file.error).length;
+  if (failed) setAttention(`${failed} file(s) could not be read`);
+  else setReady(`Merge files: ${state.mergeFiles.length}`);
+}
+
+function clearMergeFiles() {
+  state.mergeFiles = [];
+  $('merge-summary').innerHTML = '';
+  $('merge-output').value = '';
+  renderMergeFiles();
+  saveState();
+}
+
+function handleMergeFileAction(event) {
+  const button = event.target.closest('[data-merge-action]');
+  if (!button) return;
+  const index = Number(button.dataset.index);
+  const files = state.mergeFiles;
+  if (!Number.isInteger(index) || index < 0 || index >= files.length) return;
+  const action = button.dataset.mergeAction;
+  if (action === 'remove') files.splice(index, 1);
+  if (action === 'up' && index > 0) [files[index - 1], files[index]] = [files[index], files[index - 1]];
+  if (action === 'down' && index < files.length - 1) [files[index + 1], files[index]] = [files[index], files[index + 1]];
+  renderMergeFiles();
+  saveState();
+}
+
+function renderMergeFiles() {
+  updateMergeKeyOptions();
+  const root = $('merge-file-list');
+  const files = state.mergeFiles;
+  if (!files.length) {
+    root.innerHTML = '<div class="merge-empty">Add two or more metric files (XLSX / CSV). The first file sets the column order; if two files have different values in one cell, the value from the upper file is kept.</div>';
+    return;
+  }
+  const keys = mergeSelectedKeys();
+  root.innerHTML = files.map((file, index) => {
+    let meta = 'Reading headers…';
+    let metaClass = 'merge-file-meta';
+    if (!file.loading && file.error) {
+      meta = `Error: ${file.error}`;
+      metaClass += ' warning';
+    } else if (!file.loading) {
+      const missing = keys.filter(key => key && !file.columns.includes(key));
+      meta = `${file.columns.length} columns${Number.isFinite(file.rows) ? `, ${file.rows} rows` : ''} · ${dirname(file.path)}`;
+      if (missing.length) {
+        meta = `No key column ${missing.join(', ')} · ${meta}`;
+        metaClass += ' warning';
+      }
+    }
+    return `<div class="merge-file-row">
+        <span class="merge-file-order">${index + 1}</span>
+        <div><div class="merge-file-name" title="${escapeHtml(file.path)}">${escapeHtml(basename(file.path))}</div><div class="${metaClass}">${escapeHtml(meta)}</div></div>
+        <div class="merge-file-actions">
+          <button class="soft-button" data-merge-action="up" data-index="${index}" title="Move up" ${index === 0 ? 'disabled' : ''}>↑</button>
+          <button class="soft-button" data-merge-action="down" data-index="${index}" title="Move down" ${index === files.length - 1 ? 'disabled' : ''}>↓</button>
+          <button class="soft-button" data-merge-action="remove" data-index="${index}" title="Remove">✕</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// Key options are the columns present in every readable file.
+function updateMergeKeyOptions() {
+  const loaded = state.mergeFiles.filter(file => !file.loading && !file.error);
+  let columns = loaded.length ? loaded[0].columns.slice() : [];
+  loaded.slice(1).forEach(file => {
+    const lookup = new Set(file.columns);
+    columns = columns.filter(column => lookup.has(column));
+  });
+  if (!columns.length) columns = state.mergeKeys.filter(Boolean);
+  const defaults = ['Well', 'Port'];
+  [0, 1].forEach(index => {
+    const wanted = state.mergeKeys[index] || defaults[index];
+    const selected = columns.includes(wanted)
+      ? wanted
+      : (columns.find(column => column.toLowerCase() === defaults[index].toLowerCase()) || '');
+    fillSelect(`merge-key-${index + 1}`, columns, selected);
+  });
+}
+
+function mergeSelectedKeys() {
+  return [$('merge-key-1').value, $('merge-key-2').value];
+}
+
+// Default name: common file-name prefix (cut at a separator) + "merged.xlsx", next to the first file.
+function defaultMergeOutputPath() {
+  const paths = state.mergeFiles.map(file => file.path);
+  if (!paths.length) return '';
+  const stems = paths.map(path => stripExtension(basename(path)));
+  let prefix = stems[0];
+  stems.slice(1).forEach(stem => {
+    while (prefix && !stem.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  });
+  const cut = Math.max(prefix.lastIndexOf('_'), prefix.lastIndexOf('-'), prefix.lastIndexOf(' '));
+  prefix = cut >= 0 ? prefix.slice(0, cut + 1) : '';
+  const name = prefix ? `${prefix}merged.xlsx` : 'merged_metrics.xlsx';
+  return joinPath(dirname(paths[0]), name);
+}
+
+function mergeOutputPath() {
+  const value = $('merge-output').value.trim();
+  if (!value) return defaultMergeOutputPath();
+  const name = /\.(xlsx|csv)$/i.test(value) ? value : `${value}.xlsx`;
+  if (dirname(name)) return name;
+  const folder = state.mergeFiles.length ? dirname(state.mergeFiles[0].path) : '';
+  return joinPath(folder, name);
+}
+
+async function browseMergeOutput() {
+  const selected = await saveXlsx(mergeOutputPath() || 'merged_metrics.xlsx', 'merge-output');
+  if (!selected) return;
+  $('merge-output').value = selected;
+  saveState();
+}
+
+async function runMerge() {
+  const files = state.mergeFiles;
+  const keys = mergeSelectedKeys();
+  try {
+    if (files.length < 2) throw new Error('Add at least two files to merge.');
+    if (files.some(file => file.loading)) throw new Error('File headers are still being read.');
+    const broken = files.find(file => file.error);
+    if (broken) throw new Error(`Cannot read ${basename(broken.path)}: ${broken.error}`);
+    if (!keys[0] || !keys[1]) throw new Error('Select both key columns.');
+    if (keys[0] === keys[1]) throw new Error('Key columns must be different.');
+    const outputPath = mergeOutputPath();
+    if (!outputPath) throw new Error('Enter output file name.');
+    if (files.some(file => file.path === outputPath)) throw new Error('Output file must differ from the input files.');
+    setBusy('Merging tables', `${files.length} files by ${keys.join(' + ')}`);
+    startProgress('merge-progress');
+    $('merge-summary').innerHTML = '';
+    const result = await window.petrel.run('merge-tables', {
+      paths: files.map(file => file.path),
+      keyColumns: keys,
+      outputPath,
+      addSourceColumn: $('merge-source-column').checked
+    });
+    $('merge-output').value = result.outputPath || outputPath;
+    setProgress('merge-progress', 100);
+    renderMergeSummary(result);
+    saveState();
+    if (result.conflicts) setAttention(`Merged with ${result.conflicts} conflicting cell(s): see the summary`);
+    else setReady(`Merged: ${result.rowsWritten || 0} rows, ${result.columnsWritten || 0} columns`);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function renderMergeSummary(result) {
+  const rows = (result.files || []).map(file => `<tr>
+      <td>${escapeHtml(file.label)}</td>
+      <td title="${escapeHtml(file.path)}">${escapeHtml(basename(file.path))}</td>
+      <td>${Number(file.rows || 0)}</td>
+      <td>${Number(file.rowsContributed || 0)}</td>
+    </tr>`).join('');
+  const warnings = (result.warnings || []).map(text => `<div class="merge-warning">⚠ ${escapeHtml(text)}</div>`).join('');
+  $('merge-summary').innerHTML = `
+    <div class="merge-file-meta">Saved: ${escapeHtml(result.outputPath || '')} · ${Number(result.rowsWritten || 0)} rows, ${Number(result.columnsWritten || 0)} columns</div>
+    <table>
+      <tr><th>Source</th><th>File</th><th>Rows</th><th>Rows with own data</th></tr>
+      ${rows}
+    </table>
+    ${warnings}`;
+}
+
+// Sleeves whose barrier decision needs a look, shown in red under the Metrics panels.
+const BARRIER_NOTICE_GROUPS = [
+  ['none', 'Барьер не определён — метрики барьера пустые (Local далеко от Total, точки TB/BB нет)'],
+  ['borderline', 'У границы допуска покрышки (1 м): Local в 0.5–3 м от Total — проверьте решение'],
+  ['zero', 'Барьер по точкам TB/BB = 0 (или точки нет) — Local у границы Total, взята покрышка 15 м']
+];
+
+function renderMetricsBarrierNotices(notices) {
+  const root = $('metrics-notice');
+  if (!notices.length) {
+    root.hidden = true;
+    root.innerHTML = '';
+    return;
+  }
+  const sideLabel = side => (side === 'top' ? 'верх' : 'низ');
+  const groups = BARRIER_NOTICE_GROUPS.map(([reason, title]) => {
+    const items = notices.filter(notice => notice.reason === reason);
+    if (!items.length) return '';
+    let body;
+    if (reason === 'zero') {
+      // Many sleeves: one line per well and side with the list of ports.
+      const byWell = new Map();
+      items.forEach(notice => {
+        const key = `${notice.well} ${sideLabel(notice.side)}`;
+        if (!byWell.has(key)) byWell.set(key, []);
+        byWell.get(key).push(notice.port);
+      });
+      body = `<div>${Array.from(byWell.entries()).map(([key, ports]) => `${escapeHtml(key)}: ${escapeHtml(ports.join(', '))}`).join('; ')}</div>`;
+    } else {
+      body = `<ul>${items.map(notice => {
+        const gap = notice.gap == null ? 'нет данных' : `${notice.gap} м`;
+        const used = notice.thickness == null ? 'барьер не взят' : `${notice.kind === 'seal' ? 'покрышка' : 'прослой'} ${notice.thickness} м`;
+        return `<li>${escapeHtml(notice.well)} / порт ${escapeHtml(notice.port)}, ${sideLabel(notice.side)}: до Total ${escapeHtml(gap)}, ${escapeHtml(used)}</li>`;
+      }).join('')}</ul>`;
+    }
+    return `<div class="notice-group"><div class="notice-title">${escapeHtml(title)} — ${items.length}</div>${body}</div>`;
+  }).join('');
+  root.innerHTML = `<h4>Барьеры: проверьте муфты</h4>${groups}`;
+  root.hidden = false;
 }
 
 async function loadCurveTable() {
@@ -4584,11 +4839,11 @@ async function saveSectionBoundaries() {
       setAttention(message);
       appendLog(`Warning: ${message} ${detail}`);
       try {
-        await window.petrel.showWarning({
+        await window.petrel.showWarning(i18nDialogOptions({
           title: 'Global boundaries were not saved',
           message,
           detail
-        });
+        }));
       } catch (error) {
         appendLog(`Warning: could not show the save warning dialog: ${error.message}`);
       }
@@ -5250,6 +5505,7 @@ function handleBackendEvent(message) {
   if (message.event === 'progress') {
     if (message.command === 'extract' || message.command === 'extract-section-workspace') setProgress('extraction-progress', message.value || 0);
     if (message.command === 'metrics') setProgress('metrics-progress', message.value || 0);
+    if (message.command === 'merge-tables') setProgress('merge-progress', message.value || 0);
     if (message.command === 'model-section') setProgress('section-progress', message.value || 0);
     if (message.command === 'load-models' || message.command === 'trajectory-analysis') updateModelsPhaseFromBackend(message);
   }
@@ -5552,6 +5808,10 @@ function saveState() {
     metricsExtracted: $('metrics-extracted').value,
     metricsIntervals: $('metrics-intervals').value,
     metricsOutput: $('metrics-output').value,
+    mergeFiles: state.mergeFiles.map(file => file.path),
+    mergeKeys: state.mergeKeys,
+    mergeOutput: $('merge-output').value,
+    mergeSourceColumn: $('merge-source-column').checked,
     curvePath: $('curve-path').value,
     curveSettings: state.curveSettings,
     sectionWellNameMap: state.sectionWellNameMap,
@@ -5630,6 +5890,14 @@ function restoreState() {
     if (data.sectionMinLayer !== undefined) $('section-min-layer').value = data.sectionMinLayer;
     if (data.sectionShowBoundaries !== undefined) $('section-show-boundaries').checked = Boolean(data.sectionShowBoundaries);
     if (data.sectionBarrierThickness !== undefined) $('section-barrier-thickness').checked = Boolean(data.sectionBarrierThickness);
+    if (Array.isArray(data.mergeKeys)) state.mergeKeys = data.mergeKeys.slice(0, 2).map(String);
+    if (data.mergeOutput) $('merge-output').value = data.mergeOutput;
+    if (data.mergeSourceColumn !== undefined) $('merge-source-column').checked = Boolean(data.mergeSourceColumn);
+    if (Array.isArray(data.mergeFiles) && data.mergeFiles.length) {
+      state.mergeFiles = data.mergeFiles.map(path => ({ path: String(path), columns: [], loading: true, error: '' }));
+      refreshMergeHeaders(state.mergeFiles).catch(error => appendLog(`Warning: ${error.message}`));
+    }
+    renderMergeFiles();
     updateExtractionSourceUi();
     updateSectionSourceUi();
     if (state.sectionWorkspacePath || data.sleevesPath) {
