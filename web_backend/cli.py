@@ -51,6 +51,7 @@ from core.section_workspace import (
     workspace_path_for,
 )
 from core.table_io import read_table, read_table_headers
+from core.table_merge import MergeInput, file_labels, merge_tables, write_merged_table
 from core.trajectory_analysis import analyze_trajectory, interpolate_trajectory_xy
 
 
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             "model-coverage",
             "table-info",
             "metrics",
+            "merge-tables",
             "curve-data",
             "curve-data-batch",
             "well-trajectories",
@@ -102,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             "model-coverage": model_coverage,
             "table-info": table_info,
             "metrics": metrics,
+            "merge-tables": merge_tables_command,
             "curve-data": curve_data,
             "curve-data-batch": curve_data_batch,
             "well-trajectories": well_trajectories,
@@ -564,6 +567,43 @@ def metrics(payload: JsonDict) -> None:
         outputPath=output_path,
         descriptionPath=str(description_path),
         rowsWritten=len(result.rows),
+        warnings=result.warnings,
+        barrierNotices=result.barrier_notices,
+    )
+
+
+def merge_tables_command(payload: JsonDict) -> None:
+    paths = [str(value).strip() for value in payload.get("paths") or [] if str(value).strip()]
+    key_columns = [str(value).strip() for value in payload.get("keyColumns") or [] if str(value).strip()]
+    output_path = str(payload.get("outputPath", "")).strip()
+    if len(paths) < 2:
+        raise ValueError("Select at least two files to merge.")
+    if not output_path:
+        raise ValueError("Enter output file name.")
+    resolved_output = Path(output_path).resolve()
+    if any(Path(path).resolve() == resolved_output for path in paths):
+        raise ValueError("Output file must differ from the input files.")
+    labels = file_labels(paths)
+    inputs: list[MergeInput] = []
+    for index, (label, path) in enumerate(zip(labels, paths, strict=True), start=1):
+        _emit("log", message=f"Reading {Path(path).name} ({label})...")
+        inputs.append(MergeInput(label=label, frame=_deduplicate_columns(read_table(path))))
+        _emit("progress", value=int(60 * index / len(paths)))
+    _emit("log", message=f"Merging {len(paths)} files by {', '.join(key_columns)}...")
+    result = merge_tables(inputs, key_columns, add_source_column=bool(payload.get("addSourceColumn", True)))
+    _emit("progress", value=80)
+    for warning in result.warnings:
+        _emit("log", message=f"Warning: {warning}")
+    _emit("log", message=f"Writing merged table: {output_path}")
+    write_merged_table(result, output_path)
+    _emit("progress", value=100)
+    _emit(
+        "result",
+        outputPath=output_path,
+        rowsWritten=int(len(result.frame)),
+        columnsWritten=int(len(result.frame.columns)),
+        conflicts=result.conflicts,
+        files=[{**stats, "path": path} for stats, path in zip(result.file_stats, paths, strict=True)],
         warnings=result.warnings,
     )
 

@@ -17,6 +17,10 @@
             <p>RESQML / Rescue extractor</p>
           </div>
         </div>
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" data-lang="ru">RU</button>
+          <button type="button" data-lang="en">EN</button>
+        </div>
         <nav class="nav">
           <button class="nav-item active" data-view="models">Models</button>
           <button class="nav-item" data-view="wells">Wells</button>
@@ -24,6 +28,7 @@
           <button class="nav-item" data-view="extract">Extraction</button>
           <button class="nav-item" data-view="curves">Curves / QC</button>
           <button class="nav-item" data-view="metrics">Metrics</button>
+          <button class="nav-item" data-view="merge">Merge</button>
           <button class="nav-item" data-view="logs">Logs</button>
         </nav>
         <div class="status-card">
@@ -215,6 +220,41 @@
               <div class="check-grid" id="metric-keys"></div>
             </section>
           </div>
+          <div class="metrics-notice" id="metrics-notice" hidden></div>
+        </section>
+
+        <section class="view" id="view-merge">
+          <header class="view-header">
+            <div>
+              <h2>Merge</h2>
+              <p>Merge metric tables from different models into one table by two key columns.</p>
+            </div>
+            <button class="primary-action" id="run-merge">Merge tables</button>
+          </header>
+          <div class="layout-grid">
+            <section class="panel span-7" data-help="merge-files">
+              <div class="panel-title">
+                <h3>Files</h3>
+                <div class="section-title-actions">
+                  <button class="soft-button" id="merge-add-files">Add files</button>
+                  <button class="soft-button" id="merge-clear-files">Clear</button>
+                </div>
+              </div>
+              <div class="merge-file-list" id="merge-file-list"></div>
+            </section>
+            <section class="panel span-5" data-help="merge-options">
+              <div class="panel-title"><h3>Keys and output</h3></div>
+              <div class="form-grid">
+                <label class="field"><span>Key column 1</span><select id="merge-key-1"></select></label>
+                <label class="field"><span>Key column 2</span><select id="merge-key-2"></select></label>
+              </div>
+              <label class="field"><span>Output XLSX</span><div class="path-row"><input id="merge-output" type="text" placeholder="merged.xlsx"><button class="icon-button" id="browse-merge-output">...</button></div></label>
+              <label class="check-row"><input type="checkbox" id="merge-source-column" checked><span>Add Merge_source column</span></label>
+              <div class="progress-shell"><div class="progress-bar" id="merge-progress"></div></div>
+              <div class="progress-label" id="merge-progress-label"></div>
+              <div class="merge-summary" id="merge-summary"></div>
+            </section>
+          </div>
         </section>
 
         <section class="view" id="view-curves">
@@ -232,7 +272,7 @@
               <div class="curve-top-grid">
                 <label class="field"><span>Well</span><select id="curve-well"></select></label>
                 <label class="field"><span>Port</span><select id="curve-port"></select></label>
-                <label class="field"><span>Depth mode</span><select id="curve-depth-mode"><option value="common" selected>Common grid</option><option value="individual">Individual cell</option></select></label>
+                <label class="field"><span>Depth mode</span><select id="curve-depth-mode" data-i18n-options><option value="common" selected>Common grid</option><option value="individual">Individual cell</option></select></label>
               </div>
               <div class="curve-depth-grid">
                 <label class="field"><span>Depth min</span><input id="curve-depth-min" type="number" step="0.1"></label>
@@ -299,7 +339,7 @@
                 <label class="field"><span>Value min</span><input id="section-value-min" type="number" step="0.01"></label>
                 <label class="field"><span>Value max</span><input id="section-value-max" type="number" step="0.01"></label>
               </div>
-              <label class="field"><span>X axis</span><select id="section-axis"><option value="horizontal_distance" selected>Horizontal distance</option><option value="distance">3D distance along well</option><option value="md">MD</option></select></label>
+              <label class="field"><span>X axis</span><select id="section-axis" data-i18n-options><option value="horizontal_distance" selected>Horizontal distance</option><option value="distance">3D distance along well</option><option value="md">MD</option></select></label>
               <div class="section-grid-2">
                 <label class="field"><span>Boundary gap, m</span><input id="section-boundary-gap" type="number" min="0" step="0.1" value="2"></label>
                 <label class="field"><span>Min layer, m</span><input id="section-min-layer" type="number" min="0" step="0.1" value="0"></label>
@@ -344,6 +384,7 @@
       </main>
     </div>
     <script src="../../node_modules/plotly.js-dist-min/plotly.min.js"></script>
+    <script src="i18n.js"></script>
     <script src="help.js"></script>
     <script src="app.js"></script>
   </body>

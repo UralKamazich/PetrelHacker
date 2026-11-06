@@ -36,6 +36,8 @@ def test_calculate_interval_metrics_for_global_local_and_net() -> None:
             "TVDSS_BOT_TOTAL": [130.0],
             "TVDSS_TOP_LOCAL": [110.0],
             "TVDSS_BOT_LOCAL": [120.0],
+            "TVDSS_TOP_BARRIER_LOCAL": [110.0],
+            "TVDSS_BOT_BARRIER_LOCAL": [120.0],
         }
     )
     settings = IntervalMetricSettings(
@@ -49,7 +51,7 @@ def test_calculate_interval_metrics_for_global_local_and_net() -> None:
 
     result = calculate_interval_metrics(extracted, intervals, settings)
 
-    assert result.warnings == []
+    assert [warning for warning in result.warnings if "barrier" not in warning] == []
     row = result.rows[0]
     assert row["Pad"] == "P1"
     assert row["Thickness_Global"] == 30.0
@@ -188,7 +190,8 @@ def test_calculate_interval_metrics_recognizes_russian_well_and_stage_columns() 
         IntervalMetricSettings(ntg_column=None, poro_column=None, property_columns=["KP1"]),
     )
 
-    assert result.warnings == ["Net metrics use all interval cells because no lithology, NTG, or PORO net filter is available."]
+    assert result.warnings[0] == "Net metrics use all interval cells because no lithology, NTG, or PORO net filter is available."
+    assert result.warnings[1].startswith("Intervals table has no barrier columns")
     assert len(result.rows) == 1
     assert result.rows[0]["Well"] == "3А011"
     assert result.rows[0]["Port"] == "3"
@@ -618,3 +621,177 @@ def test_calculate_interval_metrics_uses_only_selected_channels() -> None:
     row = result.rows[0]
     assert not any("STRESS" in column for column in row)
     assert row["PERM_avg_arith_Global"] == ""
+
+
+def _barrier_cells() -> pd.DataFrame:
+    tops = [float(value) for value in range(80, 150, 5)]
+    return pd.DataFrame(
+        {
+            "Well": ["A"] * len(tops),
+            "Port": [1] * len(tops),
+            "TVD_top": tops,
+            "TVD_base": [top + 5.0 for top in tops],
+            "CellHeight": [5.0] * len(tops),
+            "NTG": [1.0 if 105.0 <= top < 120.0 else 0.0 for top in tops],
+            "Shm": [top for top in tops],
+        }
+    )
+
+
+def _barrier_intervals(top_barrier: object, bot_barrier: object) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Well": ["A"],
+            "Port": [1],
+            "TVDSS_TOP_TOTAL": [100.0],
+            "TVDSS_BOT_TOTAL": [130.0],
+            "TVDSS_TOP_LOCAL": [105.0],
+            "TVDSS_BOT_LOCAL": [120.0],
+            "TVDSS_TOP_BARRIER_LOCAL": [top_barrier],
+            "TVDSS_BOT_BARRIER_LOCAL": [bot_barrier],
+        }
+    )
+
+
+def _barrier_row(top_barrier: object, bot_barrier: object) -> dict:
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        _barrier_intervals(top_barrier, bot_barrier),
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+    assert [warning for warning in result.warnings if "barrier" not in warning] == []
+    return result.rows[0]
+
+
+def test_barrier_intervals_use_barrier_points() -> None:
+    row = _barrier_row(95.0, 130.0)
+
+    assert row["Thickness_TopBarrier"] == 10.0
+    assert row["Thickness_BotBarrier"] == 10.0
+    assert row["Thickness_LocalBarriers"] == 35.0
+    assert row["BARRIER_TOP_KIND"] == "interlayer"
+    assert row["BARRIER_BOT_KIND"] == "interlayer"
+    assert row["Thickness_TopBarrier_NonNet"] == 10.0
+    assert row["Thickness_TopBarrier_Net"] == 0.0
+    assert row["NetThickness_LocalBarriers"] == 15.0
+    assert row["Shmin_min_TopBarrier"] == 95.0
+    assert row["Shmin_max_BotBarrier"] == 125.0
+    assert row["Shmin_avg_Local"] == 110.0
+
+
+def test_barrier_intervals_are_capped_at_15_m() -> None:
+    row = _barrier_row(80.0, 145.0)
+
+    assert row["Thickness_TopBarrier"] == 15.0
+    assert row["Thickness_BotBarrier"] == 15.0
+    assert row["Thickness_LocalBarriers"] == 45.0
+    assert row["Shmin_min_TopBarrier"] == 90.0
+
+
+def test_missing_or_zero_barrier_gives_empty_metrics() -> None:
+    row = _barrier_row(105.0, 130.0)
+
+    assert row["BARRIER_TOP_KIND"] == "none"
+    assert row["Thickness_TopBarrier"] == ""
+    assert row["Thickness_TopBarrier_Net"] == ""
+    assert row["Shmin_avg_TopBarrier_NonNet"] == ""
+    assert row["Thickness_BotBarrier"] == 10.0
+    assert row["Thickness_LocalBarriers"] == 25.0
+
+    row = _barrier_row(None, 118.0)
+    assert row["Thickness_TopBarrier"] == ""
+    assert row["Thickness_BotBarrier"] == ""
+    assert row["Thickness_LocalBarriers"] == ""
+    assert row["Shmin_avg_LocalBarriers"] == ""
+    assert row["Thickness_Local"] == 15.0
+
+
+def test_barrier_metric_columns_are_dropped_from_input_frac_list() -> None:
+    intervals = _barrier_intervals(95.0, 130.0)
+    intervals["Thickness_TopBarrier"] = 999.0
+    intervals["Shmin_avg_LocalBarriers_Net"] = 999.0
+
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        intervals,
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+
+    row = result.rows[0]
+    assert row["Thickness_TopBarrier"] == 10.0
+    assert row["Shmin_avg_LocalBarriers_Net"] != 999.0
+
+
+def test_cap_rock_next_to_total_is_used_as_15_m_barrier() -> None:
+    # Local is the outermost body: its top equals Total top (seal above), its base is
+    # 0.5 m above Total base (within the 1 m tolerance, seal below). No TB/BB barriers.
+    intervals = _barrier_intervals(105.0, 120.0)
+    intervals["TVDSS_TOP_TOTAL"] = 105.0
+    intervals["TVDSS_BOT_TOTAL"] = 120.5
+
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        intervals,
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+
+    assert not [warning for warning in result.warnings if "no top barrier" in warning or "no bottom barrier" in warning]
+    row = result.rows[0]
+    assert row["BARRIER_TOP_KIND"] == "seal"
+    assert row["BARRIER_BOT_KIND"] == "seal"
+    assert row["Thickness_TopBarrier"] == 15.0
+    assert row["Thickness_BotBarrier"] == 15.0
+    assert row["Thickness_LocalBarriers"] == 45.0
+    assert row["Shmin_min_TopBarrier"] == 90.0
+    assert row["Shmin_max_BotBarrier"] == 130.0
+
+
+def test_seal_wins_over_barrier_points_and_far_local_without_barrier_is_empty() -> None:
+    # Top: Local is 0.5 m below Total top -> cap rock, even though TB marks a 5 m barrier.
+    # Bottom: Local is 10 m above Total base and BB equals BL -> no barrier.
+    intervals = _barrier_intervals(100.0, 120.0)
+    intervals["TVDSS_TOP_TOTAL"] = 104.5
+
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        intervals,
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+
+    row = result.rows[0]
+    assert row["BARRIER_TOP_KIND"] == "seal"
+    assert row["Thickness_TopBarrier"] == 15.0
+    assert row["BARRIER_BOT_KIND"] == "none"
+    assert row["Thickness_BotBarrier"] == ""
+    assert any("1 sleeve(s) have no bottom barrier" in warning for warning in result.warnings)
+
+
+def test_barrier_notices_report_zero_borderline_and_missing_barriers(tmp_path) -> None:
+    intervals = pd.concat(
+        [
+            _barrier_intervals(105.0, 120.0).assign(Port=1, TVDSS_TOP_TOTAL=105.0, TVDSS_BOT_TOTAL=130.0),
+            _barrier_intervals(100.0, 125.0).assign(Port=2, TVDSS_TOP_TOTAL=103.5, TVDSS_BOT_TOTAL=130.0),
+        ],
+        ignore_index=True,
+    )
+    cells = pd.concat([_barrier_cells(), _barrier_cells().assign(Port=2)], ignore_index=True)
+
+    result = calculate_interval_metrics(
+        cells,
+        intervals,
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+
+    notices = {(notice["port"], notice["side"]): notice for notice in result.barrier_notices}
+    assert notices[("1", "top")]["reason"] == "zero"
+    assert notices[("1", "top")]["kind"] == "seal"
+    assert notices[("1", "bottom")]["reason"] == "none"
+    assert notices[("2", "top")]["reason"] == "borderline"
+    assert notices[("2", "top")]["gap"] == 1.5
+    assert notices[("2", "top")]["thickness"] == 5.0
+    assert ("2", "bottom") not in notices
+
+    description = write_interval_metrics_description(result, tmp_path / "m.xlsx", IntervalMetricSettings())
+    text = description.read_text(encoding="utf-8")
+    assert "МУФТЫ У ПОГРАНИЧНЫХ УСЛОВИЙ БАРЬЕРОВ" in text
+    assert "borderline: A/2 top" in text

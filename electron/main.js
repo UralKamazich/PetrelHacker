@@ -145,6 +145,18 @@ ipcMain.handle('dialog:open-file', async (_event, options) => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('dialog:open-files', async (_event, options) => {
+  const key = options && options.dialogKey ? String(options.dialogKey) : 'open-files';
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    filters: options && options.filters ? options.filters : [],
+    defaultPath: dialogDefaultPath(options, key)
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  saveDialogDirectory(key, result.filePaths[0]);
+  return result.filePaths;
+});
+
 ipcMain.handle('dialog:open-directory', async (_event, options) => {
   const key = options && options.dialogKey ? String(options.dialogKey) : 'open-directory';
   const result = await dialog.showOpenDialog(mainWindow, {
