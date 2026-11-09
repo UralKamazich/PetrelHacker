@@ -125,6 +125,11 @@ def test_calculate_interval_metrics_warns_for_missing_cells() -> None:
             "TVDSS_BOT_TOTAL": 110.0,
             "TVDSS_TOP_LOCAL": 100.0,
             "TVDSS_BOT_LOCAL": 110.0,
+            # Barrier columns depend only on the boundary marks and are written for every row.
+            "BARRIER_TOP_KIND": "seal",
+            "BARRIER_TOP_LOCAL": 0.0,
+            "BARRIER_BOT_KIND": "seal",
+            "BARRIER_BOT_LOCAL": 0.0,
         }
     ]
     assert "No extracted cells found for B_1; tried Well/Port and X/Y." in result.warnings
@@ -980,3 +985,29 @@ def test_stress_contrast_columns_are_dropped_from_input_frac_list() -> None:
 
     assert result.rows[0]["SC_Local_Top_MinMax"] == -5.0
     assert result.rows[0]["SCxH_Local_Bot_MedianMedian"] == 12.5 * 10.0
+
+
+def test_barrier_thickness_is_written_for_rows_of_other_models() -> None:
+    # The second sleeve has no cells in this model (it belongs to another model), but its
+    # corrected barrier thickness must still be written so that model files agree when merged.
+    intervals = pd.concat(
+        [_barrier_intervals(95.0, 120.5), _barrier_intervals(104.6, 130.0).assign(Well="B")],
+        ignore_index=True,
+    )
+    intervals["BARRIER_TOP_LOCAL"] = [10.0, 0.4]
+    intervals["BARRIER_BOT_LOCAL"] = [0.5, 10.0]
+
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        intervals,
+        IntervalMetricSettings(ntg_column="NTG", poro_column=None, shmin_column="Shm"),
+    )
+
+    own, other = result.rows
+    assert own["BARRIER_TOP_LOCAL"] == 10.0
+    assert own["BARRIER_BOT_LOCAL"] == 0.0
+    assert other["BARRIER_TOP_LOCAL"] == 0.0
+    assert other["BARRIER_TOP_KIND"] == "seal_total"
+    assert other["BARRIER_BOT_LOCAL"] == 10.0
+    assert "Thickness_Local" not in other
+    assert all(notice["well"] == "A" for notice in result.barrier_notices)

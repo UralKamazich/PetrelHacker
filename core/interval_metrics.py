@@ -208,6 +208,12 @@ def calculate_interval_metrics(
         row: dict = _interval_base_row(interval)
         row["Well"] = well
         row["Port"] = port
+        # Barrier kind and corrected thickness depend only on the boundary marks, so they are
+        # written for every row: metric files of different models then agree in these columns.
+        barrier_bounds, barrier_sides = _barrier_interval_bounds(interval)
+        for side in barrier_sides:
+            row[BARRIER_KIND_COLUMNS[side.name]] = side.kind
+            row[BARRIER_THICKNESS_COLUMNS[side.name]] = "" if side.internal is None else side.internal
         cells = grouped.get((well, port))
         if cells is None:
             cells = _cells_by_xy(interval, xy_grouped)
@@ -235,10 +241,7 @@ def calculate_interval_metrics(
             interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
 
         unavailable_suffixes: set[str] = set()
-        barrier_bounds, barrier_sides = _barrier_interval_bounds(interval)
         for side in barrier_sides:
-            row[BARRIER_KIND_COLUMNS[side.name]] = side.kind
-            row[BARRIER_THICKNESS_COLUMNS[side.name]] = "" if side.internal is None else round(side.internal, 4)
             if side.reason:
                 barrier_notices.append(side.notice(well, port))
         for name, bounds in barrier_bounds.items():
