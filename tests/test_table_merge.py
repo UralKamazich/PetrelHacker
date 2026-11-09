@@ -97,3 +97,14 @@ def test_write_merged_table_round_trips_values(tmp_path) -> None:
     assert saved["Thickness_Local"].iloc[0] == 0.1234567890123456
     assert pd.isna(saved["Thickness_Local"].iloc[4])
     assert saved["Merge_source"].fillna("").tolist() == ["3А", "3А", "5А", "", ""]
+
+
+def test_merge_warns_about_shmin_in_different_units() -> None:
+    mpa = pd.DataFrame({"Well": ["A", "B"], "Port": [1, 1], "Shmin_avg_Local": [66.0, None]})
+    atm = pd.DataFrame({"Well": ["A", "B"], "Port": [1, 1], "Shmin_avg_Local": [None, 650.0]})
+
+    result = merge_tables([MergeInput("3А", mpa), MergeInput("5А", atm)], ["Well", "Port"])
+
+    assert any("different units" in warning and "3А: 66.0" in warning for warning in result.warnings)
+    same = merge_tables([MergeInput("5А", atm), MergeInput("6А", atm.assign(Shmin_avg_Local=[630.0, None]))], ["Well", "Port"])
+    assert not any("different units" in warning for warning in same.warnings)

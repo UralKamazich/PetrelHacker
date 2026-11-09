@@ -1779,3 +1779,63 @@ select {
   background: #1d4ed8;
   color: #ffffff;
 }
+
+/* Lithology code recommendation in the Metrics → Channels panel */
+.lith-advice {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.lith-advice-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.lith-advice table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.lith-advice th,
+.lith-advice td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.lith-advice tr.reservoir td {
+  color: #047857;
+  font-weight: 600;
+}
+
+.lith-advice-recommendation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-weight: 600;
+  color: #047857;
+}
+
+.lith-advice-recommendation .soft-button {
+  min-height: 26px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.lith-advice-alert {
+  margin-top: 6px;
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.lith-advice-note,
+.lith-advice-status {
+  margin-top: 6px;
+  color: var(--muted);
+}

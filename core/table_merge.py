@@ -137,6 +137,7 @@ def merge_tables(inputs: list[MergeInput], key_columns: list[str], *, add_source
         source_name = SOURCE_COLUMN if SOURCE_COLUMN not in output.columns else f"{SOURCE_COLUMN}_merged"
         output[source_name] = ["+".join(values) for values in contributors]
 
+    warnings.extend(_unit_mismatch_warnings(prepared))
     conflicts = int(conflict_counts.sum())
     if conflicts:
         worst = sorted(
@@ -152,6 +153,28 @@ def merge_tables(inputs: list[MergeInput], key_columns: list[str], *, add_source
     if add_source_column and no_data:
         warnings.append(f"{no_data} row(s) have identical data in all files (empty {SOURCE_COLUMN}), e.g. no metrics in any model.")
     return MergeResult(frame=output, warnings=warnings, file_stats=file_stats, conflicts=conflicts)
+
+
+def _unit_mismatch_warnings(prepared: list[tuple[str, pd.DataFrame]]) -> list[str]:
+    """Warn when a stress column differs between files by about x10 (MPa vs atm)."""
+    reference = "Shmin_avg_Local"
+    medians = {}
+    for label, frame in prepared:
+        if reference in frame.columns:
+            values = pd.to_numeric(frame[reference], errors="coerce")
+            values = values[values > 0]
+            if len(values):
+                medians[label] = float(values.median())
+    if len(medians) < 2:
+        return []
+    low, high = min(medians.values()), max(medians.values())
+    if low <= 0 or high / low < 5:
+        return []
+    details = ", ".join(f"{label}: {value:.1f}" for label, value in medians.items())
+    return [
+        f"Shmin looks to be in different units in the files (median {reference} {details}): "
+        "probably MPa vs atm. Recalculate the metrics with the same Shmin units before clustering."
+    ]
 
 
 def write_merged_table(result: MergeResult, output_path: str | Path) -> None:

@@ -21,6 +21,7 @@ from core.exporter import default_extraction_output_path
 from core.interval_metrics import (
     DEFAULT_METRIC_KEYS,
     IntervalMetricSettings,
+    analyze_lithology_codes,
     calculate_interval_metrics,
     write_interval_metrics_description,
     write_interval_metrics_xlsx,
@@ -74,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             "table-info",
             "metrics",
             "merge-tables",
+            "lithology-codes",
             "curve-data",
             "curve-data-batch",
             "well-trajectories",
@@ -105,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             "table-info": table_info,
             "metrics": metrics,
             "merge-tables": merge_tables_command,
+            "lithology-codes": lithology_codes,
             "curve-data": curve_data,
             "curve-data-batch": curve_data_batch,
             "well-trajectories": well_trajectories,
@@ -569,7 +572,33 @@ def metrics(payload: JsonDict) -> None:
         rowsWritten=len(result.rows),
         warnings=result.warnings,
         barrierNotices=result.barrier_notices,
+        netWarnings=result.net_warnings,
     )
+
+
+def lithology_codes(payload: JsonDict) -> None:
+    """Statistics of lithology codes against PORO and the recommended reservoir codes."""
+    path = str(payload.get("path", "")).strip()
+    lithology_column = str(payload.get("lithologyColumn") or "").strip()
+    if not path or not lithology_column:
+        raise ValueError("Select extracted table and lithology column.")
+    poro_column = _empty_to_none(payload.get("poroColumn"))
+    ntg_column = _empty_to_none(payload.get("ntgColumn"))
+    wanted = [lithology_column, poro_column, ntg_column, "CellHeight", "TVD_top", "TVD_base", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL"]
+    cells = _read_table_columns_via_cache(path, [column for column in wanted if column])
+    _emit("result", **analyze_lithology_codes(cells, lithology_column, poro_column, ntg_column))
+
+
+def _read_table_columns_via_cache(path: str | Path, columns: list[str]) -> pd.DataFrame:
+    """Read only the given columns (those that exist) through the parquet cache."""
+    try:
+        cache_path, metadata = _ensure_curve_table_cache(path)
+        available = set(metadata.get("columns") or [])
+        selected = [column for column in dict.fromkeys(columns) if column in available]
+        return pd.read_parquet(cache_path, columns=selected)
+    except Exception:  # noqa: BLE001
+        df = read_table(path)
+        return df[[column for column in dict.fromkeys(columns) if column in df.columns]]
 
 
 def merge_tables_command(payload: JsonDict) -> None:
