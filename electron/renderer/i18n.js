@@ -274,7 +274,7 @@ const RU = {
   'Temporary cache unavailable; loaded section from persistent workspace.': 'Временный кэш недоступен; разрез загружен из рабочей папки.',
   'Restored scene settings from Section workspace.': 'Настройки сцены восстановлены из рабочей папки разрезов.',
   'Restored section scene settings.': 'Настройки сцены разреза восстановлены.',
-  'Global boundaries were not saved': 'Глобальные границы не сохранены',
+  'Total boundaries were not saved': 'Границы Total не сохранены',
   'No file selected': 'Файл не выбран',
   'No wells selected': 'Скважины не выбраны',
 
@@ -329,6 +329,28 @@ const RU = {
   'Select key columns.': 'Выберите ключевые колонки.',
 
   'Continue extraction?': 'Продолжить выгрузку?',
+  'Clay window, m': 'Окно глин над/под пластом, м',
+  'Barrier window, m': 'Окно внутренних барьеров, м',
+  'Taken from the big clays above/below the reservoir: TopTotal / BotTotal / Total_pm intervals and cap-clay barriers':
+    'Берётся из больших глин над и под пластом: интервалы TopTotal / BotTotal / Total_pm и барьеры-покрышки',
+  'Nearest part of an internal barrier (the whole barrier if it is thinner)': 'Ближайшая часть внутреннего барьера (весь барьер, если он тоньше)',
+  'Clay window must be a positive number of metres.': 'Окно глин должно быть положительным числом метров.',
+  'Barrier window must be a positive number of metres.': 'Окно барьеров должно быть положительным числом метров.',
+  'Analyzing lithology codes…': 'Анализ кодов литологии…',
+  'Lithology codes by PORO': 'Коды литологии по PORO',
+  'Lithology codes by NTG': 'Коды литологии по NTG',
+  'Code': 'Код',
+  'Cells': 'Ячеек',
+  'h, m': 'h, м',
+  'PORO mean': 'PORO ср.',
+  'NTG mean': 'NTG ср.',
+  'Verdict': 'Вывод',
+  'reservoir': 'коллектор',
+  'non-reservoir': 'неколлектор',
+  'Select PORO channel to get a recommendation.': 'Выберите канал PORO, чтобы получить рекомендацию.',
+  'No reservoir code found: no code has PORO > 0 in at least half of the cells.': 'Код коллектора не найден: ни у одного кода нет PORO > 0 хотя бы в половине ячеек.',
+  'Reservoir values are not set.': 'Значения коллектора не заданы.',
+  'Select extracted table and lithology column.': 'Выберите таблицу выгрузки и колонку литологии.',
   'no properties': 'нет свойств'
 };
 
@@ -417,9 +439,29 @@ const RU_PATTERNS = [
   [/^(.+): (\d+) row\(s\) without key values were skipped\.$/, '$1: пропущено строк без ключа: $2.'],
   [/^(.+): key column\(s\) not found: (.+)$/, '$1: не найдены ключевые колонки: $2'],
   [/^(\d+) sleeve\(s\) have no (top|bottom) barrier: (.+)$/, 'У $1 муфт нет барьера ($2): $3'],
+  [/^(\d+) barrier side\(s\) have Local more than (.+) m from Total but no internal barrier mark (.+)$/, 'Сторон барьеров, где Local дальше $2 м от Total, но метки барьера нет: $1 $3'],
+  [/^(\d+) barrier side\(s\) have TB\/BB marks thicker than (.+)$/, 'Сторон барьеров с метками TB/BB толще $2 при Local у Total (мощность обнулена): $1'],
+  [/^(\d+) barrier side\(s\) are near the (.+) tolerance (.+)$/, 'Сторон барьеров у границы допуска $2: $1 $3'],
+  [/^(\d+) barrier side\(s\) have no Local\/Total bounds; (.+)$/, 'Сторон барьеров без границ Local/Total: $1; метрики барьера пустые.'],
+  [/^(\d+) barrier side\(s\): Local is at the Total boundary \(monolithic\), (.+)$/, 'Сторон барьеров с монолитом (Local у Total, внутреннего барьера нет, взято окно глин-покрышки): $1. Список — в .txt.'],
   [/^(\d+) sleeve barrier\(s\) are near the seal tolerance (.+)$/, 'Барьеров у границы допуска покрышки: $1 $2'],
   [/^(\d+) sleeve barrier\(s\) have zero thickness by TB\/BB points (.+)$/, 'Барьеров с нулевой толщиной по точкам TB/BB: $1 $2'],
-  [/^Intervals table has no barrier columns (.+)$/, 'В таблице интервалов нет колонок барьеров $1']
+  [/^Intervals table has no barrier columns (.+)$/, 'В таблице интервалов нет колонок барьеров $1'],
+  [/^Recommended reservoir values: (.+)$/, 'Рекомендуемые значения коллектора: $1'],
+  [/^Shmin looks to be in different units in the files \(median (\S+) (.+)\): probably MPa vs atm\. Recalculate the metrics with the same Shmin units before clustering\.$/,
+    'Shmin в файлах, похоже, в разных единицах (медиана $1: $2): вероятно, МПа и атм. Пересчитайте метрики с Shmin в одних единицах перед кластеризацией.'],
+  [/^Current value (.+) differs from the recommendation\.$/, 'Текущее значение $1 не совпадает с рекомендацией.'],
+  [/^Fractional lithology values in (.+) of cells are rounded to the nearest code\.$/, 'Дробные значения литологии у $1 ячеек округлены до ближайшего кода.'],
+  [/^Cells inside Total intervals: (\d+)$/, 'Ячеек внутри интервалов Total: $1'],
+  [/^All cells: (\d+)$/, 'Все ячейки: $1'],
+  [/^(PORO|NTG) > 0$/, '$1 > 0'],
+  [/^Lithology column is missing: (.+)$/, 'Нет колонки литологии: $1'],
+  [/^Lithology column (.+) has fractional values in (\d+%) of cells \(upscaled property\); they are rounded to the nearest code\.$/,
+    'В колонке литологии $1 дробные значения у $2 ячеек (осреднённое свойство); они округлены до ближайшего кода.'],
+  [/^No cells have lithology (.+) in reservoir values \((.+)\); Net metrics are empty\.$/,
+    'Нет ячеек с литологией $1 из значений коллектора ($2); метрики Net пустые.'],
+  [/^Net cells \((.+) in (.+)\) have (PORO|NTG) > 0 only in (\d+%) of cells versus (\d+%) in other cells: the reservoir values look inverted, check the lithology codes\.$/,
+    'У ячеек Net ($1 = $2) $3 > 0 только в $4 ячеек, а у остальных — в $5: похоже, значения коллектора перепутаны, проверьте коды литологии.']
 ];
 
 const i18nOriginals = new WeakMap();

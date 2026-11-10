@@ -217,7 +217,10 @@ function bindActions() {
     renderMergeFiles();
     saveState();
   }));
-  ['merge-output', 'merge-source-column'].forEach(id => $(id).addEventListener('change', saveState));
+  ['merge-output', 'merge-source-column', 'reservoir-values', 'metrics-clay-window', 'metrics-barrier-window'].forEach(id => $(id).addEventListener('change', saveState));
+  ['metrics-lithology', 'metrics-poro', 'metrics-ntg', 'metrics-extracted'].forEach(id => $(id).addEventListener('change', refreshLithologyAdvice));
+  $('reservoir-values').addEventListener('input', renderLithologyAdvice);
+  $('lith-advice').addEventListener('click', applyLithologyAdvice);
   $('browse-curve-path').addEventListener('click', async () => setPath('curve-path', await pickTable('curve-table')));
   $('load-curve-table').addEventListener('click', loadCurveTable);
   $('draw-curves').addEventListener('click', drawCurves);
@@ -1880,6 +1883,7 @@ async function loadMetricsTable() {
     fillSelect('metrics-shmin', propertyColumns, guessColumn(propertyColumns, ['SHMIN']));
     renderMetricsProperties(state.tableColumns);
     setReady(`Headers: ${state.tableColumns.length}`);
+    refreshLithologyAdvice();
   } catch (error) {
     fail(error);
   }
@@ -1957,11 +1961,13 @@ async function runMetrics() {
       densityColumn: valueOrNull('metrics-density'),
       shminColumn: valueOrNull('metrics-shmin'),
       reservoirValues: splitCsv($('reservoir-values').value),
+      clayWindow: $('metrics-clay-window').value.trim(),
+      barrierWindow: $('metrics-barrier-window').value.trim(),
       propertyColumns: checkedValues('metrics-property'),
       metricKeys
     });
     setProgress('metrics-progress', 100);
-    renderMetricsBarrierNotices(result.barrierNotices || []);
+    renderMetricsBarrierNotices(result.barrierNotices || [], result.netWarnings || []);
     setReady(`Metrics rows: ${result.rowsWritten || 0}`);
   } catch (error) {
     fail(error);
@@ -2168,14 +2174,17 @@ function renderMergeSummary(result) {
 
 // Sleeves whose barrier decision needs a look, shown in red under the Metrics panels.
 const BARRIER_NOTICE_GROUPS = [
-  ['none', 'Барьер не определён — метрики барьера пустые (Local далеко от Total, точки TB/BB нет)'],
-  ['borderline', 'У границы допуска покрышки (1 м): Local в 0.5–3 м от Total — проверьте решение'],
-  ['zero', 'Барьер по точкам TB/BB = 0 (или точки нет) — Local у границы Total, взята покрышка 15 м']
+  ['none', 'Нет границ Local — метрики барьера пустые'],
+  ['no_mark', 'Метки не согласованы: Local дальше 1 м от Total, но барьера по меткам TB/BB нет — взято окно глин за Total'],
+  ['zeroed', 'Барьер обнулён: метки TB/BB дают барьер > 1 м, но Local у границы Total (≤ 1 м) — взято окно глин-покрышки'],
+  ['borderline', 'У границы допуска 1 м: расстояние до Total или мощность по меткам 0.5–3 м — проверьте решение'],
+  ['zero', 'Монолит: Local у границы Total, внутреннего барьера нет — взято окно глин-покрышки']
 ];
+const BARRIER_KIND_LABELS = { seal: 'покрышка', interlayer: 'прослой', seal_total: 'глина за Total', none: 'нет' };
 
-function renderMetricsBarrierNotices(notices) {
+function renderMetricsBarrierNotices(notices, netWarnings = []) {
   const root = $('metrics-notice');
-  if (!notices.length) {
+  if (!notices.length && !netWarnings.length) {
     root.hidden = true;
     root.innerHTML = '';
     return;
@@ -2197,14 +2206,123 @@ function renderMetricsBarrierNotices(notices) {
     } else {
       body = `<ul>${items.map(notice => {
         const gap = notice.gap == null ? 'нет данных' : `${notice.gap} м`;
-        const used = notice.thickness == null ? 'барьер не взят' : `${notice.kind === 'seal' ? 'покрышка' : 'прослой'} ${notice.thickness} м`;
-        return `<li>${escapeHtml(notice.well)} / порт ${escapeHtml(notice.port)}, ${sideLabel(notice.side)}: до Total ${escapeHtml(gap)}, ${escapeHtml(used)}</li>`;
+        const mark = notice.pointThickness == null ? 'метки нет' : `по меткам ${notice.pointThickness} м`;
+        const used = notice.thickness == null ? 'барьер не взят' : `${BARRIER_KIND_LABELS[notice.kind] || notice.kind} ${notice.thickness} м`;
+        return `<li>${escapeHtml(notice.well)} / порт ${escapeHtml(notice.port)}, ${sideLabel(notice.side)}: до Total ${escapeHtml(gap)}, ${escapeHtml(mark)}, взято: ${escapeHtml(used)}</li>`;
       }).join('')}</ul>`;
     }
     return `<div class="notice-group"><div class="notice-title">${escapeHtml(title)} — ${items.length}</div>${body}</div>`;
   }).join('');
-  root.innerHTML = `<h4>Барьеры: проверьте муфты</h4>${groups}`;
+  const netBlock = netWarnings.length
+    ? `<div class="notice-group"><h4>Проверьте определение Net</h4><ul>${netWarnings.map(text => `<li>${escapeHtml(text)}</li>`).join('')}</ul></div>`
+    : '';
+  const barrierBlock = notices.length ? `<h4>Барьеры: проверьте муфты</h4>${groups}` : '';
+  root.innerHTML = `${netBlock}${barrierBlock}`;
   root.hidden = false;
+}
+
+// ---- Metrics page: recommendation of reservoir lithology codes based on PORO ----
+
+let lithologyAdviceRequest = 0;
+
+async function refreshLithologyAdvice() {
+  const root = $('lith-advice');
+  const path = $('metrics-extracted').value.trim();
+  const lithologyColumn = $('metrics-lithology').value;
+  if (!path || !lithologyColumn) {
+    lithologyAdviceRequest += 1;
+    state.lithologyAdvice = null;
+    root.hidden = true;
+    root.innerHTML = '';
+    return;
+  }
+  const payload = {
+    path,
+    lithologyColumn,
+    poroColumn: $('metrics-poro').value,
+    ntgColumn: $('metrics-ntg').value
+  };
+  const key = JSON.stringify(payload);
+  if (state.lithologyAdvice && state.lithologyAdvice.key === key) {
+    renderLithologyAdvice();
+    return;
+  }
+  const request = ++lithologyAdviceRequest;
+  root.hidden = false;
+  root.innerHTML = '<div class="lith-advice-status">Analyzing lithology codes…</div>';
+  try {
+    const result = await window.petrel.run('lithology-codes', payload);
+    if (request !== lithologyAdviceRequest) return;
+    state.lithologyAdvice = { key, result };
+    renderLithologyAdvice();
+  } catch (error) {
+    if (request !== lithologyAdviceRequest) return;
+    state.lithologyAdvice = null;
+    const message = error && error.message ? error.message.split('\n')[0] : String(error);
+    root.innerHTML = `<div class="lith-advice-alert">${escapeHtml(message)}</div>`;
+  }
+}
+
+function lithologyCodeSet(values) {
+  return new Set(values.map(value => {
+    const number = Number(String(value).replace(',', '.'));
+    return Number.isFinite(number) && String(value).trim() !== '' ? String(Math.round(number)) : String(value).trim();
+  }));
+}
+
+function renderLithologyAdvice() {
+  const root = $('lith-advice');
+  const advice = state.lithologyAdvice && state.lithologyAdvice.result;
+  if (!advice) return;
+  const percent = value => (value == null ? '—' : `${Math.round(value * 100)}%`);
+  const number = value => (value == null ? '—' : Number(value).toFixed(3));
+  const basis = advice.basis || 'PORO';
+  const rows = (advice.codes || []).map(code => `<tr class="${code.reservoir ? 'reservoir' : ''}">
+      <td>${escapeHtml(code.code)}</td>
+      <td>${Number(code.cells)}</td>
+      <td>${Number(code.thickness).toFixed(0)}</td>
+      <td>${percent(code.positiveShare)}</td>
+      <td>${number(code.poroMean)}</td>
+      <td>${number(code.ntgMean)}</td>
+      <td>${code.reservoir ? 'reservoir' : 'non-reservoir'}</td>
+    </tr>`).join('');
+  const recommended = advice.recommended || [];
+  const current = splitCsv($('reservoir-values').value);
+  const lines = [];
+  if (!advice.basis) {
+    lines.push('<div class="lith-advice-alert">Select PORO channel to get a recommendation.</div>');
+  } else if (!recommended.length) {
+    lines.push('<div class="lith-advice-alert">No reservoir code found: no code has PORO &gt; 0 in at least half of the cells.</div>');
+  } else {
+    const recommendedSet = lithologyCodeSet(recommended);
+    const currentSet = lithologyCodeSet(current);
+    const same = recommendedSet.size === currentSet.size && Array.from(recommendedSet).every(code => currentSet.has(code));
+    lines.push(`<div class="lith-advice-recommendation"><span>${escapeHtml(`Recommended reservoir values: ${recommended.join(', ')}`)}</span>${same ? '' : '<button class="soft-button" type="button" data-apply-lithology>Apply</button>'}</div>`);
+    if (!current.length) lines.push('<div class="lith-advice-alert">Reservoir values are not set.</div>');
+    else if (!same) lines.push(`<div class="lith-advice-alert">${escapeHtml(`Current value ${current.join(', ')} differs from the recommendation.`)}</div>`);
+  }
+  if (advice.fractionalShare > 0.01) {
+    lines.push(`<div class="lith-advice-note">${escapeHtml(`Fractional lithology values in ${percent(advice.fractionalShare)} of cells are rounded to the nearest code.`)}</div>`);
+  }
+  const scope = advice.scope === 'total' ? `Cells inside Total intervals: ${advice.cellCount}` : `All cells: ${advice.cellCount}`;
+  root.innerHTML = `
+    <div class="lith-advice-title">${escapeHtml(basis === 'NTG' ? 'Lithology codes by NTG' : 'Lithology codes by PORO')}</div>
+    <table>
+      <tr><th>Code</th><th>Cells</th><th>h, m</th><th>${escapeHtml(`${basis} > 0`)}</th><th>PORO mean</th><th>NTG mean</th><th>Verdict</th></tr>
+      ${rows}
+    </table>
+    ${lines.join('')}
+    <div class="lith-advice-note">${escapeHtml(scope)}</div>`;
+  root.hidden = false;
+}
+
+function applyLithologyAdvice(event) {
+  if (!event.target.closest('[data-apply-lithology]')) return;
+  const advice = state.lithologyAdvice && state.lithologyAdvice.result;
+  if (!advice || !(advice.recommended || []).length) return;
+  $('reservoir-values').value = advice.recommended.join(', ');
+  saveState();
+  renderLithologyAdvice();
 }
 
 async function loadCurveTable() {
@@ -4840,7 +4958,7 @@ async function saveSectionBoundaries() {
       appendLog(`Warning: ${message} ${detail}`);
       try {
         await window.petrel.showWarning(i18nDialogOptions({
-          title: 'Global boundaries were not saved',
+          title: 'Total boundaries were not saved',
           message,
           detail
         }));
@@ -5808,6 +5926,9 @@ function saveState() {
     metricsExtracted: $('metrics-extracted').value,
     metricsIntervals: $('metrics-intervals').value,
     metricsOutput: $('metrics-output').value,
+    reservoirValues: $('reservoir-values').value,
+    metricsClayWindow: $('metrics-clay-window').value,
+    metricsBarrierWindow: $('metrics-barrier-window').value,
     mergeFiles: state.mergeFiles.map(file => file.path),
     mergeKeys: state.mergeKeys,
     mergeOutput: $('merge-output').value,
@@ -5892,6 +6013,9 @@ function restoreState() {
     if (data.sectionBarrierThickness !== undefined) $('section-barrier-thickness').checked = Boolean(data.sectionBarrierThickness);
     if (Array.isArray(data.mergeKeys)) state.mergeKeys = data.mergeKeys.slice(0, 2).map(String);
     if (data.mergeOutput) $('merge-output').value = data.mergeOutput;
+    if (data.reservoirValues !== undefined) $('reservoir-values').value = data.reservoirValues;
+    if (data.metricsClayWindow) $('metrics-clay-window').value = data.metricsClayWindow;
+    if (data.metricsBarrierWindow) $('metrics-barrier-window').value = data.metricsBarrierWindow;
     if (data.mergeSourceColumn !== undefined) $('merge-source-column').checked = Boolean(data.mergeSourceColumn);
     if (Array.isArray(data.mergeFiles) && data.mergeFiles.length) {
       state.mergeFiles = data.mergeFiles.map(path => ({ path: String(path), columns: [], loading: true, error: '' }));
