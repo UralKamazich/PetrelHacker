@@ -217,7 +217,7 @@ function bindActions() {
     renderMergeFiles();
     saveState();
   }));
-  ['merge-output', 'merge-source-column', 'reservoir-values'].forEach(id => $(id).addEventListener('change', saveState));
+  ['merge-output', 'merge-source-column', 'reservoir-values', 'metrics-clay-window', 'metrics-barrier-window'].forEach(id => $(id).addEventListener('change', saveState));
   ['metrics-lithology', 'metrics-poro', 'metrics-ntg', 'metrics-extracted'].forEach(id => $(id).addEventListener('change', refreshLithologyAdvice));
   $('reservoir-values').addEventListener('input', renderLithologyAdvice);
   $('lith-advice').addEventListener('click', applyLithologyAdvice);
@@ -1961,6 +1961,8 @@ async function runMetrics() {
       densityColumn: valueOrNull('metrics-density'),
       shminColumn: valueOrNull('metrics-shmin'),
       reservoirValues: splitCsv($('reservoir-values').value),
+      clayWindow: $('metrics-clay-window').value.trim(),
+      barrierWindow: $('metrics-barrier-window').value.trim(),
       propertyColumns: checkedValues('metrics-property'),
       metricKeys
     });
@@ -2173,10 +2175,10 @@ function renderMergeSummary(result) {
 // Sleeves whose barrier decision needs a look, shown in red under the Metrics panels.
 const BARRIER_NOTICE_GROUPS = [
   ['none', 'Нет границ Local — метрики барьера пустые'],
-  ['no_mark', 'Метки не согласованы: Local дальше 1 м от Total, но барьера по меткам TB/BB нет — взяты 15 м глины за Total'],
-  ['zeroed', 'Барьер обнулён: метки TB/BB дают барьер > 1 м, но Local у границы Total (≤ 1 м) — взята покрышка 15 м'],
+  ['no_mark', 'Метки не согласованы: Local дальше 1 м от Total, но барьера по меткам TB/BB нет — взято окно глин за Total'],
+  ['zeroed', 'Барьер обнулён: метки TB/BB дают барьер > 1 м, но Local у границы Total (≤ 1 м) — взято окно глин-покрышки'],
   ['borderline', 'У границы допуска 1 м: расстояние до Total или мощность по меткам 0.5–3 м — проверьте решение'],
-  ['zero', 'Монолит: Local у границы Total, внутреннего барьера нет — взята покрышка 15 м']
+  ['zero', 'Монолит: Local у границы Total, внутреннего барьера нет — взято окно глин-покрышки']
 ];
 const BARRIER_KIND_LABELS = { seal: 'покрышка', interlayer: 'прослой', seal_total: 'глина за Total', none: 'нет' };
 
@@ -5925,6 +5927,8 @@ function saveState() {
     metricsIntervals: $('metrics-intervals').value,
     metricsOutput: $('metrics-output').value,
     reservoirValues: $('reservoir-values').value,
+    metricsClayWindow: $('metrics-clay-window').value,
+    metricsBarrierWindow: $('metrics-barrier-window').value,
     mergeFiles: state.mergeFiles.map(file => file.path),
     mergeKeys: state.mergeKeys,
     mergeOutput: $('merge-output').value,
@@ -6010,6 +6014,8 @@ function restoreState() {
     if (Array.isArray(data.mergeKeys)) state.mergeKeys = data.mergeKeys.slice(0, 2).map(String);
     if (data.mergeOutput) $('merge-output').value = data.mergeOutput;
     if (data.reservoirValues !== undefined) $('reservoir-values').value = data.reservoirValues;
+    if (data.metricsClayWindow) $('metrics-clay-window').value = data.metricsClayWindow;
+    if (data.metricsBarrierWindow) $('metrics-barrier-window').value = data.metricsBarrierWindow;
     if (data.mergeSourceColumn !== undefined) $('merge-source-column').checked = Boolean(data.mergeSourceColumn);
     if (Array.isArray(data.mergeFiles) && data.mergeFiles.length) {
       state.mergeFiles = data.mergeFiles.map(path => ({ path: String(path), columns: [], loading: true, error: '' }));

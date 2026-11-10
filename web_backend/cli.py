@@ -20,6 +20,7 @@ import pandas as pd
 from core.exporter import default_extraction_output_path
 from core.interval_metrics import (
     DEFAULT_METRIC_KEYS,
+    INTERVAL_BUFFER_METERS,
     IntervalMetricSettings,
     analyze_lithology_codes,
     calculate_interval_metrics,
@@ -540,6 +541,8 @@ def metrics(payload: JsonDict) -> None:
         reservoir_values={_normalize_value(value) for value in payload.get("reservoirValues") or []},
         property_columns=[str(value) for value in payload.get("propertyColumns") or []],
         metric_keys=[str(value) for value in payload.get("metricKeys") or DEFAULT_METRIC_KEYS],
+        clay_window_m=_window_meters(payload.get("clayWindow"), "Clay window"),
+        barrier_window_m=_window_meters(payload.get("barrierWindow"), "Barrier window"),
     )
 
     def metrics_progress(current: int, total: int) -> None:
@@ -574,6 +577,19 @@ def metrics(payload: JsonDict) -> None:
         barrierNotices=result.barrier_notices,
         netWarnings=result.net_warnings,
     )
+
+
+def _window_meters(value: object, label: str) -> float:
+    """Metres from the Metrics page; empty means the default window."""
+    if value is None or str(value).strip() == "":
+        return INTERVAL_BUFFER_METERS
+    try:
+        number = float(str(value).replace(",", "."))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a positive number of metres.") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{label} must be a positive number of metres.")
+    return number
 
 
 def lithology_codes(payload: JsonDict) -> None:

@@ -329,6 +329,13 @@ const RU = {
   'Select key columns.': 'Выберите ключевые колонки.',
 
   'Continue extraction?': 'Продолжить выгрузку?',
+  'Clay window, m': 'Окно глин над/под пластом, м',
+  'Barrier window, m': 'Окно внутренних барьеров, м',
+  'Taken from the big clays above/below the reservoir: TopTotal / BotTotal / Total_pm intervals and cap-clay barriers':
+    'Берётся из больших глин над и под пластом: интервалы TopTotal / BotTotal / Total_pm и барьеры-покрышки',
+  'Nearest part of an internal barrier (the whole barrier if it is thinner)': 'Ближайшая часть внутреннего барьера (весь барьер, если он тоньше)',
+  'Clay window must be a positive number of metres.': 'Окно глин должно быть положительным числом метров.',
+  'Barrier window must be a positive number of metres.': 'Окно барьеров должно быть положительным числом метров.',
   'Analyzing lithology codes…': 'Анализ кодов литологии…',
   'Lithology codes by PORO': 'Коды литологии по PORO',
   'Lithology codes by NTG': 'Коды литологии по NTG',
@@ -436,7 +443,7 @@ const RU_PATTERNS = [
   [/^(\d+) barrier side\(s\) have TB\/BB marks thicker than (.+)$/, 'Сторон барьеров с метками TB/BB толще $2 при Local у Total (мощность обнулена): $1'],
   [/^(\d+) barrier side\(s\) are near the (.+) tolerance (.+)$/, 'Сторон барьеров у границы допуска $2: $1 $3'],
   [/^(\d+) barrier side\(s\) have no Local\/Total bounds; (.+)$/, 'Сторон барьеров без границ Local/Total: $1; метрики барьера пустые.'],
-  [/^(\d+) barrier side\(s\): Local is at the Total boundary \(monolithic\), (.+)$/, 'Сторон барьеров с монолитом (Local у Total, внутреннего барьера нет, взята покрышка 15 м): $1. Список — в .txt.'],
+  [/^(\d+) barrier side\(s\): Local is at the Total boundary \(monolithic\), (.+)$/, 'Сторон барьеров с монолитом (Local у Total, внутреннего барьера нет, взято окно глин-покрышки): $1. Список — в .txt.'],
   [/^(\d+) sleeve barrier\(s\) are near the seal tolerance (.+)$/, 'Барьеров у границы допуска покрышки: $1 $2'],
   [/^(\d+) sleeve barrier\(s\) have zero thickness by TB\/BB points (.+)$/, 'Барьеров с нулевой толщиной по точкам TB/BB: $1 $2'],
   [/^Intervals table has no barrier columns (.+)$/, 'В таблице интервалов нет колонок барьеров $1'],

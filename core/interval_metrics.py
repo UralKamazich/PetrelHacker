@@ -58,21 +58,40 @@ BASE_EXTRACTION_COLUMNS = {
     "XKey",
     "YKey",
 }
+# Default windows (m). The clay window is taken from the big clays above/below the reservoir
+# (TopTotal_m<N>m, BotTotal_p<N>m, Total_pm<N>m and the cap-clay barriers); the barrier window
+# is the nearest part of an internal barrier. Both are set on the Metrics page.
 INTERVAL_BUFFER_METERS = 15.0
-INTERVAL_DEFINITIONS = (
-    ("Total", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", 0.0, 0.0),
-    ("Local", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL", 0.0, 0.0),
-    ("Total_pm15m", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", -INTERVAL_BUFFER_METERS, INTERVAL_BUFFER_METERS),
-    ("TopTotal_m15m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -INTERVAL_BUFFER_METERS, 0.0),
-    ("BotTotal_p15m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, INTERVAL_BUFFER_METERS),
-)
+
+
+def window_label(window: float) -> str:
+    """Window as it appears in interval names: 15 -> "15", 7.5 -> "7.5"."""
+    return f"{float(window):g}"
+
+
+def interval_definitions(clay_window: float = INTERVAL_BUFFER_METERS) -> tuple[tuple[str, str, str, float, float], ...]:
+    """Fixed intervals: (name, top column, bottom column, top shift, bottom shift)."""
+    label = window_label(clay_window)
+    return (
+        ("Total", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", 0.0, 0.0),
+        ("Local", "TVDSS_TOP_LOCAL", "TVDSS_BOT_LOCAL", 0.0, 0.0),
+        (f"Total_pm{label}m", "TVDSS_TOP_TOTAL", "TVDSS_BOT_TOTAL", -clay_window, clay_window),
+        (f"TopTotal_m{label}m", "TVDSS_TOP_TOTAL", "TVDSS_TOP_TOTAL", -clay_window, 0.0),
+        (f"BotTotal_p{label}m", "TVDSS_BOT_TOTAL", "TVDSS_BOT_TOTAL", 0.0, clay_window),
+    )
+
+
+INTERVAL_DEFINITIONS = interval_definitions()
+# Interval name patterns for any clay window (used to drop old metric columns from input tables).
+WINDOW_INTERVAL_PATTERNS = (r"Total_pm[0-9.]+m", r"TopTotal_m[0-9.]+m", r"BotTotal_p[0-9.]+m")
+WINDOW_COLUMNS = {"clay_window_m": "CLAY_WINDOW_M", "barrier_window_m": "BARRIER_WINDOW_M"}
 # Barrier next to Local on each side (top / bottom). Boundaries are corrected by hand, so
 # marks closer than SEAL_ADJACENCY_METERS are treated as coinciding:
 # - "seal": the Local boundary is within the tolerance of the Total boundary, i.e. Local
 #   is the outermost body (monolithic reservoir on that side). The internal barrier
-#   thickness is zeroed, metrics use the nearest INTERVAL_BUFFER_METERS of the cap clay.
+#   thickness is zeroed, metrics use the nearest clay window of the cap clay.
 # - "interlayer": Local is away from Total and the TB/BB marks give an internal barrier
-#   thicker than the tolerance; metrics use its nearest INTERVAL_BUFFER_METERS.
+#   thicker than the tolerance; metrics use its nearest barrier window.
 # - "seal_total": Local is away from Total but there is no internal barrier mark (or it is
 #   within the tolerance): inconsistent marks, the clay beyond the Total boundary is used.
 # - "none": Local (or Total and the mark) is missing; metrics stay empty.
@@ -85,7 +104,6 @@ SEAL_ADJACENCY_METERS = 1.0
 # Distances in this window are reported for review: the decision depends on a fraction of a metre.
 SEAL_BORDERLINE_WINDOW = (SEAL_ADJACENCY_METERS - 0.5, SEAL_ADJACENCY_METERS + 2.0)
 BARRIER_INTERVAL_NAMES = ("LocalBarriers", "TopBarrier", "BotBarrier")
-ALL_INTERVAL_NAMES = tuple(name for name, *_rest in INTERVAL_DEFINITIONS) + BARRIER_INTERVAL_NAMES
 # Old interval names: their metric columns in input tables are dropped as well.
 LEGACY_INTERVAL_NAMES = ("Global",)
 BASE_METRIC_KEYS = (
@@ -131,11 +149,17 @@ STRESS_CONTRAST_VARIANTS = (
     ("MinStarMedian", "min_star", "median"),
     ("MedianMedian", "median", "median"),
 )
-# Scope: (name, pay interval, barrier above, barrier below, write Δσ × barrier thickness).
-STRESS_CONTRAST_SCOPES = (
-    ("Local", "Local", "TopBarrier", "BotBarrier", True),
-    ("Total", "Total", "TopTotal_m15m", "BotTotal_p15m", False),
-)
+
+
+
+def stress_contrast_scopes(definitions=INTERVAL_DEFINITIONS) -> tuple[tuple[str, str, str, str, bool], ...]:
+    """Scope: (name, pay interval, barrier above, barrier below, write Δσ × barrier thickness)."""
+    top_clay = definitions[3][0]
+    bottom_clay = definitions[4][0]
+    return (
+        ("Local", "Local", "TopBarrier", "BotBarrier", True),
+        ("Total", "Total", top_clay, bottom_clay, False),
+    )
 # A lithology code is recommended as reservoir when at least this share of its cells has PORO > 0.
 RESERVOIR_PORO_SHARE = 0.5
 MetricProgressCallback = Callable[[int, int], None]
@@ -152,6 +176,9 @@ class IntervalMetricSettings:
     reservoir_values: set[str] = field(default_factory=set)
     property_columns: list[str] = field(default_factory=list)
     metric_keys: list[str] = field(default_factory=list)
+    # Window from the big clays above/below the reservoir and from internal barriers, m.
+    clay_window_m: float = INTERVAL_BUFFER_METERS
+    barrier_window_m: float = INTERVAL_BUFFER_METERS
 
 
 @dataclass(frozen=True)
@@ -171,6 +198,13 @@ def calculate_interval_metrics(
     progress_callback: MetricProgressCallback | None = None,
 ) -> IntervalMetricResult:
     settings = settings or IntervalMetricSettings()
+    for attribute, label in (("clay_window_m", "Clay window"), ("barrier_window_m", "Barrier window")):
+        value = getattr(settings, attribute)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{label} must be a positive number of metres.")
+    definitions = interval_definitions(settings.clay_window_m)
+    contrast_scopes = stress_contrast_scopes(definitions)
+    metric_suffixes = _metric_suffixes(definitions)
     extracted = _normalize_identity_columns(extracted_df.copy())
     intervals = _normalize_identity_columns(intervals_df.copy())
     validation_warnings = _validate_inputs(extracted, intervals)
@@ -210,7 +244,9 @@ def calculate_interval_metrics(
         row["Port"] = port
         # Barrier kind and corrected thickness depend only on the boundary marks, so they are
         # written for every row: metric files of different models then agree in these columns.
-        barrier_bounds, barrier_sides = _barrier_interval_bounds(interval)
+        for attribute, column in WINDOW_COLUMNS.items():
+            row[column] = float(getattr(settings, attribute))
+        barrier_bounds, barrier_sides = _barrier_interval_bounds(interval, settings.clay_window_m, settings.barrier_window_m)
         for side in barrier_sides:
             row[BARRIER_KIND_COLUMNS[side.name]] = side.kind
             row[BARRIER_THICKNESS_COLUMNS[side.name]] = "" if side.internal is None else side.internal
@@ -223,7 +259,7 @@ def calculate_interval_metrics(
             continue
 
         interval_sets: dict[str, pd.DataFrame] = {}
-        for name, top_col, bot_col, top_delta, bot_delta in INTERVAL_DEFINITIONS:
+        for name, top_col, bot_col, top_delta, bot_delta in definitions:
             top = _to_float(interval.get(top_col))
             bot = _to_float(interval.get(bot_col))
             if top is None or bot is None:
@@ -257,10 +293,9 @@ def calculate_interval_metrics(
             interval_sets[f"{name}_Net"] = net_cells
             interval_sets[f"{name}_NonNet"] = _non_net_cells(interval_cells, net_cells)
 
-        _add_stress_contrasts(row, interval_sets, settings.shmin_column)
+        _add_stress_contrasts(row, interval_sets, settings.shmin_column, contrast_scopes)
 
         base_keys = set(row)
-        metric_suffixes = _metric_suffixes()
         for suffix in metric_suffixes:
             _add_base_metrics(row, interval_sets.get(suffix, cells.iloc[0:0]), suffix, settings, metric_keys)
         for name, attribute in FIXED_PROPERTY_CHANNELS:
@@ -292,7 +327,7 @@ def calculate_interval_metrics(
             "only cap-rock barriers next to the Total boundaries are used on that side. "
             "Place TB/BB points on the Sections page and save boundaries."
         )
-    warnings.extend(_barrier_warnings(barrier_notices))
+    warnings.extend(_barrier_warnings(barrier_notices, settings.clay_window_m))
     return IntervalMetricResult(rows=rows, warnings=warnings, barrier_notices=barrier_notices, net_warnings=net_warnings)
 
 
@@ -326,15 +361,20 @@ def _round_or_none(value: float | None) -> float | None:
     return round(value, 2) if value is not None and math.isfinite(value) else None
 
 
-def _barrier_interval_bounds(interval: pd.Series) -> tuple[dict[str, tuple[float, float] | None], list[BarrierSide]]:
+def _barrier_interval_bounds(
+    interval: pd.Series,
+    clay_window: float = INTERVAL_BUFFER_METERS,
+    barrier_window: float = INTERVAL_BUFFER_METERS,
+) -> tuple[dict[str, tuple[float, float] | None], list[BarrierSide]]:
     """Depth ranges of the barrier intervals for one sleeve (None = absent) and both barrier sides."""
     top_local = _to_float(interval.get("TVDSS_TOP_LOCAL"))
     bot_local = _to_float(interval.get("TVDSS_BOT_LOCAL"))
+    windows = {"clay_window": clay_window, "barrier_window": barrier_window}
     top = _barrier_side(
-        "TopBarrier", top_local, _to_float(interval.get(BARRIER_TOP_COLUMN)), _to_float(interval.get("TVDSS_TOP_TOTAL")), upward=True
+        "TopBarrier", top_local, _to_float(interval.get(BARRIER_TOP_COLUMN)), _to_float(interval.get("TVDSS_TOP_TOTAL")), upward=True, **windows
     )
     bot = _barrier_side(
-        "BotBarrier", bot_local, _to_float(interval.get(BARRIER_BOT_COLUMN)), _to_float(interval.get("TVDSS_BOT_TOTAL")), upward=False
+        "BotBarrier", bot_local, _to_float(interval.get(BARRIER_BOT_COLUMN)), _to_float(interval.get("TVDSS_BOT_TOTAL")), upward=False, **windows
     )
     local_range = None
     if top_local is not None and bot_local is not None and (top.span or bot.span):
@@ -353,12 +393,13 @@ def _barrier_side(
     total: float | None,
     *,
     upward: bool,
+    clay_window: float = INTERVAL_BUFFER_METERS,
+    barrier_window: float = INTERVAL_BUFFER_METERS,
 ) -> BarrierSide:
     side = "top" if upward else "bottom"
     outward = -1.0 if upward else 1.0  # depth direction away from Local
     tolerance = SEAL_ADJACENCY_METERS
     low, high = SEAL_BORDERLINE_WINDOW
-    buffer = INTERVAL_BUFFER_METERS
 
     def span_from(boundary: float, thickness: float) -> tuple[float, float]:
         far = boundary + outward * thickness
@@ -380,7 +421,7 @@ def _barrier_side(
             reason = "borderline"
         else:
             reason = "zero"
-        return BarrierSide(name, side, "seal", 0.0, span_from(local, buffer), gap, mark_thickness, reason)
+        return BarrierSide(name, side, "seal", 0.0, span_from(local, clay_window), gap, mark_thickness, reason)
     if has_mark:
         near_tolerance = mark_thickness <= high or (gap is not None and gap <= high)
         return BarrierSide(
@@ -388,7 +429,7 @@ def _barrier_side(
             side,
             "interlayer",
             mark_thickness,
-            span_from(local, min(mark_thickness, buffer)),
+            span_from(local, min(mark_thickness, barrier_window)),
             gap,
             mark_thickness,
             "borderline" if near_tolerance else None,
@@ -396,11 +437,11 @@ def _barrier_side(
     if total is not None:
         # Local is away from Total, but no internal barrier was marked: take the clay beyond Total.
         boundary = total
-        return BarrierSide(name, side, "seal_total", 0.0, span_from(boundary, buffer), gap, mark_thickness, "no_mark")
+        return BarrierSide(name, side, "seal_total", 0.0, span_from(boundary, clay_window), gap, mark_thickness, "no_mark")
     return BarrierSide(name, side, "none", None, None, gap, mark_thickness, "none")
 
 
-def _barrier_warnings(notices: list[dict]) -> list[str]:
+def _barrier_warnings(notices: list[dict], clay_window: float = INTERVAL_BUFFER_METERS) -> list[str]:
     by_reason: dict[str, list[dict]] = {}
     for notice in notices:
         by_reason.setdefault(notice["reason"], []).append(notice)
@@ -410,11 +451,11 @@ def _barrier_warnings(notices: list[dict]) -> list[str]:
         "none": "barrier side(s) have no Local/Total bounds; barrier metrics are empty",
         "no_mark": (
             f"barrier side(s) have Local more than {tolerance:g} m from Total but no internal barrier mark "
-            f"(> {tolerance:g} m); the clay beyond the Total boundary ({INTERVAL_BUFFER_METERS:g} m) was used"
+            f"(> {tolerance:g} m); the clay beyond the Total boundary ({clay_window:g} m) was used"
         ),
         "zeroed": (
             f"barrier side(s) have TB/BB marks thicker than {tolerance:g} m, but Local is within {tolerance:g} m "
-            f"of Total; the internal barrier thickness was set to 0 and the cap clay ({INTERVAL_BUFFER_METERS:g} m) used"
+            f"of Total; the internal barrier thickness was set to 0 and the cap clay ({clay_window:g} m) used"
         ),
         "borderline": f"barrier side(s) are near the {tolerance:g} m tolerance (distance {low:g}-{high:g} m)",
     }
@@ -429,7 +470,7 @@ def _barrier_warnings(notices: list[dict]) -> list[str]:
     if zero:
         warnings.append(
             f"{len(zero)} barrier side(s): Local is at the Total boundary (monolithic), internal barrier = 0, "
-            f"the cap clay ({INTERVAL_BUFFER_METERS:g} m) was used. List: see .txt."
+            f"the cap clay ({clay_window:g} m) was used. List: see .txt."
         )
     return warnings
 
@@ -441,7 +482,12 @@ def _format_barrier_notice(notice: dict) -> str:
     return f"{notice['well']}/{notice['port']} {notice['side']} (to Total {gap}, {mark}, {used})"
 
 
-def _add_stress_contrasts(row: dict, interval_sets: dict[str, pd.DataFrame], shmin_column: str | None) -> None:
+def _add_stress_contrasts(
+    row: dict,
+    interval_sets: dict[str, pd.DataFrame],
+    shmin_column: str | None,
+    scopes: tuple[tuple[str, str, str, str, bool], ...] | None = None,
+) -> None:
     """Shmin contrasts between the pay (Net cells) and the barriers (NonNet cells) above and below.
 
     SC_<scope>_Top|Bot_<variant> = stat(barrier NonNet) - stat(pay Net); > 0 means the barrier holds.
@@ -465,7 +511,7 @@ def _add_stress_contrasts(row: dict, interval_sets: dict[str, pd.DataFrame], shm
         result = statistics[name](values)
         return None if result == "" else float(result)
 
-    for scope, pay, top, bottom, with_strength in STRESS_CONTRAST_SCOPES:
+    for scope, pay, top, bottom, with_strength in scopes or stress_contrast_scopes():
         thickness = {
             "Top": _sum(_metric_heights(interval_sets[top])) if top in interval_sets else 0.0,
             "Bot": _sum(_metric_heights(interval_sets[bottom])) if bottom in interval_sets else 0.0,
@@ -512,6 +558,8 @@ def write_interval_metrics_description(
     metric_keys = _metric_key_set(settings.metric_keys)
     property_columns = [str(value) for value in settings.property_columns if str(value)]
     reservoir_values = sorted(str(value) for value in settings.reservoir_values)
+    clay_label = window_label(settings.clay_window_m)
+    barrier_label = window_label(settings.barrier_window_m)
     lines = [
         "ОПИСАНИЕ РАСЧЕТА ИНТЕРВАЛЬНЫХ МЕТРИК",
         "",
@@ -541,32 +589,34 @@ def write_interval_metrics_description(
         "ИНТЕРВАЛЫ",
         "Total: TVDSS_TOP_TOTAL ... TVDSS_BOT_TOTAL (весь пласт; раньше назывался Global).",
         "Local: TVDSS_TOP_LOCAL ... TVDSS_BOT_LOCAL (может совпадать с Total, если пласт монолитный).",
-        "Total_pm15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_BOT_TOTAL + 15 м.",
-        "TopTotal_m15m: от TVDSS_TOP_TOTAL - 15 м до TVDSS_TOP_TOTAL.",
-        "BotTotal_p15m: от TVDSS_BOT_TOTAL до TVDSS_BOT_TOTAL + 15 м.",
+        f"Total_pm{clay_label}m: от TVDSS_TOP_TOTAL - {clay_label} м до TVDSS_BOT_TOTAL + {clay_label} м.",
+        f"TopTotal_m{clay_label}m: от TVDSS_TOP_TOTAL - {clay_label} м до TVDSS_TOP_TOTAL.",
+        f"BotTotal_p{clay_label}m: от TVDSS_BOT_TOTAL до TVDSS_BOT_TOTAL + {clay_label} м.",
+        f"Окно глин (над/под пластом) = {clay_label} м, окно внутренних барьеров = {barrier_label} м (настройки на странице Metrics;",
+        "пишутся в колонки CLAY_WINDOW_M / BARRIER_WINDOW_M).",
         f"Барьеры сверху и снизу от Local. Метки корректируются вручную, поэтому расстояния до {SEAL_ADJACENCY_METERS:g} м",
         "считаются совпадением. Тип пишется в BARRIER_TOP_KIND / BARRIER_BOT_KIND, мощность внутреннего барьера",
         "(после допуска; 0 = внутреннего барьера нет) — в BARRIER_TOP_LOCAL / BARRIER_BOT_LOCAL:",
         f"  seal — граница Local не дальше {SEAL_ADJACENCY_METERS:g} м от границы Total (или за ней): пласт с этой стороны монолитный,",
-        "    мощность внутреннего барьера обнуляется (даже если метки TB/BB дают больше), метрики — по ближайшим 15 м глины-покрышки;",
+        f"    мощность внутреннего барьера обнуляется (даже если метки TB/BB дают больше), метрики — по ближайшим {clay_label} м глины-покрышки;",
         f"  interlayer — Local дальше {SEAL_ADJACENCY_METERS:g} м от Total, и метки дают внутренний барьер толще {SEAL_ADJACENCY_METERS:g} м:",
         "    мощность верхнего = TVDSS_TOP_LOCAL - TVDSS_TOP_BARRIER_LOCAL, нижнего = TVDSS_BOT_BARRIER_LOCAL - TVDSS_BOT_LOCAL;",
-        "    метрики — по ближайшим 15 м барьера (весь барьер, если он тоньше 15 м);",
+        f"    метрики — по ближайшим {barrier_label} м барьера (весь барьер, если он тоньше {barrier_label} м);",
         f"  seal_total — Local дальше {SEAL_ADJACENCY_METERS:g} м от Total, но внутреннего барьера по меткам нет: метки не согласованы,",
-        "    мощность барьера 0, метрики — по 15 м глины за границей Total; такие муфты выводятся для проверки;",
+        f"    мощность барьера 0, метрики — по {clay_label} м глины за границей Total; такие муфты выводятся для проверки;",
         "  none — нет границ Local (или Total и метки); метрики барьера пустые.",
-        "TopBarrier / BotBarrier: выбранные 15 м (или весь внутренний барьер) сверху / снизу.",
+        "TopBarrier / BotBarrier: окно глин (seal, seal_total) или окно барьера (interlayer) сверху / снизу.",
         "LocalBarriers: Local вместе с верхним и нижним барьером.",
         "Метрики считаются для всех интервалов, даже если интервалы совпадают (например, Local = Total).",
         "",
         "КОНТРАСТЫ НАПРЯЖЕНИЙ (по каналу Shmin)",
         "SC_<набор>_Top|Bot_<вариант> = статистика Shmin в барьере (NonNet) - статистика Shmin в пласте (Net); > 0 — барьер держит.",
         "Наборы: Local — пласт Local, барьеры TopBarrier / BotBarrier (при Local = Total это глины-покрышки);",
-        "        Total — пласт Total, глины TopTotal_m15m / BotTotal_p15m (если рвется весь Total).",
+        f"        Total — пласт Total, глины TopTotal_m{clay_label}m / BotTotal_p{clay_label}m (если рвется весь Total).",
         "Варианты (пласт / барьер): MinMax — min / max; MinStarMaxStar — min* / max*; MinStarMedian — min* / медиана;",
         "        MedianMedian — медиана / медиана. min*/max* — среднее нижних/верхних 10% после удаления выбросов (1.5 IQR).",
         "SC_<набор>_Asym_<вариант> = контраст снизу - контраст сверху; > 0 — трещина склонна расти вверх.",
-        "SCxH_Local_Top|Bot_<вариант> = контраст x мощность окна барьера (до 15 м) — прочность барьера.",
+        "SCxH_Local_Top|Bot_<вариант> = контраст x мощность окна барьера — прочность барьера.",
         "Если в пласте нет ячеек Net или в барьере нет ячеек NonNet, контраст пустой.",
         "Для каждого интервала также рассчитываются выборки Net и NonNet.",
         "У граничных ячеек учитывается только фактическая мощность пересечения с интервалом (h).",
@@ -619,7 +669,7 @@ def write_interval_metrics_description(
             "none — нет границ, метрики барьера пустые; no_mark — Local далеко от Total, но внутреннего барьера по меткам нет",
             "(взята глина за Total); zeroed — метки дают барьер, но Local у границы Total (мощность обнулена, взята покрышка);",
             f"borderline — расстояние до Total или мощность по меткам {SEAL_BORDERLINE_WINDOW[0]:g}-{SEAL_BORDERLINE_WINDOW[1]:g} м",
-            f"(у допуска {SEAL_ADJACENCY_METERS:g} м); zero — Local у границы Total, внутреннего барьера нет, взята покрышка 15 м.",
+            f"(у допуска {SEAL_ADJACENCY_METERS:g} м); zero — Local у границы Total, внутреннего барьера нет, взята покрышка {clay_label} м.",
             *(
                 [f"- {notice['reason']}: {_format_barrier_notice(notice)}" for notice in result.barrier_notices]
                 or ["Нет."]
@@ -693,6 +743,8 @@ def _interval_base_row(interval: pd.Series) -> dict:
 
 
 def _is_computed_metric_column(column: str) -> bool:
+    if column in WINDOW_COLUMNS.values():
+        return True
     if re.match(r"^SC(?:xH)?_(?:Local|Total)_(?:Top|Bot|Asym)_[A-Za-z]+$", column):
         return True
     if re.match(r"^(Thickness|NetThickness|NTG|PORO|PERM|KH|PHIH)_(Global|Local)(?:_Net)?$", column):
@@ -701,7 +753,8 @@ def _is_computed_metric_column(column: str) -> bool:
         return True
     if re.match(r"^(CellCount|CollectorCellCount)_(Global|Local)(?:_Net)?$", column):
         return True
-    interval_names = "|".join(re.escape(name) for name in ALL_INTERVAL_NAMES + LEGACY_INTERVAL_NAMES)
+    fixed_names = ("Total", "Local") + BARRIER_INTERVAL_NAMES + LEGACY_INTERVAL_NAMES
+    interval_names = "|".join([re.escape(name) for name in fixed_names] + list(WINDOW_INTERVAL_PATTERNS))
     suffix = rf"(?:{interval_names})(?:_(?:Net|NonNet))?"
     if re.match(rf"^(Thickness|NetThickness|NTG|PORO|PERM|KH|PHIH)_{suffix}$", column):
         return True
@@ -1044,9 +1097,9 @@ def _non_net_cells(cells: pd.DataFrame, net_cells: pd.DataFrame) -> pd.DataFrame
     return cells.loc[~cells.index.isin(net_cells.index)]
 
 
-def _metric_suffixes() -> tuple[str, ...]:
+def _metric_suffixes(definitions=INTERVAL_DEFINITIONS) -> tuple[str, ...]:
     values: list[str] = []
-    for name in ALL_INTERVAL_NAMES:
+    for name in tuple(definition[0] for definition in definitions) + BARRIER_INTERVAL_NAMES:
         values.extend([name, f"{name}_Net", f"{name}_NonNet"])
     return tuple(values)
 

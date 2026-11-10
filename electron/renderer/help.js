@@ -134,6 +134,8 @@ const panelHelp = {
         <li><b>Intervals table</b> — таблица интервалов, обычно это frac-list с границами, сохранёнными на экране Sections. Обязательные колонки:
           <code>Well</code>, <code>Port</code>, <code>TVDSS_TOP_TOTAL</code>, <code>TVDSS_BOT_TOTAL</code>, <code>TVDSS_TOP_LOCAL</code>, <code>TVDSS_BOT_LOCAL</code>.</li>
         <li><b>Output metrics XLSX</b> — имя файла результата; сохраняется в папку таблицы интервалов. По умолчанию <code>&lt;имя интервалов&gt;_metrics.xlsx</code>.</li>
+        <li><b>Clay window, m</b> (окно глин) — сколько метров брать из больших глин над и под пластом: интервалы TopTotal / BotTotal / Total_pm и барьеры-покрышки (seal, seal_total). По умолчанию 15 м; уменьшите (например, до 5 м), если модель плохо построена выше и ниже целевого интервала.</li>
+        <li><b>Barrier window, m</b> (окно барьеров) — сколько метров брать из внутреннего барьера (interlayer); если барьер тоньше — берётся весь. По умолчанию 15 м.</li>
       </ul>
       <p>Ячейки сопоставляются с интервалом по <code>Well</code> + <code>Port</code>; если не нашлись — по X/Y (с точностью 0.001 м). Названия «Скважина», «Муфта», «Порт», «Стадия» распознаются автоматически.</p>
       <p>Рядом с результатом пишется файл <code>.txt</code> с описанием расчёта: какие каналы выбраны, формулы и все предупреждения.</p>
@@ -189,19 +191,20 @@ const panelHelp = {
         <tr><th>Суффикс</th><th>От</th><th>До</th></tr>
         <tr><td><code>Total</code></td><td>TVDSS_TOP_TOTAL</td><td>TVDSS_BOT_TOTAL</td></tr>
         <tr><td><code>Local</code></td><td>TVDSS_TOP_LOCAL</td><td>TVDSS_BOT_LOCAL</td></tr>
-        <tr><td><code>Total_pm15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
-        <tr><td><code>TopTotal_m15m</code></td><td>TVDSS_TOP_TOTAL − 15 м</td><td>TVDSS_TOP_TOTAL</td></tr>
-        <tr><td><code>BotTotal_p15m</code></td><td>TVDSS_BOT_TOTAL</td><td>TVDSS_BOT_TOTAL + 15 м</td></tr>
-        <tr><td><code>TopBarrier</code></td><td colspan="2">ближайшие 15 м барьера над Local (см. ниже)</td></tr>
-        <tr><td><code>BotBarrier</code></td><td colspan="2">ближайшие 15 м барьера под Local</td></tr>
+        <tr><td><code>Total_pm&lt;N&gt;m</code></td><td>TVDSS_TOP_TOTAL − N</td><td>TVDSS_BOT_TOTAL + N</td></tr>
+        <tr><td><code>TopTotal_m&lt;N&gt;m</code></td><td>TVDSS_TOP_TOTAL − N</td><td>TVDSS_TOP_TOTAL</td></tr>
+        <tr><td><code>BotTotal_p&lt;N&gt;m</code></td><td>TVDSS_BOT_TOTAL</td><td>TVDSS_BOT_TOTAL + N</td></tr>
+        <tr><td><code>TopBarrier</code></td><td colspan="2">окно барьера над Local (см. ниже)</td></tr>
+        <tr><td><code>BotBarrier</code></td><td colspan="2">окно барьера под Local</td></tr>
         <tr><td><code>LocalBarriers</code></td><td colspan="2">Local вместе с TopBarrier и BotBarrier</td></tr>
       </table>
-      <p><b>Total</b> (раньше назывался Global) — пласт целиком, <b>Local</b> — пропласток у муфты (точки TT/BT и TL/BL на экране Sections). Если внутренних барьеров нет и пласт монолитный, Local совпадает с Total. Три интервала по 15 м — окружение пласта: всё вместе, кровля и подошва (глины-покрышки).</p>
+      <p><b>N — окно глин</b> (поле «Окно глин над/под пластом» в карточке Inputs, по умолчанию 15 м): сколько метров берётся из больших глин над и под пластом. Имя интервала содержит окно, например при 5 м — <code>TopTotal_m5m</code>; окна пишутся в колонки <code>CLAY_WINDOW_M</code> / <code>BARRIER_WINDOW_M</code>, поэтому при объединении файлов с разными окнами это будет видно. Уменьшайте окно, если модель плохо построена выше и ниже целевого интервала. <b>Окно барьеров</b> (по умолчанию 15 м) — сколько берётся из внутреннего барьера (interlayer).</p>
+      <p><b>Total</b> (раньше назывался Global) — пласт целиком, <b>Local</b> — пропласток у муфты (точки TT/BT и TL/BL на экране Sections). Если внутренних барьеров нет и пласт монолитный, Local совпадает с Total. Три интервала с окном глин N м — окружение пласта: всё вместе, кровля и подошва (глины-покрышки).</p>
       <p>Метки ставятся и корректируются вручную, поэтому расстояния до <b>1 м</b> считаются совпадением — и между Local и Total, и между Local и метками барьеров TB/BB. Для каждой стороны Local (тип — в <code>BARRIER_TOP_KIND</code> / <code>BARRIER_BOT_KIND</code>, мощность внутреннего барьера после допуска — в <code>BARRIER_TOP_LOCAL</code> / <code>BARRIER_BOT_LOCAL</code>):</p>
       <ul>
-        <li><b>seal</b> — Local не дальше 1 м от Total: пласт с этой стороны монолитный, мощность внутреннего барьера = 0 (даже если метки TB/BB дают больше), метрики — по ближайшим 15 м глины-покрышки.</li>
-        <li><b>interlayer</b> — Local дальше 1 м от Total и по меткам есть внутренний барьер толще 1 м: мощность = TVDSS_TOP_LOCAL − TVDSS_TOP_BARRIER_LOCAL (снизу TVDSS_BOT_BARRIER_LOCAL − TVDSS_BOT_LOCAL), метрики — по ближайшим 15 м барьера (по всему барьеру, если он тоньше).</li>
-        <li><b>seal_total</b> — Local дальше 1 м от Total, но барьера по меткам нет: метки не согласованы, мощность = 0, метрики — по 15 м глины за границей Total. Такие муфты выводятся для проверки.</li>
+        <li><b>seal</b> — Local не дальше 1 м от Total: пласт с этой стороны монолитный, мощность внутреннего барьера = 0 (даже если метки TB/BB дают больше), метрики — по ближайшему окну глин (N м) глины-покрышки.</li>
+        <li><b>interlayer</b> — Local дальше 1 м от Total и по меткам есть внутренний барьер толще 1 м: мощность = TVDSS_TOP_LOCAL − TVDSS_TOP_BARRIER_LOCAL (снизу TVDSS_BOT_BARRIER_LOCAL − TVDSS_BOT_LOCAL), метрики — по ближайшему окну барьеров (по всему барьеру, если он тоньше).</li>
+        <li><b>seal_total</b> — Local дальше 1 м от Total, но барьера по меткам нет: метки не согласованы, мощность = 0, метрики — по окну глин (N м) за границей Total. Такие муфты выводятся для проверки.</li>
         <li><b>none</b> — нет границ Local; метрики барьера пустые.</li>
       </ul>
       <p>Метрики считаются для всех интервалов, даже если они совпадают (например, Local = Total — тогда и метрики одинаковые).</p>
@@ -211,7 +214,7 @@ const panelHelp = {
         <li><b>Наборы:</b> <code>Local</code> — пласт Local и барьеры TopBarrier / BotBarrier (при Local = Total это глины-покрышки); <code>Total</code> — весь пласт Total и глины TopTotal_m15m / BotTotal_p15m (если рвётся весь Total).</li>
         <li><b>Варианты (пласт / барьер):</b> <code>MinMax</code> — min / max; <code>MinStarMaxStar</code> — min* / max*; <code>MinStarMedian</code> — min* / медиана; <code>MedianMedian</code> — медиана / медиана.</li>
         <li><code>SC_&lt;набор&gt;_Asym_&lt;вариант&gt;</code> = контраст снизу − контраст сверху; больше нуля — трещина склонна расти вверх.</li>
-        <li><code>SCxH_Local_Top|Bot_&lt;вариант&gt;</code> = контраст × мощность окна барьера (до 15 м) — «прочность» барьера.</li>
+        <li><code>SCxH_Local_Top|Bot_&lt;вариант&gt;</code> = контраст × мощность окна барьера — «прочность» барьера.</li>
       </ul>
       <p>Варианты с max чувствительны к отдельным ячейкам с высоким напряжением; для кластеризации устойчивее варианты с медианой барьера. Shmin во всех моделях должен быть в одних единицах (атм или МПа) — при объединении файлов это проверяется.</p>
       <p>После расчёта внизу страницы красным выводятся муфты для проверки: <b>метка без барьера</b> (seal_total), <b>барьер обнулён</b> (метки дают барьер, но Local у Total), <b>у границы допуска</b> (расстояние 0.5–3 м) и <b>монолит</b> (Local у Total, внутреннего барьера нет). Полный список — в <code>.txt</code> рядом с файлом метрик.</p>

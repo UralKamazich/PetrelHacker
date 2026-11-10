@@ -88,13 +88,16 @@ Every panel has a `?` button with a detailed guide (`electron/renderer/help.js`)
 ## Metrics
 
 Intervals per sleeve (from the boundaries table): `Total` (formerly `Global`),
-`Local`, `Total_pm15m`, `TopTotal_m15m`, `BotTotal_p15m`, and barrier
-intervals `TopBarrier`, `BotBarrier`, `LocalBarriers`. Boundaries are corrected
+`Local`, `Total_pm<N>m`, `TopTotal_m<N>m`, `BotTotal_p<N>m`, and barrier
+intervals `TopBarrier`, `BotBarrier`, `LocalBarriers`. `N` is the clay window
+(Metrics page, default 15 m) taken from the big clays above/below the reservoir;
+the barrier window (default 15 m) limits internal barriers. Both are written to
+`CLAY_WINDOW_M` / `BARRIER_WINDOW_M`. Boundaries are corrected
 by hand, so distances up to 1 m count as coinciding (Local vs Total and Local
 vs the TB/BB marks). Barrier kind per side (`BARRIER_TOP_KIND` /
 `BARRIER_BOT_KIND`): `seal` = Local within 1 m of Total, internal barrier
-thickness zeroed, metrics on the nearest 15 m of cap clay; `interlayer` = TB/BB
-marks give an internal barrier > 1 m, metrics on its nearest 15 m;
+thickness zeroed, metrics on the clay window of cap clay; `interlayer` = TB/BB
+marks give an internal barrier > 1 m, metrics on its nearest barrier window;
 `seal_total` = Local away from Total but no barrier mark, the clay beyond Total
 is used and the sleeve is reported; `none` = no Local bounds, empty metrics.
 `BARRIER_TOP_LOCAL` / `BARRIER_BOT_LOCAL` in the metrics file hold the internal
@@ -103,7 +106,7 @@ intervals coincide. Stress contrasts (Shmin): `SC_<Local|Total>_<Top|Bot>_<varia
 = barrier NonNet statistic − pay Net statistic for the variants `MinMax`,
 `MinStarMaxStar`, `MinStarMedian`, `MedianMedian`; `SC_*_Asym_*` = bottom − top;
 `SCxH_Local_*` = contrast × barrier window thickness. The `Total` set compares
-Total with the clays `TopTotal_m15m` / `BotTotal_p15m`. Merge warns when Shmin
+Total with the clays `TopTotal_m<N>m` / `BotTotal_p<N>m`. Merge warns when Shmin
 is in different units in the files (MPa vs atm). Each interval also as `_Net` and
 `_NonNet` (net by lithology codes, else NTG > 0, else PORO > 0). Column names:
 `<Channel>_<metric>_<interval>[_Net|_NonNet]`. Formulas are listed in the

@@ -125,7 +125,9 @@ def test_calculate_interval_metrics_warns_for_missing_cells() -> None:
             "TVDSS_BOT_TOTAL": 110.0,
             "TVDSS_TOP_LOCAL": 100.0,
             "TVDSS_BOT_LOCAL": 110.0,
-            # Barrier columns depend only on the boundary marks and are written for every row.
+            # Windows and barrier columns depend only on the settings and boundary marks.
+            "CLAY_WINDOW_M": 15.0,
+            "BARRIER_WINDOW_M": 15.0,
             "BARRIER_TOP_KIND": "seal",
             "BARRIER_TOP_LOCAL": 0.0,
             "BARRIER_BOT_KIND": "seal",
@@ -1011,3 +1013,71 @@ def test_barrier_thickness_is_written_for_rows_of_other_models() -> None:
     assert other["BARRIER_BOT_LOCAL"] == 10.0
     assert "Thickness_Local" not in other
     assert all(notice["well"] == "A" for notice in result.barrier_notices)
+
+
+def _window_row(top_barrier: object, bot_barrier: object, *, clay: float, barrier: float, total_top: float = 100.0) -> tuple[dict, list[str]]:
+    intervals = _barrier_intervals(top_barrier, bot_barrier)
+    intervals["TVDSS_TOP_TOTAL"] = total_top
+    result = calculate_interval_metrics(
+        _barrier_cells(),
+        intervals,
+        IntervalMetricSettings(
+            ntg_column="NTG", poro_column=None, shmin_column="Shm", clay_window_m=clay, barrier_window_m=barrier
+        ),
+    )
+    return result.rows[0], result.warnings
+
+
+def test_clay_window_changes_clay_intervals_and_cap_rock_barriers() -> None:
+    # Top: Local at Total (seal) -> clay window; bottom: 10 m interlayer -> barrier window (15 m keeps all 10 m).
+    row, _warnings = _window_row(105.0, 130.0, clay=5.0, barrier=15.0, total_top=105.0)
+
+    assert row["CLAY_WINDOW_M"] == 5.0
+    assert row["BARRIER_WINDOW_M"] == 15.0
+    assert row["Thickness_TopTotal_m5m"] == 5.0
+    assert row["Thickness_BotTotal_p5m"] == 5.0
+    assert row["Thickness_Total_pm5m"] == 35.0
+    assert "Thickness_TopTotal_m15m" not in row
+    assert row["BARRIER_TOP_KIND"] == "seal"
+    assert row["Thickness_TopBarrier"] == 5.0
+    assert row["Shmin_min_TopBarrier"] == 100.0
+    assert row["BARRIER_BOT_KIND"] == "interlayer"
+    assert row["Thickness_BotBarrier"] == 10.0
+    assert row["SC_Total_Top_MinMax"] == 100.0 - 105.0
+
+
+def test_barrier_window_limits_internal_barriers_only() -> None:
+    # Top: 10 m interlayer limited to 3 m; bottom: Local away from Total, no mark -> clay window beyond Total.
+    row, _warnings = _window_row(95.0, 120.0, clay=5.0, barrier=3.0)
+
+    assert row["BARRIER_TOP_KIND"] == "interlayer"
+    assert row["BARRIER_TOP_LOCAL"] == 10.0
+    assert row["Thickness_TopBarrier"] == 3.0
+    assert row["SCxH_Local_Top_MinMax"] == row["SC_Local_Top_MinMax"] * 3.0
+    assert row["BARRIER_BOT_KIND"] == "seal_total"
+    assert row["Thickness_BotBarrier"] == 5.0
+    assert row["Shmin_min_BotBarrier"] == 130.0
+
+
+def test_windows_must_be_positive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="Clay window"):
+        calculate_interval_metrics(_barrier_cells(), _barrier_intervals(95.0, 130.0), IntervalMetricSettings(clay_window_m=0.0))
+    with pytest.raises(ValueError, match="Barrier window"):
+        calculate_interval_metrics(_barrier_cells(), _barrier_intervals(95.0, 130.0), IntervalMetricSettings(barrier_window_m=-1.0))
+
+
+def test_metric_columns_of_other_windows_are_dropped_from_input() -> None:
+    intervals = _barrier_intervals(95.0, 130.0)
+    intervals["Thickness_TopTotal_m15m"] = 999.0
+    intervals["CLAY_WINDOW_M"] = 15.0
+
+    result = calculate_interval_metrics(
+        _barrier_cells(), intervals, IntervalMetricSettings(ntg_column="NTG", poro_column=None, clay_window_m=5.0)
+    )
+
+    row = result.rows[0]
+    assert "Thickness_TopTotal_m15m" not in row
+    assert row["Thickness_TopTotal_m5m"] == 5.0
+    assert row["CLAY_WINDOW_M"] == 5.0
